@@ -106,6 +106,10 @@
 10. **UI 风格**：手写 macOS 风 CSS——系统字体栈、系统强调色 / focus 光晕、macOS 控件度量；macOS 上用 Tauri `windowEffects` 提供原生毛玻璃，Win/Linux 退化为不透明背景。
 11. **代码组织**：新 Tauri 工程与现有 Swift 代码**暂时并存**于根目录；待 Tauri 功能对齐并验证后再删除 Swift 代码（`Package.swift` / `Sources/` / `Tests/`）。
 
+## 反馈意见（计划评审阶段补充）
+
+- **编译性能**：先按计划实现，**完成后再专门分析编译性能**，依据实测再决定是否引入更激进的提速措施（如 `ureq` + `std::thread` 替代 `tokio` + `reqwest`、`sccache` / `mold`、精简 features 等）。详见计划 §21。
+
 ## 参考资料
 
 - 当前 Swift 版需求与计划：`docs/specs/swift-native.md`、`docs/plans/swift-native.md`

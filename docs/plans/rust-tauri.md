@@ -473,3 +473,15 @@ AskHuman 命令使用细节：
 - **裸二进制（无 .app bundle）能否正常起 WebView/获焦** → 原 Rust 版已用 `--no-bundle` 装到 `~/.local/bin` 验证可行；macOS 拷贝后需 `codesign` 重签名。
 - **Linux WebKitGTK 依赖** → 文档注明系统依赖；CI 安装对应库。
 - **窗口尺寸记忆与多显示器** → 仅记尺寸不记位置（与当前 Swift 版一致，窗口 `center`）。
+
+## 二十一、编译性能分析（开发完成后进行）
+
+> 用户反馈：先按本计划实现，**完成后再专门分析编译性能**，根据实测决定是否引入下列优化（现阶段不实施）。
+
+- **现状预期**：已砍掉重依赖（无 teloxide / rmcp / rodio / schemars / env_logger），依赖树远小于原 Rust 版；dev 走 `cargo tauri dev`（增量）+ Vite HMR（改前端不重编 Rust）；`install.sh` 的 release **不启用 LTO**。Tauri / wry 的首次冷编译（数分钟）属固有成本，无法消除。
+- **完成后评测**：测量并记录「冷编译 / 增量编译（仅改 Rust）/ 仅改前端 / `install.sh` release」各自耗时（标注机器配置），并在本节补充数据。
+- **候选优化（按需再引入）**：
+  - 用 `ureq`（阻塞 HTTP）+ `std::thread` 替代 `tokio` + `reqwest`，去掉两大异步依赖（Telegram 长轮询改阻塞线程实现）
+  - 本地构建缓存 `sccache`；更快链接器（macOS `lld` / Linux `mold`）
+  - 精简 `tauri` / `reqwest` 的 features；调优 `profile.dev` 与 release（无 LTO）参数
+- **产出**：实测数据 + 最终采纳的优化项。
