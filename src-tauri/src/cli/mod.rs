@@ -25,8 +25,7 @@ pub fn dispatch() {
             exit(0);
         }
         "--settings" => {
-            crate::app::run_window("settings");
-            exit(0);
+            crate::app::run_settings(crate::config::AppConfig::load());
         }
         first if first.starts_with('-') => {
             eprintln!("错误: 未知选项 {}\n", first);
@@ -34,10 +33,13 @@ pub fn dispatch() {
             exit(1);
         }
         _ => match args::parse_ask(&argv[1..]) {
-            Ok(_parsed) => {
-                // Step 1：先打通窗口，结果流程在后续步骤实现。
-                crate::app::run_window("popup");
-                exit(0);
+            Ok(parsed) => {
+                let request = crate::models::AskRequest::new(
+                    parsed.message,
+                    parsed.options,
+                    parsed.is_markdown,
+                );
+                crate::app::run_ask(request, crate::config::AppConfig::load());
             }
             Err(e) => {
                 eprintln!("错误: {}\n", e);

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import PopupView from "./views/PopupView.vue";
 
 // 视图模式由 Rust 侧通过窗口 URL 的查询参数注入：?view=popup | settings
 const view = computed(() => {
@@ -9,11 +10,11 @@ const view = computed(() => {
 </script>
 
 <template>
-  <main class="app-root">
+  <PopupView v-if="view === 'popup'" />
+  <main v-else class="app-root">
     <section class="placeholder">
-      <h1>HumanInLoop</h1>
-      <p>视图模式：{{ view }}</p>
-      <p class="hint">脚手架就绪（Step 1）。后续步骤接入弹窗与设置界面。</p>
+      <h1>HumanInLoop 设置</h1>
+      <p class="hint">设置界面将在 Step 5 实现。</p>
     </section>
   </main>
 </template>
