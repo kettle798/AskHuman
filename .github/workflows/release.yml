@@ -136,10 +136,26 @@ jobs:
           NPM_TAG="latest"
           case "$VERSION" in *-*) NPM_TAG="next";; esac
           echo "publishing with dist-tag: $NPM_TAG"
+
+          # 幂等发布：已存在的版本跳过（便于失败后重试，不会因 E409 中断）；
+          # 每个之间留间隔，错开节奏以规避 npm 反垃圾的频率检测。
+          publish_one() {
+            local dir="$1" name existing
+            name=$(node -p "require('./$dir/package.json').name")
+            existing=$(npm view "$name@$VERSION" version 2>/dev/null || true)
+            if [ -n "$existing" ]; then
+              echo "skip $name@$VERSION (registry 已存在)"
+              return 0
+            fi
+            (cd "$dir" && npm publish --access public --tag "$NPM_TAG")
+            sleep 10
+          }
+
+          # 先发平台子包，主包最后发（主包 optionalDependencies 指向子包，需子包先就位）。
           for subdir in darwin-arm64 darwin-x64 win32-x64 linux-x64; do
-            (cd "packaging/npm/platforms/$subdir" && npm publish --access public --tag "$NPM_TAG")
+            publish_one "packaging/npm/platforms/$subdir"
           done
-          (cd packaging/npm/humaninloop && npm publish --access public --tag "$NPM_TAG")
+          publish_one "packaging/npm/humaninloop"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
