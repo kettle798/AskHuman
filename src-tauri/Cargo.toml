@@ -1,0 +1,40 @@
+[package]
+name = "humaninloop"
+version = "0.1.0"
+description = "HumanInLoop - Human-in-the-loop interaction tool (Rust + Tauri)"
+authors = ["Naituw"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77.2"
+default-run = "AskHuman"
+
+[[bin]]
+name = "AskHuman"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2" }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+dirs = "5"
+base64 = "0.22"
+anyhow = "1"
+thiserror = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+# 较快的 release 配置（不启用 LTO，避免原 Rust 版的慢链接）。
+# 编译性能将在功能完成后专门评测（见 docs/plans/rust-tauri.md §21）。
+[profile.release]
+opt-level = "z"
+codegen-units = 16
+incremental = true
+strip = true
+panic = "abort"

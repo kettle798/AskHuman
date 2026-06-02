@@ -1,0 +1,59 @@
+/* macOS 风设计 token：颜色 / 字体 / 间距 / 圆角，深浅色两套 */
+:root {
+  --font-sans: -apple-system, "SF Pro Text", system-ui, "Segoe UI",
+    "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  --accent: #0a84ff;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+}
+
+/* 浅色 */
+:root,
+.theme-light {
+  --bg: #ffffff;
+  --bg-elevated: rgba(0, 0, 0, 0.03);
+  --card-bg: rgba(0, 0, 0, 0.035);
+  --border: rgba(0, 0, 0, 0.14);
+  --text-primary: #1d1d1f;
+  --text-secondary: rgba(0, 0, 0, 0.55);
+  --text-tertiary: rgba(0, 0, 0, 0.38);
+  --control-bg: #ffffff;
+  --control-border: rgba(0, 0, 0, 0.2);
+}
+
+/* 深色 */
+.theme-dark {
+  --bg: #1e1e1e;
+  --bg-elevated: rgba(255, 255, 255, 0.06);
+  --card-bg: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.16);
+  --text-primary: #e8e8ea;
+  --text-secondary: rgba(255, 255, 255, 0.62);
+  --text-tertiary: rgba(255, 255, 255, 0.4);
+  --control-bg: rgba(255, 255, 255, 0.08);
+  --control-border: rgba(255, 255, 255, 0.22);
+}
+
+/* 跟随系统：在未显式指定 light/dark 类时用媒体查询兜底 */
+@media (prefers-color-scheme: dark) {
+  :root:not(.theme-light) {
+    --bg: #1e1e1e;
+    --bg-elevated: rgba(255, 255, 255, 0.06);
+    --card-bg: rgba(255, 255, 255, 0.06);
+    --border: rgba(255, 255, 255, 0.16);
+    --text-primary: #e8e8ea;
+    --text-secondary: rgba(255, 255, 255, 0.62);
+    --text-tertiary: rgba(255, 255, 255, 0.4);
+    --control-bg: rgba(255, 255, 255, 0.08);
+    --control-border: rgba(255, 255, 255, 0.22);
+  }
+}

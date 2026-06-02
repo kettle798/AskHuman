@@ -1,4 +1,15 @@
+# Swift
 .build/
 .swiftpm/
 *.xcodeproj
+
+# Node / 前端
+node_modules/
+dist/
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# 杂项
 .DS_Store
