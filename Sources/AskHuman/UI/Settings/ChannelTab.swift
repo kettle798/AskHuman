@@ -40,6 +40,7 @@ struct ChannelTab: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(6)
         }
     }
@@ -72,6 +73,7 @@ struct ChannelTab: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(6)
         }
     }
