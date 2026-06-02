@@ -44,7 +44,7 @@ impl Channel for TelegramChannel {
     }
 }
 
-async fn run_session(
+pub(crate) async fn run_session(
     request: AskRequest,
     config: TelegramChannelConfig,
     cancelled: Arc<AtomicBool>,

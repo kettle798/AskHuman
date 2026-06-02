@@ -10,6 +10,20 @@
 
 ## 安装
 
+### 方式一：npm（推荐）
+
+```bash
+npm i -g humaninloop      # 全局安装，得到 AskHuman 命令
+```
+
+只会下载与当前平台匹配的一个二进制（mac arm64/x64、win x64、linux x64）。
+
+### 方式二：GitHub Release
+
+从 [Releases](https://github.com/Naituw/HumanInLoop/releases) 下载对应平台的 `AskHuman-<平台>-vX.Y.Z.(tar.gz|zip)`，解压后把 `AskHuman` 放入 PATH。
+
+### 方式三：从源码构建
+
 需要 [Rust 工具链](https://rustup.rs)、[pnpm](https://pnpm.io)（Node 20+）。
 
 ```bash
@@ -22,9 +36,24 @@
 ./install-windows.ps1   # 构建并安装到 %LOCALAPPDATA%\Programs\AskHuman
 ```
 
-> Linux 运行需系统具备 WebKitGTK（如 `libwebkit2gtk-4.1`）。
+> Linux 运行 GUI 弹窗需系统具备 WebKitGTK（如 `libwebkit2gtk-4.1`）。缺失且配置了 Telegram 时会自动改走 Telegram；两者皆不可用则以退出码 3 提示降级。
 
-预编译产物也可从 GitHub Actions 的构建产物下载（mac arm64/x64、win x64、linux x64）。
+## 作为依赖（程序集成）
+
+把 `humaninloop` 加入项目依赖（`npm i humaninloop`），在代码里解析二进制路径并调用——`npm install` 时会自动装上当前平台的二进制：
+
+```js
+import { getBinaryPath, isAvailable } from "humaninloop";
+import { spawnSync } from "node:child_process";
+
+if (isAvailable()) {
+  const r = spawnSync(getBinaryPath(), ["要继续吗？", "-o", "继续", "-o", "停止"], { encoding: "utf8" });
+  if (r.status === 3) { /* 无任何可用 channel：降级，不阻塞流程 */ }
+  else if (r.status === 0) { /* 解析 r.stdout 的结果区块 */ }
+}
+```
+
+`getBinaryPath()` 解析顺序：环境变量 `HUMANINLOOP_BINARY` → 平台子包 → 系统 `PATH`。
 
 ## 使用
 
@@ -65,7 +94,7 @@ AskHuman --version
 用户取消了操作，你必须重新询问用户是否确定要取消，直到用户给出明确答复
 ```
 
-退出码：成功 / 取消为 0，异常为 1。所有日志走 stderr，stdout 仅含结果区块。
+退出码：成功 / 取消为 0；无任何可用 channel（本地弹窗打不开且未配置 Telegram）为 3；其他异常为 1。所有日志走 stderr，stdout 仅含结果区块。
 
 ## 设置界面
 
@@ -80,7 +109,7 @@ AskHuman --version
 - **本地弹窗**：默认启用。支持预定义选项、自由文本、图片（粘贴 / 拖拽 / 选择文件）。顶部导航栏可切换置顶、主题、打开设置。
 - **Telegram**：填写 Bot Token 与数字 Chat ID 后启用。发送提问（选项为 inline 按钮）+ 接收文字回复与「发送」操作；不接收图片。
 
-多个 Channel 同时启用时，哪一端先「发送 / 取消」就采用哪一端的结果，其余自动收尾。
+多个 Channel 同时启用时，哪一端先「发送 / 取消」就采用哪一端的结果，其余自动收尾。当本地弹窗所在环境无法显示 GUI（如 Linux 缺 WebKitGTK、无显示环境）时：若已配置 Telegram，会自动改走 Telegram 并在 stderr 说明原因；若无其他可用 Channel，则以退出码 3 告知调用方降级。
 
 ## Cursor Hook
 
@@ -99,3 +128,20 @@ cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单元测试
 ```
 
 项目概览见 `docs/overview.md`。
+
+## 发布
+
+版本号以 `scripts/bump-version.mjs` 统一同步（`Cargo.toml` / `tauri.conf.json` / 根 `package.json` / npm 主包与平台子包）：
+
+```bash
+node scripts/bump-version.mjs 0.2.0    # 写入各处版本
+git commit -am "release: v0.2.0"
+git tag v0.2.0
+git push --tags                        # 触发 .github/workflows/release.yml
+```
+
+`release.yml` 会编译 4 平台二进制 → 发布 npm（主包 + 平台子包）→ 创建 GitHub Release。
+
+> 前置条件：在仓库 Settings → Secrets 配置 `NPM_TOKEN`（npmjs automation token）。预发布版本（如 `0.2.0-rc.1`）会以 npm dist-tag `next` 发布并标记为 GitHub pre-release。
+
+发布架构与 channel 降级设计见 `docs/plans/release-and-channel-degradation.md`。

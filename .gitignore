@@ -11,5 +11,8 @@ dist/
 src-tauri/target/
 src-tauri/gen/schemas/
 
+# npm 平台子包二进制（由 CI 在发布时注入，不提交到仓库）
+packaging/npm/platforms/*/bin/
+
 # 杂项
 .DS_Store

@@ -1,0 +1,144 @@
+name: release
+
+# 由 tag 触发：编译 4 平台二进制 → 发布 npm（主包 + 平台子包）→ 创建 GitHub Release。
+# 前置条件：仓库 Secrets 配置 NPM_TOKEN（npmjs automation token）。
+# 发版流程：node scripts/bump-version.mjs X.Y.Z → 提交 → git tag vX.Y.Z → git push --tags
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system deps (WebKitGTK)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm build
+
+      - run: cargo build --release --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/AskHuman
+            src-tauri/target/${{ matrix.target }}/release/AskHuman.exe
+
+  publish:
+    name: publish npm + GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble platform packages and release assets
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./packaging/npm/humaninloop/package.json').version")
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "$VERSION" != "$TAG" ]; then
+            echo "::error::tag ($TAG) 与主包版本 ($VERSION) 不一致，请先运行 scripts/bump-version.mjs"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          mkdir -p release-assets
+          declare -A MAP=(
+            [aarch64-apple-darwin]="darwin-arm64 AskHuman"
+            [x86_64-apple-darwin]="darwin-x64 AskHuman"
+            [x86_64-pc-windows-msvc]="win32-x64 AskHuman.exe"
+            [x86_64-unknown-linux-gnu]="linux-x64 AskHuman"
+          )
+          for target in "${!MAP[@]}"; do
+            set -- ${MAP[$target]}
+            subdir=$1; exe=$2
+            src="artifacts/binary-$target/$exe"
+            dest="packaging/npm/platforms/$subdir/bin"
+            mkdir -p "$dest"
+            cp "$src" "$dest/$exe"
+            chmod +x "$dest/$exe"
+            if [ "$exe" = "AskHuman.exe" ]; then
+              (cd "$dest" && zip -q "$GITHUB_WORKSPACE/release-assets/AskHuman-$target-v$VERSION.zip" "$exe")
+            else
+              tar -czf "release-assets/AskHuman-$target-v$VERSION.tar.gz" -C "$dest" "$exe"
+            fi
+          done
+          ls -la release-assets
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          NPM_TAG="latest"
+          case "$VERSION" in *-*) NPM_TAG="next";; esac
+          echo "publishing with dist-tag: $NPM_TAG"
+          for subdir in darwin-arm64 darwin-x64 win32-x64 linux-x64; do
+            (cd "packaging/npm/platforms/$subdir" && npm publish --access public --tag "$NPM_TAG")
+          done
+          (cd packaging/npm/humaninloop && npm publish --access public --tag "$NPM_TAG")
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

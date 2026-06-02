@@ -1,4 +1,7 @@
-name: build
+name: ci
+
+# 持续集成校验：PR / push / 手动触发时编译并跑测试，确保 4 平台可构建。
+# 不负责发布；正式发布（npm 主包+子包 + GitHub Release）见 release.yml（由 tag 触发）。
 
 on:
   push:
@@ -56,11 +59,16 @@ jobs:
 
       - run: pnpm build
 
-      - run: cargo build --release --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+      - name: cargo test (Linux only)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: cargo build (release)
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AskHuman-${{ matrix.target }}
+          name: ci-binary-${{ matrix.target }}
           if-no-files-found: ignore
           path: |
             src-tauri/target/${{ matrix.target }}/release/AskHuman

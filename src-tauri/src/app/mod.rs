@@ -27,24 +27,121 @@ enum View {
     Settings,
 }
 
-/// 提问模式：创建弹窗 + 并行 Channel，等待首个结果，输出并退出。
+/// 无任何可用通信 Channel 时的退出码（供下游据此降级）。
+pub const EXIT_NO_CHANNEL: i32 = 3;
+
+/// 提问模式入口：按 Channel 可用性分流到 GUI 弹窗或 headless Telegram。
+///
+/// 决策（在创建任何窗口前）：
+/// - 需要弹窗且 GUI 可用 → GUI 路径（弹窗 + 可选 Telegram 抢答）；
+/// - 否则若 Telegram 可用 → headless 路径（仅 Telegram，不进 Tauri）；
+/// - 都不可用 → stderr 报原因 + 退出码 `EXIT_NO_CHANNEL`。
 pub fn run_ask(request: AskRequest, config: AppConfig) -> ! {
-    launch(AppState { request, config }, View::Popup)
+    let telegram_active = is_telegram_active(&config);
+    let popup_wanted = config.channels.popup.enabled;
+    let gui = gui_available();
+
+    if popup_wanted && gui.is_ok() {
+        run_gui_ask(request, config, telegram_active);
+    } else if telegram_active {
+        if popup_wanted {
+            if let Err(reason) = &gui {
+                stderr_redirect::eprintln_real(&format!(
+                    "本地弹窗不可用：{}；已改用 Telegram",
+                    reason
+                ));
+            }
+        }
+        run_headless_telegram(request, config);
+    } else {
+        let reason = match (popup_wanted, &gui) {
+            (true, Err(r)) => format!("本地弹窗不可用：{}，且未配置可用的 Telegram", r),
+            (false, _) => "本地弹窗已禁用，且未配置可用的 Telegram".to_string(),
+            (true, Ok(())) => unreachable!(),
+        };
+        stderr_redirect::eprintln_real(&format!("错误: 无可用的通信 Channel — {}", reason));
+        std::process::exit(EXIT_NO_CHANNEL);
+    }
+}
+
+/// Telegram 是否已配置且可用（构造 client 成功即视为可用）。
+fn is_telegram_active(config: &AppConfig) -> bool {
+    let tg = &config.channels.telegram;
+    tg.enabled
+        && TelegramClient::new(tg.bot_token.clone(), tg.chat_id.clone(), tg.api_base_url.clone())
+            .is_ok()
+}
+
+/// GUI 弹窗路径；若 Tauri 构建失败（GUI 不可用），按 Telegram 是否可用兜底。
+fn run_gui_ask(request: AskRequest, config: AppConfig, telegram_active: bool) -> ! {
+    let state = AppState {
+        request: request.clone(),
+        config: config.clone(),
+    };
+    match launch(state, View::Popup) {
+        Ok(()) => std::process::exit(0), // 成功路径已在 launch 内退出，此处不可达
+        Err(e) => {
+            if telegram_active {
+                stderr_redirect::eprintln_real(&format!(
+                    "本地弹窗启动失败：{}；已改用 Telegram",
+                    e
+                ));
+                run_headless_telegram(request, config);
+            } else {
+                stderr_redirect::eprintln_real(&format!(
+                    "错误: 本地弹窗启动失败：{}，且未配置可用的 Telegram",
+                    e
+                ));
+                std::process::exit(EXIT_NO_CHANNEL);
+            }
+        }
+    }
+}
+
+/// headless 路径：不进入 Tauri 事件循环，仅用 tokio 跑 Telegram channel。
+fn run_headless_telegram(request: AskRequest, config: AppConfig) -> ! {
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            stderr_redirect::eprintln_real(&format!("错误: 无法创建运行时: {}", e));
+            std::process::exit(1);
+        }
+    };
+
+    let coordinator = Coordinator::new_headless(request.clone());
+    let tg = config.channels.telegram.clone();
+    let channel: Arc<dyn Channel> = Arc::new(TelegramChannel::new(tg.clone()));
+    coordinator.register(channel);
+
+    rt.block_on(async move {
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        crate::channels::telegram::run_session(request, tg, cancelled, coordinator).await;
+    });
+
+    // 正常情况下用户在 Telegram 完成回复 → submit → 进程已退出；走到此处说明未获结果。
+    stderr_redirect::eprintln_real("错误: Telegram 会话结束但未获得结果");
+    std::process::exit(EXIT_NO_CHANNEL);
 }
 
 /// 设置模式：创建设置窗口。
 pub fn run_settings(config: AppConfig) -> ! {
-    launch(
-        AppState {
-            request: AskRequest::new(String::new(), Vec::new(), false),
-            config,
-        },
-        View::Settings,
-    )
+    let state = AppState {
+        request: AskRequest::new(String::new(), Vec::new(), false),
+        config,
+    };
+    if let Err(e) = launch(state, View::Settings) {
+        stderr_redirect::eprintln_real(&format!("错误: 无法启动设置界面: {}", e));
+        std::process::exit(1);
+    }
+    std::process::exit(0);
 }
 
 /// 统一启动入口：`generate_context!` 每个二进制只能展开一次，故所有窗口共用此路径。
-fn launch(state: AppState, view: View) -> ! {
+/// 成功路径在内部进入事件循环并退出进程（不返回）；构建失败返回 `Err` 供调用方兜底。
+fn launch(state: AppState, view: View) -> tauri::Result<()> {
     let theme = window_theme(&state.config);
     let window_bg = background_for(resolved_theme(&state.config));
     let popup_w = state.config.channels.popup.width;
@@ -129,8 +226,7 @@ fn launch(state: AppState, view: View) -> ! {
             }
             Ok(())
         })
-        .build(tauri::generate_context!())
-        .expect("启动 Tauri 失败");
+        .build(tauri::generate_context!())?;
 
     // 构建成功后、进入事件循环前静默系统噪音日志（如 macOS 的 TSM CapsLock 日志）。
     stderr_redirect::silence();
@@ -260,6 +356,53 @@ fn persist_popup_size(window: &tauri::Window) {
         cfg.channels.popup.height = size.height as f64 / scale;
         let _ = cfg.save();
     }
+}
+
+/// GUI 是否可用（进入 Tauri 前的轻量预探测）。
+///
+/// 因 release 为 `panic = "abort"`，无法用 `catch_unwind` 兜住 GUI 初始化崩溃，
+/// 故在 Linux 上先探测显示环境与 WebKitGTK；实际 `build()` 失败仍由调用方按 `Err` 兜底。
+/// macOS / Windows 使用系统 WebView，默认视为可用。
+#[cfg(target_os = "linux")]
+fn gui_available() -> Result<(), String> {
+    let has_display = std::env::var_os("DISPLAY").is_some()
+        || std::env::var_os("WAYLAND_DISPLAY").is_some();
+    if !has_display {
+        return Err("无图形显示环境（DISPLAY / WAYLAND_DISPLAY 均未设置）".to_string());
+    }
+    if !webkitgtk_loadable() {
+        return Err("系统缺少 WebKitGTK（如 libwebkit2gtk-4.1）".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn gui_available() -> Result<(), String> {
+    Ok(())
+}
+
+/// 探测 WebKitGTK 运行库是否可被加载（dlopen 成功即视为可用）。
+#[cfg(target_os = "linux")]
+fn webkitgtk_loadable() -> bool {
+    use std::ffi::CString;
+    const CANDIDATES: [&str; 4] = [
+        "libwebkit2gtk-4.1.so.0",
+        "libwebkit2gtk-4.1.so",
+        "libwebkit2gtk-4.0.so.37",
+        "libwebkit2gtk-4.0.so",
+    ];
+    for name in CANDIDATES {
+        if let Ok(c) = CString::new(name) {
+            unsafe {
+                let handle = libc::dlopen(c.as_ptr(), libc::RTLD_LAZY);
+                if !handle.is_null() {
+                    libc::dlclose(handle);
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// 静默 GUI 事件循环期间的系统噪音日志：把进程 stderr 重定向到 /dev/null，
