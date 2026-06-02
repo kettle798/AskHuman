@@ -26,11 +26,23 @@ struct PopupView: View {
         .frame(minWidth: 420, minHeight: 480)
     }
 
+    @ViewBuilder
     private var messageSection: some View {
-        Text(viewModel.renderedMessage)
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        if viewModel.request.isMarkdown {
+            switch viewModel.markdownMode {
+            case .native:
+                MarkdownContentView(markdown: viewModel.request.message)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            case .webview:
+                MarkdownWebContentView(markdown: viewModel.request.message, theme: viewModel.theme)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        } else {
+            Text(viewModel.request.message)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private var optionsSection: some View {

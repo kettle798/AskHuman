@@ -6,19 +6,27 @@ enum ThemeMode: String, Codable, CaseIterable {
     case dark
 }
 
+enum MarkdownRenderMode: String, Codable, CaseIterable {
+    case native
+    case webview
+}
+
 struct GeneralConfig: Codable {
     var theme: ThemeMode
     var alwaysOnTop: Bool
+    var markdownRenderer: MarkdownRenderMode
 
-    init(theme: ThemeMode = .system, alwaysOnTop: Bool = false) {
+    init(theme: ThemeMode = .system, alwaysOnTop: Bool = false, markdownRenderer: MarkdownRenderMode = .native) {
         self.theme = theme
         self.alwaysOnTop = alwaysOnTop
+        self.markdownRenderer = markdownRenderer
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         theme = (try? c.decodeIfPresent(ThemeMode.self, forKey: .theme)) ?? .system
         alwaysOnTop = (try? c.decodeIfPresent(Bool.self, forKey: .alwaysOnTop)) ?? false
+        markdownRenderer = (try? c.decodeIfPresent(MarkdownRenderMode.self, forKey: .markdownRenderer)) ?? .native
     }
 }
 

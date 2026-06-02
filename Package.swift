@@ -6,9 +6,15 @@ let package = Package(
     platforms: [
         .macOS(.v13)
     ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-markdown.git", branch: "main")
+    ],
     targets: [
         .executableTarget(
             name: "AskHuman",
+            dependencies: [
+                .product(name: "Markdown", package: "swift-markdown")
+            ],
             path: "Sources/AskHuman"
         ),
         .testTarget(

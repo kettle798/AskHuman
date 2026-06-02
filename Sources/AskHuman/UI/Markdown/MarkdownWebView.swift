@@ -1,0 +1,169 @@
+import SwiftUI
+import WebKit
+
+/// 基于 WKWebView 的 Markdown 渲染（支持整段跨行选中）。WebView 高度自适应内容。
+struct MarkdownWebContentView: View {
+    let markdown: String
+    let theme: ThemeMode
+
+    @State private var height: CGFloat = 40
+
+    var body: some View {
+        WebViewRepresentable(markdown: markdown, theme: theme) { newHeight in
+            if abs(newHeight - height) > 0.5 {
+                height = newHeight
+            }
+        }
+        .frame(height: height)
+        .frame(maxWidth: .infinity)
+    }
+}
+
+private struct WebViewRepresentable: NSViewRepresentable {
+    let markdown: String
+    let theme: ThemeMode
+    let onHeightChange: (CGFloat) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onHeightChange: onHeightChange)
+    }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.userContentController.add(context.coordinator, name: "heightChanged")
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.navigationDelegate = context.coordinator
+        webView.setValue(false, forKey: "drawsBackground")
+        webView.enclosingScrollView?.hasVerticalScroller = false
+        applyAppearance(to: webView)
+        webView.loadHTMLString(htmlDocument(), baseURL: nil)
+        context.coordinator.lastHTML = htmlDocument()
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        applyAppearance(to: webView)
+        let html = htmlDocument()
+        if html != context.coordinator.lastHTML {
+            context.coordinator.lastHTML = html
+            webView.loadHTMLString(html, baseURL: nil)
+        }
+    }
+
+    private func applyAppearance(to webView: WKWebView) {
+        switch theme {
+        case .system: webView.appearance = nil
+        case .light: webView.appearance = NSAppearance(named: .aqua)
+        case .dark: webView.appearance = NSAppearance(named: .darkAqua)
+        }
+    }
+
+    private func htmlDocument() -> String {
+        let body = HTMLMarkdownRenderer.html(from: markdown)
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          :root { color-scheme: light dark; }
+          html, body { margin: 0; padding: 0; background: transparent; }
+          body {
+            font: -apple-system-body;
+            font-family: -apple-system, system-ui, sans-serif;
+            font-size: 14px;
+            line-height: 1.55;
+            color: #1d1d1f;
+            word-wrap: break-word;
+            padding: 2px;
+          }
+          @media (prefers-color-scheme: dark) {
+            body { color: #e8e8ea; }
+            pre, code { background: rgba(255,255,255,0.10); }
+            blockquote { color: #b0b0b4; border-left-color: rgba(255,255,255,0.25); }
+            th, td { border-color: rgba(255,255,255,0.18); }
+            thead th { background: rgba(255,255,255,0.08); }
+            hr { border-top-color: rgba(255,255,255,0.18); }
+          }
+          h1,h2,h3,h4,h5,h6 { margin: 0.6em 0 0.3em; line-height: 1.25; }
+          h1 { font-size: 1.7em; } h2 { font-size: 1.45em; } h3 { font-size: 1.25em; }
+          p { margin: 0.45em 0; }
+          ul, ol { margin: 0.4em 0; padding-left: 1.4em; }
+          li { margin: 0.15em 0; }
+          a { color: #0a84ff; }
+          code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.92em;
+            background: rgba(0,0,0,0.06);
+            padding: 0.1em 0.3em;
+            border-radius: 4px;
+          }
+          pre {
+            background: rgba(0,0,0,0.06);
+            padding: 10px;
+            border-radius: 6px;
+            overflow-x: auto;
+          }
+          pre code { background: none; padding: 0; }
+          blockquote {
+            margin: 0.5em 0;
+            padding-left: 0.8em;
+            border-left: 3px solid rgba(0,0,0,0.2);
+            color: #555;
+          }
+          table { border-collapse: collapse; margin: 0.5em 0; width: 100%; }
+          th, td { border: 1px solid rgba(0,0,0,0.18); padding: 5px 8px; text-align: left; }
+          thead th { background: rgba(0,0,0,0.05); }
+          hr { border: none; border-top: 1px solid rgba(0,0,0,0.15); margin: 0.8em 0; }
+          img { max-width: 100%; }
+        </style>
+        </head>
+        <body>
+        \(body)
+        <script>
+          function reportHeight() {
+            var h = document.body.scrollHeight;
+            window.webkit.messageHandlers.heightChanged.postMessage(h);
+          }
+          window.addEventListener('load', reportHeight);
+          if (window.ResizeObserver) {
+            new ResizeObserver(reportHeight).observe(document.body);
+          }
+          setTimeout(reportHeight, 50);
+        </script>
+        </body>
+        </html>
+        """
+    }
+
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+        let onHeightChange: (CGFloat) -> Void
+        var lastHTML: String = ""
+
+        init(onHeightChange: @escaping (CGFloat) -> Void) {
+            self.onHeightChange = onHeightChange
+        }
+
+        func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "heightChanged", let value = message.body as? CGFloat {
+                onHeightChange(value)
+            } else if message.name == "heightChanged", let num = message.body as? NSNumber {
+                onHeightChange(CGFloat(num.doubleValue))
+            }
+        }
+
+        // 外部链接用系统浏览器打开
+        func webView(_ webView: WKWebView,
+                     decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
+            if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
+                NSWorkspace.shared.open(url)
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+    }
+}

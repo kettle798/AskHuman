@@ -11,6 +11,8 @@ struct PopupImageItem: Identifiable {
 @MainActor
 final class PopupViewModel: ObservableObject {
     let request: AskRequest
+    let markdownMode: MarkdownRenderMode
+    let theme: ThemeMode
 
     @Published var selectedOptions: [String] = []
     @Published var userInput: String = ""
@@ -19,13 +21,16 @@ final class PopupViewModel: ObservableObject {
     private var onResult: ((ChannelResult) -> Void)?
     private var didResolve = false
 
-    init(request: AskRequest, onResult: @escaping (ChannelResult) -> Void) {
+    init(
+        request: AskRequest,
+        markdownMode: MarkdownRenderMode,
+        theme: ThemeMode,
+        onResult: @escaping (ChannelResult) -> Void
+    ) {
         self.request = request
+        self.markdownMode = markdownMode
+        self.theme = theme
         self.onResult = onResult
-    }
-
-    var renderedMessage: AttributedString {
-        MarkdownRenderer.render(request.message, isMarkdown: request.isMarkdown)
     }
 
     func isSelected(_ option: String) -> Bool {
