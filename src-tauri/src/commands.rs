@@ -10,12 +10,13 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 
-/// 弹窗初始化负载：请求内容 + 主题（前端据此套用样式）。
+/// 弹窗初始化负载：请求内容 + 主题 + 是否置顶（前端据此套用样式、初始化导航栏）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PopupInit {
     request: AskRequest,
     theme: String,
+    always_on_top: bool,
 }
 
 #[tauri::command]
@@ -23,6 +24,7 @@ pub fn popup_init(state: State<AppState>) -> PopupInit {
     PopupInit {
         request: state.request.clone(),
         theme: theme_str(state.config.general.theme),
+        always_on_top: state.config.general.always_on_top,
     }
 }
 
@@ -88,7 +90,25 @@ pub fn get_prompt() -> &'static str {
 /// 实时应用主题到已打开的窗口（system→跟随系统）。
 #[tauri::command]
 pub fn set_theme(app: AppHandle, theme: String) {
-    let t = match theme.as_str() {
+    apply_theme_to_windows(&app, &theme);
+}
+
+/// 从弹窗导航栏切换主题：写入配置并实时应用到所有窗口。
+#[tauri::command]
+pub fn update_theme(app: AppHandle, theme: String) -> Result<(), String> {
+    let mut cfg = AppConfig::load();
+    cfg.general.theme = match theme.as_str() {
+        "light" => ThemeMode::Light,
+        "dark" => ThemeMode::Dark,
+        _ => ThemeMode::System,
+    };
+    cfg.save().map_err(|e| e.to_string())?;
+    apply_theme_to_windows(&app, &theme);
+    Ok(())
+}
+
+fn apply_theme_to_windows(app: &AppHandle, theme: &str) {
+    let t = match theme {
         "light" => Some(tauri::Theme::Light),
         "dark" => Some(tauri::Theme::Dark),
         _ => None,
@@ -98,6 +118,12 @@ pub fn set_theme(app: AppHandle, theme: String) {
             let _ = w.set_theme(t);
         }
     }
+}
+
+/// 从弹窗导航栏打开设置窗口（同进程内创建，不影响弹窗等待）。
+#[tauri::command]
+pub fn open_settings(app: AppHandle) -> Result<(), String> {
+    crate::app::create_settings_window(&app, &AppConfig::load()).map_err(|e| e.to_string())
 }
 
 // ===== Cursor Hook =====

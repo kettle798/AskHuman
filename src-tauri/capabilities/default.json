@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "默认权限：作用于运行时创建的所有窗口",
   "windows": ["*"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-always-on-top"
+  ]
 }

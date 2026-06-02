@@ -12,6 +12,8 @@ use crate::telegram::TelegramClient;
 use coordinator::Coordinator;
 use std::sync::Arc;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+#[cfg(target_os = "macos")]
+use tauri::window::{Effect, EffectState, EffectsBuilder};
 
 /// 运行时只读状态：供 popup_init 拉取请求内容与主题。
 pub struct AppState {
@@ -67,6 +69,8 @@ fn launch(state: AppState, view: View) -> ! {
             crate::commands::save_settings,
             crate::commands::get_prompt,
             crate::commands::set_theme,
+            crate::commands::update_theme,
+            crate::commands::open_settings,
             crate::commands::cursor_hook_status,
             crate::commands::cursor_hook_install,
             crate::commands::cursor_hook_uninstall,
@@ -95,7 +99,7 @@ fn launch(state: AppState, view: View) -> ! {
                     let coordinator = Coordinator::new(app.handle().clone(), request.clone());
 
                     if show_popup {
-                        WebviewWindowBuilder::new(
+                        let builder = WebviewWindowBuilder::new(
                             app,
                             "popup",
                             WebviewUrl::App("index.html?view=popup".into()),
@@ -105,9 +109,8 @@ fn launch(state: AppState, view: View) -> ! {
                         .min_inner_size(420.0, 480.0)
                         .center()
                         .always_on_top(always_on_top)
-                        .background_color(window_bg)
-                        .theme(theme)
-                        .build()?;
+                        .theme(theme);
+                        apply_surface(builder, window_bg).build()?;
                         coordinator.register(Arc::new(PopupChannel::new(app.handle().clone())));
                     }
 
@@ -120,17 +123,8 @@ fn launch(state: AppState, view: View) -> ! {
                     app.manage(coordinator);
                 }
                 View::Settings => {
-                    WebviewWindowBuilder::new(
-                        app,
-                        "settings",
-                        WebviewUrl::App("index.html?view=settings".into()),
-                    )
-                    .title("HumanInLoop 设置")
-                    .inner_size(560.0, 640.0)
-                    .center()
-                    .background_color(window_bg)
-                    .theme(theme)
-                    .build()?;
+                    let config = AppConfig::load();
+                    create_settings_window(app, &config)?;
                 }
             }
             Ok(())
@@ -181,6 +175,61 @@ fn resolved_theme(config: &AppConfig) -> tauri::Theme {
             _ => tauri::Theme::Light,
         },
     }
+}
+
+/// 平台相关窗口表面：
+/// - macOS：透明窗口 + `underWindowBackground` 毛玻璃（vibrancy），底色由材质提供；
+/// - 其它平台：纯色不透明底（无毛玻璃）。
+fn apply_surface<'a, R, M>(
+    builder: WebviewWindowBuilder<'a, R, M>,
+    #[allow(unused_variables)] window_bg: tauri::window::Color,
+) -> WebviewWindowBuilder<'a, R, M>
+where
+    R: tauri::Runtime,
+    M: Manager<R>,
+{
+    #[cfg(target_os = "macos")]
+    {
+        builder
+            .transparent(true)
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true)
+            .effects(
+                EffectsBuilder::new()
+                    .effect(Effect::UnderWindowBackground)
+                    .state(EffectState::FollowsWindowActiveState)
+                    .build(),
+            )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder.background_color(window_bg)
+    }
+}
+
+/// 创建（或聚焦已存在的）设置窗口。供 `--settings` 启动与弹窗导航栏共用。
+pub(crate) fn create_settings_window<R, M>(manager: &M, config: &AppConfig) -> tauri::Result<()>
+where
+    R: tauri::Runtime,
+    M: Manager<R>,
+{
+    if let Some(w) = manager.get_webview_window("settings") {
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    let theme = window_theme(config);
+    let window_bg = background_for(resolved_theme(config));
+    let builder = WebviewWindowBuilder::new(
+        manager,
+        "settings",
+        WebviewUrl::App("index.html?view=settings".into()),
+    )
+    .title("HumanInLoop 设置")
+    .inner_size(560.0, 640.0)
+    .center()
+    .theme(theme);
+    apply_surface(builder, window_bg).build()?;
+    Ok(())
 }
 
 /// 原生窗口/webview 底色（与前端 tokens.css `--bg` 对齐）。

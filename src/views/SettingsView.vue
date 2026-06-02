@@ -135,6 +135,7 @@ onMounted(async () => {
 
 <template>
   <div v-if="config" class="settings">
+    <div class="drag-strip" data-tauri-drag-region></div>
     <nav class="tabbar">
       <button
         :class="{ active: activeTab === 'general' }"
@@ -423,10 +424,24 @@ onMounted(async () => {
 
 <style scoped>
 .settings {
+  position: relative;
   height: 100vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+/* macOS Overlay 标题栏：顶部透明拖拽条 */
+.drag-strip {
+  display: none;
+}
+.vibrancy .drag-strip {
+  display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  z-index: 10;
 }
 .settings-body {
   flex: 1 1 auto;

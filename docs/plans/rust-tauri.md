@@ -238,8 +238,9 @@ trait Channel {
 
 ### 8.2 前端 popup 页（`popup/PopupView.vue`）
 
-布局（从上到下，可滚动 + 固定底部操作条）：
+布局（从上到下：固定顶部导航栏 + 可滚动正文 + 固定底部操作条）：
 
+0. **顶部导航栏**（Step 8 新增）：左侧绿色状态点 + 标题「Question from the Loop」；右侧三枚图标按钮——置顶切换（开启高亮）、主题循环（系统→浅色→深色，实时生效并写回配置）、打开设置（同进程内创建设置窗口）。整条为拖拽区（`data-tauri-drag-region`，品牌区/动作区透传，仅按钮可点）。macOS Overlay 标题栏下顶部留出红绿灯空间。
 1. 提问内容：`is_markdown` 时用 markdown-it 渲染（HTML），否则纯文本（保留换行、可选中）
 2. 预定义选项（非空时）：多选列表，勾选样式（方块 ✓），点击切换（`OptionList.vue`）
 3. 「补充说明」多行文本框
@@ -415,12 +416,15 @@ AskHuman 命令使用细节：
 
 `controls.css` 手写：按钮（普通 / prominent）、文本框 / 多行框（圆角描边 + focus 光晕）、开关（Switch，圆形滑块动画）、分段控件（Segmented）、卡片（GroupBox 风）、勾选项。
 
-主题与毛玻璃：
+主题与毛玻璃（Step 8 已落地的具体取值）：
 
 - 主题三态：`system` 用 `prefers-color-scheme` + Tauri 主题事件；`light/dark` 强制
-- **毛玻璃**：在 `tauri.conf.json` / 窗口 builder 为 macOS 启用 `windowEffects`（如 `hudWindow` / `sidebar` / `underWindowBackground`），窗口背景半透明；**Windows/Linux 不启用，退化为不透明背景**（CSS 用纯色底）
+- **毛玻璃**：macOS 窗口 builder 启用 `effects(UnderWindowBackground)` + `transparent(true)`（需 `macos-private-api` feature 与 `macOSPrivateApi: true`）；标题栏用 `TitleBarStyle::Overlay` + `hidden_title` 让材质铺满整窗、隐藏标题；弹窗与设置窗口均启用。**Windows/Linux 不启用，退化为纯色不透明底**（builder 设 `background_color`）。
+- **色罩**：材质上叠一层 `--vibrancy-tint` 平衡通透与可读性，深色 `rgba(0,0,0,0.2)`、浅色 `rgba(255,255,255,0.2)`（首帧由 `index.html` 内联样式按 `prefers-color-scheme` 兜底）。
+- **拖拽**：Overlay 下 webview 盖住原生标题栏，用 `data-tauri-drag-region` 自定义拖拽区（导航栏 + 底部操作栏空白处）。
+- Markdown 渲染配色对齐 Swift `HTMLMarkdownRenderer`（见 §10）。
 
-窗口标题：弹窗 `HumanInLoop`，设置 `HumanInLoop 设置`。
+窗口标题：弹窗 `HumanInLoop`（macOS 隐藏标题文字，改由导航栏显示「Question from the Loop」），设置 `HumanInLoop 设置`。
 
 ## 十六、跨平台差异汇总
 

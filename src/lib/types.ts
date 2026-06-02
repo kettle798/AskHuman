@@ -16,6 +16,7 @@ export type ThemeMode = "system" | "light" | "dark";
 export interface PopupInit {
   request: AskRequest;
   theme: ThemeMode;
+  alwaysOnTop: boolean;
 }
 
 export interface PopupSubmission {

@@ -25,6 +25,11 @@ export const getPrompt = () => invoke<string>("get_prompt");
 export const setTheme = (theme: ThemeMode) =>
   invoke<void>("set_theme", { theme });
 
+export const updateTheme = (theme: ThemeMode) =>
+  invoke<void>("update_theme", { theme });
+
+export const openSettings = () => invoke<void>("open_settings");
+
 export const cursorHookStatus = () => invoke<HookStatus>("cursor_hook_status");
 
 export const cursorHookInstall = () => invoke<string>("cursor_hook_install");

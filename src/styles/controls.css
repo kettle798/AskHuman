@@ -1,5 +1,10 @@
 /* 通用控件：按钮、文本框、复选项、缩略图、Markdown 正文 */
 
+/* macOS 透明标题栏（毛玻璃统一外观）：设置页顶部留出红绿灯/拖拽区空间 */
+.vibrancy .tabbar {
+  padding-top: 30px;
+}
+
 .btn {
   font-family: inherit;
   font-size: 13px;
@@ -177,21 +182,28 @@
   margin: 3px 0;
 }
 .markdown-body a {
-  color: var(--accent);
+  color: var(--md-link);
   text-decoration: none;
 }
 .markdown-body a:hover {
   text-decoration: underline;
+}
+.markdown-body del {
+  color: var(--text-secondary);
+}
+.markdown-body img {
+  max-width: 100%;
+  border-radius: var(--radius-sm);
 }
 .markdown-body code {
   font-family: var(--font-mono);
   font-size: 12.5px;
   padding: 1.5px 5px;
   border-radius: 4px;
-  background: var(--bg-elevated);
+  background: var(--md-code-bg);
 }
 .markdown-body pre {
-  background: var(--bg-elevated);
+  background: var(--md-code-bg);
   padding: 12px;
   border-radius: var(--radius-md);
   overflow-x: auto;
@@ -205,8 +217,13 @@
 .markdown-body blockquote {
   margin: 10px 0;
   padding: 2px 12px;
-  border-left: 3px solid var(--border);
-  color: var(--text-secondary);
+  border-left: 3px solid var(--md-quote-border);
+  color: var(--md-quote-fg);
+}
+.markdown-body hr {
+  border: none;
+  border-top: 1px solid var(--md-hr);
+  margin: 14px 0;
 }
 .markdown-body table {
   border-collapse: collapse;
@@ -214,8 +231,12 @@
 }
 .markdown-body th,
 .markdown-body td {
-  border: 1px solid var(--border);
+  border: 1px solid var(--md-table-border);
   padding: 5px 10px;
+  text-align: left;
+}
+.markdown-body thead th {
+  background: var(--md-thead-bg);
 }
 
 /* 纯文本正文 */

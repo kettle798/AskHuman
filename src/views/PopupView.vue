@@ -1,9 +1,16 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { popupInit, submitPopup, cancelPopup } from "../lib/ipc";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  popupInit,
+  submitPopup,
+  cancelPopup,
+  openSettings,
+  updateTheme,
+} from "../lib/ipc";
 import { renderMarkdown } from "../lib/markdown";
 import { applyTheme, fileToDataUrl } from "../lib/theme";
-import type { AskRequest, ImageAttachment } from "../lib/types";
+import type { AskRequest, ImageAttachment, ThemeMode } from "../lib/types";
 
 const request = ref<AskRequest | null>(null);
 const loadError = ref<string | null>(null);
@@ -13,6 +20,34 @@ const images = ref<ImageAttachment[]>([]);
 const submitting = ref(false);
 const inputRef = ref<HTMLTextAreaElement | null>(null);
 const fileRef = ref<HTMLInputElement | null>(null);
+
+const pinned = ref(false);
+const theme = ref<ThemeMode>("system");
+
+async function togglePin() {
+  pinned.value = !pinned.value;
+  try {
+    await getCurrentWindow().setAlwaysOnTop(pinned.value);
+  } catch {
+    pinned.value = !pinned.value;
+  }
+}
+
+async function cycleTheme() {
+  const order: ThemeMode[] = ["system", "light", "dark"];
+  const next = order[(order.indexOf(theme.value) + 1) % order.length];
+  theme.value = next;
+  applyTheme(next);
+  try {
+    await updateTheme(next);
+  } catch {
+    /* 忽略：持久化失败不影响当前显示 */
+  }
+}
+
+function openSettingsWindow() {
+  openSettings().catch(() => {});
+}
 
 const renderedHtml = computed(() =>
   request.value?.isMarkdown ? renderMarkdown(request.value.message) : ""
@@ -109,6 +144,8 @@ onMounted(async () => {
   try {
     const init = await popupInit();
     applyTheme(init.theme);
+    theme.value = init.theme;
+    pinned.value = init.alwaysOnTop;
     request.value = init.request;
     requestAnimationFrame(() => inputRef.value?.focus());
   } catch (err) {
@@ -130,6 +167,55 @@ onBeforeUnmount(() => {
   </div>
 
   <div v-else class="popup" @dragover.prevent @drop.prevent="onDrop">
+    <header class="navbar" data-tauri-drag-region>
+      <span class="brand">
+        <span class="brand-dot"></span>
+        <span class="brand-title">Question from the Loop</span>
+      </span>
+      <span class="nav-actions">
+        <button
+          class="nav-btn"
+          :class="{ active: pinned }"
+          type="button"
+          title="窗口置顶"
+          @click="togglePin"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 17v5" />
+            <path d="M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9A2 2 0 0 1 15 10.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+          </svg>
+        </button>
+        <button
+          class="nav-btn"
+          type="button"
+          title="切换主题"
+          @click="cycleTheme"
+        >
+          <svg v-if="theme === 'light'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="4" />
+            <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+          </svg>
+          <svg v-else-if="theme === 'dark'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z" />
+          </svg>
+          <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none" />
+          </svg>
+        </button>
+        <button
+          class="nav-btn"
+          type="button"
+          title="设置"
+          @click="openSettingsWindow"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z" />
+          </svg>
+        </button>
+      </span>
+    </header>
     <div class="content">
       <div
         v-if="request.isMarkdown"
@@ -168,7 +254,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div class="footer">
+    <div class="footer" data-tauri-drag-region>
       <button class="btn btn-icon" type="button" @click="pickFiles">
         添加图片
       </button>
@@ -203,6 +289,71 @@ onBeforeUnmount(() => {
   flex-direction: column;
   overflow: hidden;
 }
+
+/* 顶部导航栏：整条可拖动；品牌区/动作区透传拖拽，仅按钮可点 */
+.navbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 12px 8px 14px;
+}
+/* macOS Overlay 标题栏：下压让出红绿灯空间 */
+.vibrancy .navbar {
+  padding-top: 30px;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+.brand-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #30d158;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #30d158 22%, transparent);
+}
+.brand-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.1px;
+}
+.nav-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  pointer-events: none;
+}
+.nav-btn {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: default;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.nav-btn:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+.nav-btn.active {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+.nav-btn svg {
+  width: 16px;
+  height: 16px;
+}
 .popup-status {
   align-items: center;
   justify-content: center;
@@ -235,9 +386,10 @@ onBeforeUnmount(() => {
   gap: var(--space-2);
   padding: var(--space-3) var(--space-4);
   border-top: 1px solid var(--border);
-  background: var(--bg);
+  background: transparent;
 }
 .footer .spacer {
   flex: 1 1 auto;
+  pointer-events: none;
 }
 </style>

@@ -19,6 +19,10 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
+/* macOS 毛玻璃：窗口透明，正文叠一层主题色罩加深玻璃 */
+.vibrancy body {
+  background: var(--vibrancy-tint);
+}
 :focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);

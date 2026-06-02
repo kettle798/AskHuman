@@ -110,6 +110,18 @@
 
 - **编译性能**：先按计划实现，**完成后再专门分析编译性能**，依据实测再决定是否引入更激进的提速措施（如 `ureq` + `std::thread` 替代 `tokio` + `reqwest`、`sccache` / `mold`、精简 features 等）。详见计划 §21。
 
+## 反馈意见（Step 8 样式打磨阶段补充）
+
+以下为开发到样式打磨阶段时，用户当面验收并逐项确认的 UI 决策（已实现）：
+
+- **毛玻璃材质**：macOS 用 `underWindowBackground`（vibrancy）；弹窗与设置窗口均启用；窗口透明、底色交给系统材质（移除原纯色底）。Win/Linux 退化为纯色不透明。
+- **标题栏**：macOS 用 `TitleBarStyle::Overlay` + `hidden_title`，使毛玻璃材质铺满整窗（含标题栏区域），并隐藏标题文字、保留红绿灯按钮。
+- **拖拽**：Overlay 下 webview 盖住原生标题栏，故用 `data-tauri-drag-region` 自定义拖拽区——弹窗顶部导航栏、底部操作栏空白处均可拖动窗口（按钮/输入正常交互）。
+- **毛玻璃色罩**：在材质上叠一层轻色罩平衡通透与可读性，深色 `rgba(0,0,0,0.2)`、浅色 `rgba(255,255,255,0.2)`。
+- **Markdown 配色**：前端 `markdown-it` 渲染配色对齐 Swift `HTMLMarkdownRenderer`（深色链接 `#4ea1ff`、代码块底 `rgba(255,255,255,0.12)`/`rgba(0,0,0,0.06)`、表头底色、引用左边框、`hr`、删除线、图片自适应等）。
+- **弹窗顶部导航栏（新增，原计划 §8.2 未含）**：左侧绿色状态点 + 标题「Question from the Loop」；右侧三枚图标按钮——置顶切换（开启高亮）、主题循环（系统→浅色→深色，实时生效并写回配置）、打开设置窗口（同进程内创建）。参考原 Rust 版导航栏样式并美化。
+  - 配套后端：`popup_init` 增加 `alwaysOnTop`；新增命令 `update_theme`（持久化+应用主题）、`open_settings`（同进程创建设置窗口）；新增权限 `core:window:allow-start-dragging`、`core:window:allow-set-always-on-top`。
+
 ## 参考资料
 
 - 当前 Swift 版需求与计划：`docs/specs/swift-native.md`、`docs/plans/swift-native.md`
