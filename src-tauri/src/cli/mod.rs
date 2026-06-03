@@ -32,26 +32,38 @@ pub fn dispatch() {
         "--settings" => {
             crate::app::run_settings(crate::config::AppConfig::load());
         }
-        first if first.starts_with('-') => {
+        // 第一题既可用位置参数，也可用 `-q`/`--question`；提问相关 flag 一律进入提问分支，
+        // 由 `parse_ask` 给出精确错误（如缺少问题内容、选项需在问题之后）。
+        first
+            if first.starts_with('-')
+                && !matches!(
+                    first,
+                    "-q" | "--question"
+                        | "-o"
+                        | "--option"
+                        | "-f"
+                        | "--file"
+                        | "--no-markdown"
+                ) =>
+        {
             eprintln!("错误: 未知选项 {}\n", first);
             println!("{}", help::help_text());
             exit(1);
         }
         _ => match args::parse_ask(&argv[1..]) {
             Ok(parsed) => {
-                let files = match file_attachment::resolve(&parsed.files) {
-                    Ok(files) => files,
-                    Err(e) => {
-                        eprintln!("错误: {}", e);
-                        exit(1);
-                    }
-                };
-                let request = crate::models::AskRequest::new(
-                    parsed.message,
-                    parsed.options,
-                    parsed.is_markdown,
-                    files,
-                );
+                let mut questions = Vec::with_capacity(parsed.questions.len());
+                for q in parsed.questions {
+                    let files = match file_attachment::resolve(&q.files) {
+                        Ok(files) => files,
+                        Err(e) => {
+                            eprintln!("错误: {}", e);
+                            exit(1);
+                        }
+                    };
+                    questions.push(crate::models::Question::new(q.message, q.options, files));
+                }
+                let request = crate::models::AskRequest::new(questions, parsed.is_markdown);
                 crate::app::run_ask(request, crate::config::AppConfig::load());
             }
             Err(e) => {

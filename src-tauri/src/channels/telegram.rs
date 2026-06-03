@@ -2,7 +2,7 @@
 
 use super::{Channel, ResultSink};
 use crate::config::TelegramChannelConfig;
-use crate::models::{AskRequest, ChannelAction, ChannelResult};
+use crate::models::{AskRequest, ChannelAction, ChannelResult, Question, QuestionAnswer};
 use crate::telegram::{markdown, TelegramClient};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,22 +58,69 @@ pub(crate) async fn run_session(
         }
     };
 
-    let options = request.predefined_options.clone();
+    let total = request.questions.len();
+    let mut answers: Vec<QuestionAnswer> = Vec::with_capacity(total);
+    // 长轮询 offset 跨问题持续递增。
+    let mut offset: i64 = 0;
+
+    for (index, question) in request.questions.iter().enumerate() {
+        match ask_one_question(
+            &client,
+            question,
+            request.is_markdown,
+            index,
+            total,
+            &cancelled,
+            &mut offset,
+        )
+        .await
+        {
+            Some(answer) => answers.push(answer),
+            // 被其它 channel 抢答（cancelled）→ 中止，不投递。
+            None => return,
+        }
+    }
+
+    sink.submit(ChannelResult {
+        action: ChannelAction::Send,
+        answers,
+        source_channel_id: "telegram".to_string(),
+    });
+}
+
+/// 发送单个问题并长轮询直到用户点「发送」；返回该题回答。
+/// 被抢答（cancelled）时返回 None。
+async fn ask_one_question(
+    client: &TelegramClient,
+    question: &Question,
+    is_markdown: bool,
+    index: usize,
+    total: usize,
+    cancelled: &Arc<AtomicBool>,
+    offset: &mut i64,
+) -> Option<QuestionAnswer> {
+    let options = question.predefined_options.clone();
     let mut selected: Vec<String> = Vec::new();
     let mut user_input = String::new();
 
-    // 1. 选项消息（MarkdownV2 失败回退纯文本）。头部用直角引号包裹来源名以区分正文。
-    let header = format!("「Question from {}」", crate::models::source_name());
+    // 1. 选项消息（MarkdownV2 失败回退纯文本）。头部用直角引号包裹来源名以区分正文；
+    //    多问题时附带 [i/n] 进度。
+    let counter = if total > 1 {
+        format!(" [{}/{}]", index + 1, total)
+    } else {
+        String::new()
+    };
+    let header = format!("「Question from {}」{}", crate::models::source_name(), counter);
     let inline = if options.is_empty() {
         None
     } else {
         Some(inline_keyboard(&options, &selected))
     };
-    let options_message_id = if request.is_markdown {
+    let options_message_id = if is_markdown {
         // 头部加粗后随正文一起处理，统一完成 MarkdownV2 转义。
-        let combined = format!("**{}**\n\n{}", header, request.message);
+        let combined = format!("**{}**\n\n{}", header, question.message);
         let processed = markdown::process(&combined);
-        let plain = format!("{}\n\n{}", header, request.message);
+        let plain = format!("{}\n\n{}", header, question.message);
         match client
             .send_message(&processed, Some("MarkdownV2"), inline.clone())
             .await
@@ -89,9 +136,9 @@ pub(crate) async fn run_session(
         let md = format!(
             "*{}*\n\n{}",
             markdown::escape_all(&header),
-            markdown::escape_all(&request.message)
+            markdown::escape_all(&question.message)
         );
-        let plain = format!("{}\n\n{}", header, request.message);
+        let plain = format!("{}\n\n{}", header, question.message);
         match client
             .send_message(&md, Some("MarkdownV2"), inline.clone())
             .await
@@ -115,7 +162,7 @@ pub(crate) async fn run_session(
         .unwrap_or(0);
 
     // 2.5 发送提问附带的文件（图片→sendPhoto，其它→sendDocument）
-    for file in &request.files {
+    for file in &question.files {
         let result = if file.is_image {
             client.send_photo(&file.path, &file.name).await
         } else {
@@ -130,17 +177,16 @@ pub(crate) async fn run_session(
     }
 
     // 3. 长轮询
-    let mut offset: i64 = 0;
     while !cancelled.load(Ordering::SeqCst) {
-        match client.get_updates(offset).await {
+        match client.get_updates(*offset).await {
             Ok(updates) => {
                 for update in updates {
                     if let Some(uid) = update.get("update_id").and_then(|v| v.as_i64()) {
-                        offset = uid + 1;
+                        *offset = uid + 1;
                     }
                     if handle_update(
                         &update,
-                        &client,
+                        client,
                         &options,
                         &mut selected,
                         &mut user_input,
@@ -149,19 +195,16 @@ pub(crate) async fn run_session(
                     )
                     .await
                     {
-                        sink.submit(ChannelResult {
-                            action: ChannelAction::Send,
-                            selected_options: selected.clone(),
+                        return Some(QuestionAnswer {
+                            selected_options: selected,
                             user_input: if user_input.is_empty() {
                                 None
                             } else {
-                                Some(user_input.clone())
+                                Some(user_input)
                             },
                             images: Vec::new(),
                             files: Vec::new(),
-                            source_channel_id: "telegram".to_string(),
                         });
-                        return;
                     }
                 }
             }
@@ -172,6 +215,7 @@ pub(crate) async fn run_session(
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+    None
 }
 
 /// 处理一条 update；返回 true 表示已终结（用户点「发送」）。

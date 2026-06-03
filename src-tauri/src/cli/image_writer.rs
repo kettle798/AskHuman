@@ -7,12 +7,18 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use std::path::Path;
 
-/// 把所有图片落盘到 `temp/humaninloop/<request_id>/`，返回绝对路径列表。
-pub fn save(images: &[ImageAttachment], request_id: &str) -> Result<Vec<String>> {
+/// 把某个问题的图片落盘到 `temp/humaninloop/<request_id>/q<question_index+1>/`，返回绝对路径列表。
+///
+/// 按问题划分子目录，避免多问题间 `img-1.png` 等默认文件名相互覆盖。
+pub fn save(
+    images: &[ImageAttachment],
+    request_id: &str,
+    question_index: usize,
+) -> Result<Vec<String>> {
     if images.is_empty() {
         return Ok(Vec::new());
     }
-    let dir = paths::request_temp_dir(request_id);
+    let dir = paths::request_temp_dir(request_id).join(format!("q{}", question_index + 1));
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("创建图片目录失败: {}", dir.display()))?;
 

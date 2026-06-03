@@ -129,7 +129,7 @@ fn run_headless_telegram(request: AskRequest, config: AppConfig) -> ! {
 /// 设置模式：创建设置窗口。
 pub fn run_settings(config: AppConfig) -> ! {
     let state = AppState {
-        request: AskRequest::new(String::new(), Vec::new(), false, Vec::new()),
+        request: AskRequest::new(Vec::new(), false),
         config,
     };
     if let Err(e) = launch(state, View::Settings) {
@@ -248,24 +248,34 @@ pub(crate) fn emit_result(request_id: &str, result: &ChannelResult) -> i32 {
             println!("{}", output::cancel_output());
             0
         }
-        ChannelAction::Send => match image_writer::save(&result.images, request_id) {
-            Ok(paths) => {
-                println!(
-                    "{}",
-                    output::send_output(
-                        &result.selected_options,
-                        result.user_input.as_deref(),
-                        &paths,
-                        &result.files,
-                    )
-                );
-                0
+        ChannelAction::Send => {
+            // 逐题落盘图片（按题分子目录避免文件名冲突），再聚合输出。
+            let mut image_paths_per_q: Vec<Vec<String>> = Vec::with_capacity(result.answers.len());
+            for (i, answer) in result.answers.iter().enumerate() {
+                match image_writer::save(&answer.images, request_id, i) {
+                    Ok(paths) => image_paths_per_q.push(paths),
+                    Err(e) => {
+                        stderr_redirect::eprintln_real(&format!("错误: {}", e));
+                        return 1;
+                    }
+                }
             }
-            Err(e) => {
-                stderr_redirect::eprintln_real(&format!("错误: {}", e));
-                1
-            }
-        },
+
+            let rendered: Vec<output::RenderedAnswer> = result
+                .answers
+                .iter()
+                .enumerate()
+                .map(|(i, answer)| output::RenderedAnswer {
+                    selected_options: &answer.selected_options,
+                    user_input: answer.user_input.as_deref(),
+                    image_paths: &image_paths_per_q[i],
+                    file_paths: &answer.files,
+                })
+                .collect();
+
+            println!("{}", output::aggregate_output(&rendered));
+            0
+        }
     }
 }
 

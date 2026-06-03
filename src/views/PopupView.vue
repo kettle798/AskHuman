@@ -23,20 +23,31 @@ import type {
   AskRequest,
   FileAttachment,
   ImageAttachment,
+  Question,
+  QuestionAnswer,
   ThemeMode,
 } from "../lib/types";
 
 const request = ref<AskRequest | null>(null);
 const loadError = ref<string | null>(null);
-const chosen = ref<string[]>([]);
-const userInput = ref("");
-const images = ref<ImageAttachment[]>([]);
-// 用户拖入回复的非图片文件（仅展示路径，提交时透传绝对路径）。
-const replyFiles = ref<{ path: string; name: string }[]>([]);
+
+// 当前展示的问题索引（0 始）。
+const current = ref(0);
+
+// 按题保存的作答状态（长度与问题数一致）。
+const chosenByQ = ref<string[][]>([]);
+const inputByQ = ref<string[]>([]);
+const imagesByQ = ref<ImageAttachment[][]>([]);
+const replyFilesByQ = ref<{ path: string; name: string }[][]>([]);
+// 每题是否已被「查看过」。
+const visited = ref<boolean[]>([]);
+
 const submitting = ref(false);
 const inputRef = ref<HTMLTextAreaElement | null>(null);
 const fileRef = ref<HTMLInputElement | null>(null);
 const scrolled = ref(false);
+// 取消二次确认（已有部分回答时）。
+const showCancelConfirm = ref(false);
 
 function onScroll(e: Event) {
   scrolled.value = (e.target as HTMLElement).scrollTop > 0;
@@ -46,14 +57,47 @@ const pinned = ref(false);
 const theme = ref<ThemeMode>("system");
 const sourceName = ref("the Loop");
 
-// 提问附带的文件附件（AI→人，仅展示）。
-const attachments = computed<FileAttachment[]>(() => request.value?.files ?? []);
+const questions = computed<Question[]>(() => request.value?.questions ?? []);
+const total = computed(() => questions.value.length);
+const isMulti = computed(() => total.value > 1);
+const currentQuestion = computed<Question | null>(
+  () => questions.value[current.value] ?? null
+);
+const allViewed = computed(
+  () => visited.value.length > 0 && visited.value.every(Boolean)
+);
+const hasAnyAnswer = computed(() =>
+  questions.value.some((_, i) => isAnswered(i))
+);
+
+function isAnswered(i: number): boolean {
+  return (
+    (chosenByQ.value[i]?.length ?? 0) > 0 ||
+    (inputByQ.value[i]?.trim().length ?? 0) > 0 ||
+    (imagesByQ.value[i]?.length ?? 0) > 0 ||
+    (replyFilesByQ.value[i]?.length ?? 0) > 0
+  );
+}
+
+// ===== 当前题的作答视图（读写当前索引） =====
+const chosen = computed(() => chosenByQ.value[current.value] ?? []);
+const userInput = computed({
+  get: () => inputByQ.value[current.value] ?? "",
+  set: (v: string) => {
+    inputByQ.value[current.value] = v;
+  },
+});
+const images = computed(() => imagesByQ.value[current.value] ?? []);
+const replyFiles = computed(() => replyFilesByQ.value[current.value] ?? []);
+
+// 提问附带的文件附件（AI→人，仅展示），随当前题切换。
+const attachments = computed<FileAttachment[]>(
+  () => currentQuestion.value?.files ?? []
+);
 const selectedFile = ref<number | null>(null);
 const thumbs = ref<Record<string, string>>({});
-// 附件的系统图标 PNG data URL，挂载时预取，拖出时同步作为原生拖拽预览图标。
 const dragIcons = ref<Record<string, string>>({});
 const attRefs = ref<HTMLElement[]>([]);
-// 预览是否打开。打开后，面板保持 key，方向键经原生委托回传 preview-index 事件联动切换。
 const previewing = ref(false);
 let unlistenIndex: UnlistenFn | null = null;
 let unlistenFocus: UnlistenFn | null = null;
@@ -64,7 +108,6 @@ function setAttRef(el: Element | null, i: number) {
 }
 
 function selectFile(index: number) {
-  // WebKit 单击 div(tabindex) 默认不赋键盘焦点，需手动 focus，方向键才生效。
   focusAttachment(index);
 }
 
@@ -77,7 +120,6 @@ function focusAttachment(index: number) {
   attRefs.value[index]?.focus();
 }
 
-// 打开预览：预览当前选中项。面板保持 key，后续方向键由原生委托处理并回传索引。
 function previewSelected(index: number) {
   focusAttachment(index);
   previewing.value = true;
@@ -93,15 +135,12 @@ function stopPreview() {
   closePreview().catch(() => {});
 }
 
-// 点击附件以外区域：取消选中并关闭预览。
 function onBackgroundClick(e: MouseEvent) {
   if ((e.target as HTMLElement).closest(".attachment")) return;
   if (selectedFile.value !== null) selectedFile.value = null;
   stopPreview();
 }
 
-// 附件列表的键盘操作（在全局 keydown 中处理，不依赖具体 div 的 DOM 焦点；
-// 只要 WKWebView 是 first responder，事件即会冒泡到 window）。返回是否已处理。
 function handleAttachmentKey(e: KeyboardEvent): boolean {
   if (!attachments.value.length) return false;
   const i = selectedFile.value;
@@ -138,7 +177,6 @@ async function loadThumbs() {
   }
 }
 
-// 预取每个附件的系统图标，供拖出到其它应用时作为原生拖拽预览。
 async function loadDragIcons() {
   for (const file of attachments.value) {
     if (dragIcons.value[file.path]) continue;
@@ -150,11 +188,8 @@ async function loadDragIcons() {
   }
 }
 
-// 标记正在「拖出」附件：用于让本窗口的原生 drop 监听忽略这次拖拽，
-// 避免把拖出的 -f 附件又当作回复输入加回来（只能拖到窗口外）。
 const draggingOut = ref(false);
 
-// -f 附件胶囊右键：弹出原生 Finder 风格菜单（打开/打开方式/预览/在访达中显示/拷贝等）。
 function onAttachmentContextMenu(file: FileAttachment, i: number, e: MouseEvent) {
   e.preventDefault();
   selectFile(i);
@@ -163,14 +198,11 @@ function onAttachmentContextMenu(file: FileAttachment, i: number, e: MouseEvent)
   );
 }
 
-// -f 附件胶囊拖出到其它应用（如拖到 Dock 应用图标用其打开）。
 function onAttachmentDragStart(file: FileAttachment, e: DragEvent) {
-  // 阻止 WebView 自带的 HTML5 拖拽，改用 Tauri 原生拖拽会话。
   e.preventDefault();
   const icon = dragIcons.value[file.path] || thumbs.value[file.path] || "";
   draggingOut.value = true;
   startDrag({ item: [file.path], icon }, () => {
-    // 结束回调可能早于窗口 drop 事件，延迟复位兜底（路径匹配为主判据）。
     setTimeout(() => (draggingOut.value = false), 300);
   }).catch((err) => {
     draggingOut.value = false;
@@ -204,13 +236,17 @@ function openSettingsWindow() {
 }
 
 const renderedHtml = computed(() =>
-  request.value?.isMarkdown ? renderMarkdown(request.value.message) : ""
+  request.value?.isMarkdown && currentQuestion.value
+    ? renderMarkdown(currentQuestion.value.message)
+    : ""
 );
 
 function toggle(option: string) {
-  const i = chosen.value.indexOf(option);
-  if (i >= 0) chosen.value.splice(i, 1);
-  else chosen.value.push(option);
+  const arr = chosenByQ.value[current.value];
+  if (!arr) return;
+  const i = arr.indexOf(option);
+  if (i >= 0) arr.splice(i, 1);
+  else arr.push(option);
 }
 
 function pickFiles() {
@@ -221,7 +257,11 @@ async function addFiles(files: FileList | File[]) {
   for (const file of Array.from(files)) {
     if (!file.type.startsWith("image/")) continue;
     const data = await fileToDataUrl(file);
-    images.value.push({ data, mediaType: file.type, filename: file.name });
+    imagesByQ.value[current.value]?.push({
+      data,
+      mediaType: file.type,
+      filename: file.name,
+    });
   }
 }
 
@@ -232,18 +272,14 @@ function onFileChange(e: Event) {
 }
 
 function removeImage(index: number) {
-  images.value.splice(index, 1);
+  imagesByQ.value[current.value]?.splice(index, 1);
 }
 
-// 浏览器 drop 事件在 Tauri 下拿不到 files（原生层接管），仅保留以阻止默认行为；
-// 实际文件拖入经 Tauri 的 onDragDropEvent 处理（见 onMounted）。
 function onDrop(_e: DragEvent) {}
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?|svg)$/i;
 
-// 拖入的本地文件：图片读为 data URL 作为图片附件；非图片以绝对路径作为回复文件附件。
 async function addDroppedPaths(paths: string[]) {
-  // -f 附件路径集合：拖出附件若落回窗口内，路径会与之相同，直接跳过（确定性判断，不依赖时序）。
   const attachPaths = new Set(attachments.value.map((a) => a.path));
   for (const path of paths) {
     if (attachPaths.has(path)) continue;
@@ -253,18 +289,18 @@ async function addDroppedPaths(paths: string[]) {
         const data = await readImageDataUrl(path);
         const semi = data.indexOf(";");
         const mediaType = semi > 5 ? data.slice(5, semi) : "image/png";
-        images.value.push({ data, mediaType, filename: name });
+        imagesByQ.value[current.value]?.push({ data, mediaType, filename: name });
       } catch (err) {
         console.error("读取拖入图片失败", path, err);
       }
     } else if (!replyFiles.value.some((f) => f.path === path)) {
-      replyFiles.value.push({ path, name });
+      replyFilesByQ.value[current.value]?.push({ path, name });
     }
   }
 }
 
 function removeReplyFile(index: number) {
-  replyFiles.value.splice(index, 1);
+  replyFilesByQ.value[current.value]?.splice(index, 1);
 }
 
 async function onPaste(e: ClipboardEvent) {
@@ -284,26 +320,65 @@ async function onPaste(e: ClipboardEvent) {
   }
 }
 
-async function send() {
+// ===== 多题导航 =====
+function markVisited(i: number) {
+  if (i >= 0 && i < visited.value.length) visited.value[i] = true;
+}
+
+function goTo(index: number) {
+  if (index < 0 || index >= total.value || index === current.value) return;
+  stopPreview();
+  selectedFile.value = null;
+  current.value = index;
+  markVisited(index);
+  loadThumbs();
+  loadDragIcons();
+  requestAnimationFrame(() => inputRef.value?.focus({ preventScroll: true }));
+}
+
+function goPrev() {
+  goTo(current.value - 1);
+}
+
+function goNext() {
+  goTo(current.value + 1);
+}
+
+function collectAnswers(): QuestionAnswer[] {
+  return questions.value.map((q, i) => ({
+    selectedOptions: q.predefinedOptions.filter((o) =>
+      (chosenByQ.value[i] ?? []).includes(o)
+    ),
+    userInput: inputByQ.value[i] ?? "",
+    images: imagesByQ.value[i] ?? [],
+    files: (replyFilesByQ.value[i] ?? []).map((f) => f.path),
+  }));
+}
+
+async function submit() {
   if (submitting.value) return;
   submitting.value = true;
-  const opts = request.value?.predefinedOptions ?? [];
-  const selectedOptions = opts.filter((o) => chosen.value.includes(o));
   try {
-    await submitPopup({
-      selectedOptions,
-      userInput: userInput.value,
-      images: images.value,
-      files: replyFiles.value.map((f) => f.path),
-    });
+    await submitPopup({ answers: collectAnswers() });
   } catch {
     submitting.value = false;
   }
 }
 
-async function cancel() {
+// 取消入口：有回答时二次确认，否则直接取消。
+function requestCancel() {
+  if (submitting.value) return;
+  if (hasAnyAnswer.value) {
+    showCancelConfirm.value = true;
+  } else {
+    doCancel();
+  }
+}
+
+async function doCancel() {
   if (submitting.value) return;
   submitting.value = true;
+  showCancelConfirm.value = false;
   try {
     await cancelPopup();
   } catch {
@@ -311,19 +386,26 @@ async function cancel() {
   }
 }
 
+function dismissCancelConfirm() {
+  showCancelConfirm.value = false;
+}
+
 function onKeydown(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
     e.preventDefault();
-    send();
+    if (isMulti.value) {
+      if (allViewed.value) submit();
+      else goNext();
+    } else {
+      submit();
+    }
     return;
   }
-  // 取消改用 ⌘/Ctrl+W（不再用 Esc，避免误触关闭弹窗）。
   if ((e.metaKey || e.ctrlKey) && (e.key === "w" || e.key === "W")) {
     e.preventDefault();
-    cancel();
+    requestCancel();
     return;
   }
-  // 在文本输入框内不拦截方向键/空格（让光标正常移动、输入空格）。
   const tgt = e.target as HTMLElement | null;
   const typing =
     tgt && (tgt.tagName === "TEXTAREA" || tgt.tagName === "INPUT");
@@ -333,8 +415,6 @@ function onKeydown(e: KeyboardEvent) {
 onMounted(async () => {
   window.addEventListener("paste", onPaste);
   window.addEventListener("keydown", onKeydown);
-  // 面板内方向键切换时，原生委托回传新索引 → 同步高亮 + 同步把 DOM 焦点移到该项，
-  // 避免「最初点击项仍持有 :focus 焦点环、当前项又有 .selected」的双焦点。
   unlistenIndex = await listen<number>("preview-index", (e) => {
     const i = e.payload;
     if (i >= 0 && i < attachments.value.length) {
@@ -346,17 +426,13 @@ onMounted(async () => {
       });
     }
   });
-  // 面板关闭（Esc/点击外部）经 endPreviewPanelControl 回传 → 复位预览状态，
-  // 并把 DOM 焦点落在当前选中项，保证只有单一焦点。
   unlistenFocus = await listen("preview-closed", () => {
     previewing.value = false;
     const i = selectedFile.value;
     if (i !== null) nextTick(() => attRefs.value[i]?.focus());
   });
-  // 原生文件拖放：Tauri 接管 OS 拖放，drop 时回传文件路径，逐个读为图片附件。
   unlistenDrop = await getCurrentWebview().onDragDropEvent((event) => {
     if (event.payload.type !== "drop") return;
-    // 忽略由「拖出附件」自身产生、又落回窗口内的 drop，避免把附件当回复输入。
     if (draggingOut.value) {
       draggingOut.value = false;
       return;
@@ -370,6 +446,13 @@ onMounted(async () => {
     pinned.value = init.alwaysOnTop;
     sourceName.value = init.sourceName;
     request.value = init.request;
+    const n = init.request.questions.length;
+    chosenByQ.value = Array.from({ length: n }, () => []);
+    inputByQ.value = Array.from({ length: n }, () => "");
+    imagesByQ.value = Array.from({ length: n }, () => []);
+    replyFilesByQ.value = Array.from({ length: n }, () => []);
+    visited.value = Array.from({ length: n }, () => false);
+    if (n > 0) visited.value[0] = true;
     loadThumbs();
     loadDragIcons();
     requestAnimationFrame(() => inputRef.value?.focus({ preventScroll: true }));
@@ -405,6 +488,7 @@ onBeforeUnmount(() => {
       <span class="brand">
         <span class="brand-dot"></span>
         <span class="brand-title">Question from {{ sourceName }}</span>
+        <span v-if="isMulti" class="brand-counter">[{{ current + 1 }}/{{ total }}]</span>
       </span>
       <span class="nav-actions">
         <button
@@ -456,7 +540,7 @@ onBeforeUnmount(() => {
         class="markdown-body"
         v-html="renderedHtml"
       ></div>
-      <pre v-else class="plain-body">{{ request.message }}</pre>
+      <pre v-else class="plain-body">{{ currentQuestion?.message }}</pre>
 
       <div v-if="attachments.length" class="attachments">
         <div class="att-caption">
@@ -495,9 +579,9 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div v-if="request.predefinedOptions.length" class="options">
+      <div v-if="currentQuestion && currentQuestion.predefinedOptions.length" class="options">
         <div
-          v-for="(opt, i) in request.predefinedOptions"
+          v-for="(opt, i) in currentQuestion.predefinedOptions"
           :key="i"
           class="option"
           :class="{ selected: chosen.includes(opt) }"
@@ -514,6 +598,13 @@ onBeforeUnmount(() => {
         class="textarea"
         placeholder="输入你的回复…"
       ></textarea>
+
+      <!-- 多问题：添加图片移到输入框下方 -->
+      <div v-if="isMulti" class="under-input">
+        <button class="btn btn-icon" type="button" @click="pickFiles">
+          添加图片
+        </button>
+      </div>
 
       <div v-if="images.length" class="thumbs">
         <div v-for="(img, i) in images" :key="i" class="thumb">
@@ -540,30 +631,82 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div class="footer" data-tauri-drag-region>
+    <input
+      ref="fileRef"
+      type="file"
+      accept="image/*"
+      multiple
+      hidden
+      @change="onFileChange"
+    />
+
+    <!-- 多问题底部：取消(左) + 上一个/下一个/提交(右) -->
+    <div v-if="isMulti" class="footer" data-tauri-drag-region>
+      <button class="btn" type="button" :disabled="submitting" @click="requestCancel">
+        取消 <kbd class="sc">⌘W</kbd>
+      </button>
+      <span class="spacer"></span>
+      <button
+        class="btn"
+        type="button"
+        :disabled="submitting || current === 0"
+        @click="goPrev"
+      >
+        上一个
+      </button>
+      <button
+        class="btn"
+        :class="{ 'btn-primary': !allViewed }"
+        type="button"
+        :disabled="submitting || current === total - 1"
+        @click="goNext"
+      >
+        下一个 <kbd v-if="!allViewed" class="sc">⌘↵</kbd>
+      </button>
+      <button
+        v-if="allViewed"
+        class="btn btn-primary"
+        type="button"
+        :disabled="submitting"
+        @click="submit"
+      >
+        提交 <kbd class="sc">⌘↵</kbd>
+      </button>
+    </div>
+
+    <!-- 单问题底部：维持现状 -->
+    <div v-else class="footer" data-tauri-drag-region>
       <button class="btn btn-icon" type="button" @click="pickFiles">
         添加图片
       </button>
-      <input
-        ref="fileRef"
-        type="file"
-        accept="image/*"
-        multiple
-        hidden
-        @change="onFileChange"
-      />
       <span class="spacer"></span>
-      <button class="btn" type="button" :disabled="submitting" @click="cancel">
+      <button class="btn" type="button" :disabled="submitting" @click="requestCancel">
         取消 <kbd class="sc">⌘W</kbd>
       </button>
       <button
         class="btn btn-primary"
         type="button"
         :disabled="submitting"
-        @click="send"
+        @click="submit"
       >
         发送 <kbd class="sc">⌘↵</kbd>
       </button>
+    </div>
+
+    <!-- 取消二次确认 -->
+    <div v-if="showCancelConfirm" class="confirm-overlay" @click.self="dismissCancelConfirm">
+      <div class="confirm-box">
+        <p class="confirm-title">确定要取消吗？</p>
+        <p class="confirm-desc">已填写的回答将全部丢失。</p>
+        <div class="confirm-actions">
+          <button class="btn" type="button" @click="dismissCancelConfirm">
+            继续作答
+          </button>
+          <button class="btn btn-danger" type="button" @click="doCancel">
+            确定取消
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -583,14 +726,11 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: var(--space-2);
   padding: 8px 12px 8px 14px;
-  /* 始终占 1px、仅切换颜色：避免布局跳动；不加 transition/mask，
-     以免在透明窗口上促成不透明合成层（会破坏毛玻璃）。 */
   border-bottom: 1px solid transparent;
 }
 .navbar.scrolled {
   border-bottom-color: var(--border);
 }
-/* macOS Overlay 标题栏：下压让出红绿灯空间 */
 .vibrancy .navbar {
   padding-top: 30px;
 }
@@ -609,7 +749,6 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 0 3px color-mix(in srgb, #30d158 22%, transparent);
   animation: brand-dot-breathe 2.4s ease-in-out infinite;
 }
-/* 扩散的光环：用伪元素做 ping 式涟漪，避免影响 dot 自身阴影 */
 .brand-dot::after {
   content: "";
   position: absolute;
@@ -654,6 +793,12 @@ onBeforeUnmount(() => {
   font-weight: 600;
   color: var(--text-primary);
   letter-spacing: 0.1px;
+}
+.brand-counter {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
 }
 .nav-actions {
   margin-left: auto;
@@ -713,7 +858,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: var(--space-2);
 }
-/* 附件区：与「选项」明显区分——填充式胶囊 + 彩色文件瓦片 + 选中外环 */
+/* 附件区 */
 .attachments {
   display: flex;
   flex-direction: column;
@@ -801,6 +946,11 @@ onBeforeUnmount(() => {
   font-size: 11px;
   color: var(--text-secondary);
 }
+/* 多问题：输入框下方的「添加图片」 */
+.under-input {
+  display: flex;
+  margin-top: -4px;
+}
 .footer {
   flex: 0 0 auto;
   display: flex;
@@ -814,7 +964,7 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   pointer-events: none;
 }
-/* 回复文件 chip（拖入的非图片文件，自适应换行） */
+/* 回复文件 chip */
 .reply-files {
   display: flex;
   flex-wrap: wrap;
@@ -877,5 +1027,49 @@ onBeforeUnmount(() => {
 }
 .btn-primary .sc {
   opacity: 0.85;
+}
+
+/* 取消二次确认弹层 */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.32);
+  z-index: 50;
+}
+.confirm-box {
+  width: min(320px, 84%);
+  background: var(--card-bg, var(--bg-elevated));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 12px);
+  padding: 18px 18px 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+  text-align: center;
+}
+.confirm-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 6px;
+}
+.confirm-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 0 0 16px;
+}
+.confirm-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+.btn-danger {
+  color: #fff;
+  background: #ff453a;
+  border-color: transparent;
+}
+.btn-danger:hover {
+  background: #e23b31;
 }
 </style>

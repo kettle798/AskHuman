@@ -4,7 +4,7 @@ use crate::app::coordinator::Coordinator;
 use crate::app::AppState;
 use crate::config::{AppConfig, ThemeMode};
 use crate::integrations::cursor_hook;
-use crate::models::{AskRequest, ChannelAction, ChannelResult, ImageAttachment};
+use crate::models::{AskRequest, ChannelAction, ChannelResult, QuestionAnswer};
 use crate::telegram::TelegramClient;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -31,29 +31,19 @@ pub fn popup_init(state: State<AppState>) -> PopupInit {
     }
 }
 
-/// 前端提交的作答内容。
+/// 前端提交的作答内容（按问题顺序，每题一项）。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PopupSubmission {
     #[serde(default)]
-    selected_options: Vec<String>,
-    #[serde(default)]
-    user_input: String,
-    #[serde(default)]
-    images: Vec<ImageAttachment>,
-    /// 用户拖入回复的非图片文件绝对路径（直接透传）。
-    #[serde(default)]
-    files: Vec<String>,
+    answers: Vec<QuestionAnswer>,
 }
 
 #[tauri::command]
 pub fn submit_popup(app: AppHandle, submission: PopupSubmission) {
     let result = ChannelResult {
         action: ChannelAction::Send,
-        selected_options: submission.selected_options,
-        user_input: Some(submission.user_input),
-        images: submission.images,
-        files: submission.files,
+        answers: submission.answers,
         source_channel_id: "popup".to_string(),
     };
     if let Some(c) = app.try_state::<Arc<Coordinator>>() {

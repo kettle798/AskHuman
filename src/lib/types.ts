@@ -1,8 +1,12 @@
 export interface AskRequest {
   id: string;
+  isMarkdown: boolean;
+  questions: Question[];
+}
+
+export interface Question {
   message: string;
   predefinedOptions: string[];
-  isMarkdown: boolean;
   files: FileAttachment[];
 }
 
@@ -28,11 +32,15 @@ export interface PopupInit {
   sourceName: string;
 }
 
-export interface PopupSubmission {
+export interface QuestionAnswer {
   selectedOptions: string[];
   userInput: string;
   images: ImageAttachment[];
   files: string[];
+}
+
+export interface PopupSubmission {
+  answers: QuestionAnswer[];
 }
 
 export interface GeneralConfig {

@@ -16,31 +16,49 @@ pub fn source_name() -> String {
         .unwrap_or_else(|| DEFAULT_SOURCE_NAME.to_string())
 }
 
-/// 一次提问请求。
+/// 一次提问请求（可含多个问题）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AskRequest {
     pub id: String,
-    pub message: String,
-    pub predefined_options: Vec<String>,
+    /// 是否按 Markdown 渲染（全局，对所有问题生效）。
     pub is_markdown: bool,
+    /// 问题列表（至少一个）。
+    #[serde(default)]
+    pub questions: Vec<Question>,
+}
+
+impl AskRequest {
+    pub fn new(questions: Vec<Question>, is_markdown: bool) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            is_markdown,
+            questions,
+        }
+    }
+}
+
+/// 单个问题（其选项、附件与该问题绑定；是否 Markdown 见 `AskRequest::is_markdown`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Question {
+    pub message: String,
+    #[serde(default)]
+    pub predefined_options: Vec<String>,
     /// 提问附带的文件（AI→人，仅用于弹窗展示，不进入结果输出）。
     #[serde(default)]
     pub files: Vec<FileAttachment>,
 }
 
-impl AskRequest {
+impl Question {
     pub fn new(
         message: String,
         predefined_options: Vec<String>,
-        is_markdown: bool,
         files: Vec<FileAttachment>,
     ) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
             message,
             predefined_options,
-            is_markdown,
             files,
         }
     }
@@ -74,11 +92,10 @@ pub enum ChannelAction {
     Cancel,
 }
 
-/// 某个 Channel 给出的最终回答。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 对单个问题的回答。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ChannelResult {
-    pub action: ChannelAction,
+pub struct QuestionAnswer {
     #[serde(default)]
     pub selected_options: Vec<String>,
     #[serde(default)]
@@ -88,6 +105,29 @@ pub struct ChannelResult {
     /// 用户随回复附带的本地文件绝对路径（非图片，直接透传不复制）。
     #[serde(default)]
     pub files: Vec<String>,
+}
+
+impl QuestionAnswer {
+    /// 是否为空回答：没选项、没（去空白后的）输入、没图片、没回复文件。
+    pub fn is_empty(&self) -> bool {
+        self.selected_options.is_empty()
+            && self
+                .user_input
+                .as_deref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
+            && self.images.is_empty()
+            && self.files.is_empty()
+    }
+}
+
+/// 某个 Channel 给出的最终回答（按问题顺序，每题一项）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelResult {
+    pub action: ChannelAction,
+    #[serde(default)]
+    pub answers: Vec<QuestionAnswer>,
     pub source_channel_id: String,
 }
 
@@ -95,10 +135,7 @@ impl ChannelResult {
     pub fn cancel(source_channel_id: impl Into<String>) -> Self {
         Self {
             action: ChannelAction::Cancel,
-            selected_options: Vec::new(),
-            user_input: None,
-            images: Vec::new(),
-            files: Vec::new(),
+            answers: Vec::new(),
             source_channel_id: source_channel_id.into(),
         }
     }
