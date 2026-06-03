@@ -157,6 +157,7 @@ fn launch(state: AppState, view: View) -> tauri::Result<()> {
     let show_popup = state.config.channels.popup.enabled || !telegram_active;
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_drag::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             crate::commands::popup_init,
@@ -166,6 +167,7 @@ fn launch(state: AppState, view: View) -> tauri::Result<()> {
             crate::commands::preview_attachments,
             crate::commands::close_preview,
             crate::commands::read_image_data_url,
+            crate::commands::file_icon_data_url,
             crate::commands::get_settings,
             crate::commands::save_settings,
             crate::commands::get_prompt,

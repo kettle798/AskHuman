@@ -127,6 +127,27 @@ pub fn read_image_data_url(path: String) -> Result<String, String> {
     Ok(format!("data:{};base64,{}", mime, B64.encode(bytes)))
 }
 
+/// 获取文件的系统图标（macOS：NSWorkspace，Finder 同款）并返回 PNG data URL，
+/// 供前端把 -f 附件胶囊拖出到其它应用时作为拖拽预览图标。
+#[tauri::command]
+pub fn file_icon_data_url(app: AppHandle, path: String) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::sync::mpsc::channel;
+        let (tx, rx) = channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(crate::macos_quicklook::file_icon_png_base64(&path));
+        })
+        .map_err(|e| e.to_string())?;
+        rx.recv().map_err(|e| e.to_string())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, path);
+        Err("当前平台不支持获取文件图标".into())
+    }
+}
+
 fn open_with_system(path: &str) -> Result<(), String> {
     use std::process::Command;
     #[cfg(target_os = "macos")]

@@ -32,6 +32,8 @@ anyhow = "1"
 thiserror = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+# 从窗口向系统发起原生文件拖拽（-f 附件胶囊可拖到其它应用打开）。
+tauri-plugin-drag = "2"
 # 检测系统深/浅色，用于 system 主题下给窗口设置正确底色（消除白闪）。
 # Linux 端依赖（zbus）仅在 Linux 目标编译，不影响 macOS 编译速度。
 dark-light = "2"
@@ -48,7 +50,7 @@ libc = "0.2"
 # 协议（acceptsPreviewPanelControl/begin/end）控制面板，从而触发 previewPanel:handleEvent: 回调。
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSURL"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSURL", "NSGeometry"] }
 objc2-app-kit = { version = "0.3", features = ["NSResponder", "NSEvent"] }
 
 # 较快的 release 配置（不启用 LTO，避免原 Rust 版的慢链接）。

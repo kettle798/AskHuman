@@ -13,7 +13,9 @@ import {
   previewAttachments,
   closePreview,
   readImageDataUrl,
+  fileIconDataUrl,
 } from "../lib/ipc";
+import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import { renderMarkdown } from "../lib/markdown";
 import { applyTheme, fileToDataUrl } from "../lib/theme";
 import type {
@@ -47,6 +49,8 @@ const sourceName = ref("the Loop");
 const attachments = computed<FileAttachment[]>(() => request.value?.files ?? []);
 const selectedFile = ref<number | null>(null);
 const thumbs = ref<Record<string, string>>({});
+// 附件的系统图标 PNG data URL，挂载时预取，拖出时同步作为原生拖拽预览图标。
+const dragIcons = ref<Record<string, string>>({});
 const attRefs = ref<HTMLElement[]>([]);
 // 预览是否打开。打开后，面板保持 key，方向键经原生委托回传 preview-index 事件联动切换。
 const previewing = ref(false);
@@ -133,6 +137,37 @@ async function loadThumbs() {
   }
 }
 
+// 预取每个附件的系统图标，供拖出到其它应用时作为原生拖拽预览。
+async function loadDragIcons() {
+  for (const file of attachments.value) {
+    if (dragIcons.value[file.path]) continue;
+    try {
+      dragIcons.value[file.path] = await fileIconDataUrl(file.path);
+    } catch {
+      /* 取图标失败：拖出时回退用缩略图或不带预览 */
+    }
+  }
+}
+
+// 标记正在「拖出」附件：用于让本窗口的原生 drop 监听忽略这次拖拽，
+// 避免把拖出的 -f 附件又当作回复输入加回来（只能拖到窗口外）。
+const draggingOut = ref(false);
+
+// -f 附件胶囊拖出到其它应用（如拖到 Dock 应用图标用其打开）。
+function onAttachmentDragStart(file: FileAttachment, e: DragEvent) {
+  // 阻止 WebView 自带的 HTML5 拖拽，改用 Tauri 原生拖拽会话。
+  e.preventDefault();
+  const icon = dragIcons.value[file.path] || thumbs.value[file.path] || "";
+  draggingOut.value = true;
+  startDrag({ item: [file.path], icon }, () => {
+    // 结束回调可能早于窗口 drop 事件，延迟复位兜底（路径匹配为主判据）。
+    setTimeout(() => (draggingOut.value = false), 300);
+  }).catch((err) => {
+    draggingOut.value = false;
+    console.error("拖出附件失败", err);
+  });
+}
+
 async function togglePin() {
   pinned.value = !pinned.value;
   try {
@@ -198,7 +233,10 @@ const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?|svg)$/i;
 
 // 拖入的本地文件：图片读为 data URL 作为图片附件；非图片以绝对路径作为回复文件附件。
 async function addDroppedPaths(paths: string[]) {
+  // -f 附件路径集合：拖出附件若落回窗口内，路径会与之相同，直接跳过（确定性判断，不依赖时序）。
+  const attachPaths = new Set(attachments.value.map((a) => a.path));
   for (const path of paths) {
+    if (attachPaths.has(path)) continue;
     const name = path.split(/[\\/]/).pop() || "file";
     if (IMAGE_EXT.test(path)) {
       try {
@@ -307,7 +345,13 @@ onMounted(async () => {
   });
   // 原生文件拖放：Tauri 接管 OS 拖放，drop 时回传文件路径，逐个读为图片附件。
   unlistenDrop = await getCurrentWebview().onDragDropEvent((event) => {
-    if (event.payload.type === "drop") addDroppedPaths(event.payload.paths);
+    if (event.payload.type !== "drop") return;
+    // 忽略由「拖出附件」自身产生、又落回窗口内的 drop，避免把附件当回复输入。
+    if (draggingOut.value) {
+      draggingOut.value = false;
+      return;
+    }
+    addDroppedPaths(event.payload.paths);
   });
   try {
     const init = await popupInit();
@@ -317,6 +361,7 @@ onMounted(async () => {
     sourceName.value = init.sourceName;
     request.value = init.request;
     loadThumbs();
+    loadDragIcons();
     requestAnimationFrame(() => inputRef.value?.focus({ preventScroll: true }));
   } catch (err) {
     console.error("popup_init 失败", err);
@@ -418,9 +463,11 @@ onBeforeUnmount(() => {
             class="attachment"
             :class="{ selected: selectedFile === i }"
             tabindex="0"
+            draggable="true"
             :title="file.path"
             @click="selectFile(i)"
             @dblclick="openFile(file)"
+            @dragstart="onAttachmentDragStart(file, $event)"
           >
             <span class="att-icon" :class="{ 'is-image': file.isImage && thumbs[file.path] }">
               <img v-if="file.isImage && thumbs[file.path]" :src="thumbs[file.path]" alt="" />
