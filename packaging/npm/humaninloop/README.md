@@ -1,4 +1,4 @@
-# @humaninloop/cli
+# askhuman
 
 跨平台「Human-in-the-loop」交互工具。命令行 `AskHuman` 在 AI 助手需要确认/补充时弹出窗口（或经 Telegram）收集人类回应，并把结果按固定区块写到 stdout。
 
@@ -7,18 +7,18 @@
 ## 单独使用
 
 ```bash
-npm i -g @humaninloop/cli
+npm i -g askhuman
 AskHuman "要不要继续？" -o "继续" -o "停止"
 ```
 
 ## 作为依赖（程序集成）
 
 ```bash
-npm i @humaninloop/cli
+npm i askhuman
 ```
 
 ```js
-import { getBinaryPath, isAvailable } from "@humaninloop/cli";
+import { getBinaryPath, isAvailable } from "askhuman";
 import { spawnSync } from "node:child_process";
 
 if (!isAvailable()) {
