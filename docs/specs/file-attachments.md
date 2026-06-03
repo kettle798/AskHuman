@@ -64,3 +64,14 @@ AskHuman "请看看这个文档有没有问题？" -f ~/Documents/some_file.md -
 ## 6. 反馈意见
 
 （后续 review 中产生的调整意见追加于此，标注日期。）
+
+### 2026-06-03 实现期迭代调整
+
+- **空格预览改为原生 QLPreviewPanel**（替代 D7 的 `qlmanage -p`）：经 objc2 定义 `NSResponder` 子类并插入弹窗响应链，实现 `QLPreviewPanelController`/`DataSource`/`Delegate`，方向键在面板内逐个切换附件，弹窗侧据 `preview-index` 同步高亮；面板关闭经 `preview-closed` 复位。Windows/Linux 仍回退为「打开」。
+- **取消快捷键调整**：移除 `Esc` 关闭弹窗（`Esc` 仅用于关预览），改为 `⌘W` 取消、`⌘↵` 发送，并在按钮上标注。
+- **`-f` 附件胶囊新增 macOS 原生能力**：
+  - **拖出**到其它应用（引入 `tauri-plugin-drag`，拖到 Dock/应用图标用其打开）；拖拽预览用 `NSWorkspace` 取的真实文件图标（光栅化到 64×64）。拖回窗口内的 `-f` 附件按路径匹配忽略，不计入回复。
+  - **右键菜单**（原生 `NSMenu`，Finder 风格）：打开 / 打开方式▸（应用列表+图标、其他…）/ 快速查看 / 在访达中显示 / 拷贝文件 / 拷贝路径。
+- **新增「回复文件」方向（人→AI）**：弹窗支持拖入非图片文件，作为回复文件附件（输入框下方胶囊、可移除），提交后在 stdout 新增 `[文件]` 区块输出其绝对路径（不复制）。注意这与 D1 不冲突：D1 约束的是 `-f` 提问附件（AI→人）不进 stdout；`[文件]` 属于回复方向，与 `[图片]` 同类。
+- **来源名定制**：新增环境变量 `ASKHUMAN_ENV_SOURCE_NAME`，定制弹窗标题与 Telegram 消息头「Question from {名称}」，缺省回退「the Loop」。
+- 因引入 `tauri-plugin-drag`，相应放宽「不引入新 Tauri 插件」约束（仅限该拖出能力）；其余打开/预览/读取缩略图仍为自定义命令。

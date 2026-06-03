@@ -67,6 +67,9 @@ AskHuman "看看这个文档？" -f ~/Documents/spec.md -f ./diagram.png
 # 关闭 Markdown 渲染（按纯文本显示）
 AskHuman "纯文本内容" --no-markdown
 
+# 自定义来源名：弹窗标题与 Telegram 消息头由「the Loop」变为指定名称
+ASKHUMAN_ENV_SOURCE_NAME=Agent AskHuman "要继续吗？"   # 标题显示 “Question from Agent”
+
 # 打开设置界面
 AskHuman --settings
 
@@ -88,7 +91,12 @@ AskHuman --version
 
 [图片]
 /var/folders/.../humaninloop/<id>/img-1.png
+
+[文件]
+/Users/me/Downloads/report.pdf
 ```
+
+> `[图片]` 为粘贴 / 拖入的图片（落盘后给出路径）；`[文件]` 为拖入回复的非图片文件（直接透传其绝对路径，不复制）。
 
 取消时：
 
@@ -109,8 +117,8 @@ AskHuman --version
 
 ## 通信 Channel
 
-- **本地弹窗**：默认启用。支持预定义选项、自由文本、图片（粘贴 / 拖拽 / 选择文件）。顶部导航栏可切换置顶、主题、打开设置。提问附带的文件（`-f`）展示在提问下方：单击选中、双击打开、空格预览（macOS 走 QuickLook，其它平台回退为打开）。
-- **Telegram**：填写 Bot Token 与数字 Chat ID 后启用。发送提问（选项为 inline 按钮）+ 接收文字回复与「发送」操作；不接收图片。提问附带的文件（`-f`）会一并发送（图片用 sendPhoto、其它用 sendDocument）。
+- **本地弹窗**：默认启用。支持预定义选项、自由文本、图片（粘贴 / 拖拽 / 选择文件）。拖入文件时，图片作为图片附件、非图片作为回复文件附件（输入框下方以胶囊展示、可移除，提交后进入 `[文件]` 区块）。顶部导航栏可切换置顶、主题、打开设置。提问附带的文件（`-f`）展示在提问下方：单击选中、双击打开、空格预览（macOS 走 QuickLook，其它平台回退为打开）；在 macOS 上还可**拖出**到其它应用（如拖到 Dock 应用图标打开），以及**右键**弹出 Finder 风格菜单（打开 / 打开方式 / 快速查看 / 在访达中显示 / 拷贝 / 拷贝路径）。
+- **Telegram**：填写 Bot Token 与数字 Chat ID 后启用。发送提问（选项为 inline 按钮）+ 接收文字回复与「发送」操作；不接收图片。消息头会带来源名「Question from {名称}」（见 `ASKHUMAN_ENV_SOURCE_NAME`）。提问附带的文件（`-f`）会一并发送（图片用 sendPhoto、其它用 sendDocument）。
 
 多个 Channel 同时启用时，哪一端先「发送 / 取消」就采用哪一端的结果，其余自动收尾。当本地弹窗所在环境无法显示 GUI（如 Linux 缺 WebKitGTK、无显示环境）时：若已配置 Telegram，会自动改走 Telegram 并在 stderr 说明原因；若无其他可用 Channel，则以退出码 3 告知调用方降级。
 

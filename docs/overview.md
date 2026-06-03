@@ -20,7 +20,8 @@ HumanInLoop/
   src/                       前端
     main.ts                  挂载 App，引入三套样式
     App.vue                  按 URL ?view=popup|settings 路由
-    views/PopupView.vue      弹窗：顶部导航栏 + Markdown/选项/文本/图片 + 底部操作条
+    views/PopupView.vue      弹窗：顶部导航栏 + Markdown/选项/文本/图片 + -f 附件区(选中/打开/
+                             预览/拖出/右键) + 拖入回复文件胶囊 + 底部操作条
     views/SettingsView.vue   设置：通用 / 集成 / 通信渠道 三 Tab
     lib/ipc.ts               invoke 封装（与后端命令一一对应）
     lib/types.ts             与 Rust 模型对齐的 TS 类型
@@ -29,18 +30,23 @@ HumanInLoop/
     styles/{tokens,base,controls}.css   设计 token / 重置+Markdown / 控件
 
   src-tauri/                 Rust 后端
-    Cargo.toml               依赖（tauri[macos-private-api]、reqwest、tokio、dark-light、libc…）
+    Cargo.toml               依赖（tauri[macos-private-api]、reqwest、tokio、dark-light、libc、
+                             tauri-plugin-drag、macOS: objc2 / objc2-foundation / objc2-app-kit…）
     tauri.conf.json          frontendDist=../dist；app.macOSPrivateApi=true
-    capabilities/default.json 窗口权限（含 start-dragging / set-always-on-top）
+    capabilities/default.json 窗口权限（含 start-dragging / set-always-on-top / drag:default）
     src/
       main.rs                入口：声明模块，调用 cli::dispatch()
+      macos_quicklook.rs     (macOS) 原生 QLPreviewPanel 预览 + 文件系统图标(file_icon_png_base64)
+      macos_menu.rs          (macOS) -f 附件原生右键菜单（NSMenu，Finder 风格）
       cli/
         mod.rs               argv 分发（--help/--version/--settings/无参/提问）
-        args.rs              提问参数解析（message / -o / --no-markdown）
-        output.rs            结果区块格式化（[选择的选项]/[用户输入]/[图片]/[状态]）
+        args.rs              提问参数解析（message / -o / --no-markdown / -f）
+        file_attachment.rs   -f 路径解析/校验（~/相对路径 → 绝对路径 + 元信息）
+        output.rs            结果区块格式化（[选择的选项]/[用户输入]/[图片]/[文件]/[状态]）
         image_writer.rs      图片 base64 落盘 + 文件名 sanitize + ext 映射
         help.rs              帮助/版本文案
-      models.rs              AskRequest / ChannelResult / ImageAttachment / ChannelAction
+      models.rs              AskRequest(含 files) / FileAttachment / ChannelResult(含 files) /
+                             ImageAttachment / ChannelAction / source_name()
       config.rs              AppConfig 读写 ~/.humaninloop/config.json（原子写、容错解码）
       paths.rs               home/config/temp 路径
       prompts.rs             CLI 参考提示词常量
@@ -72,12 +78,16 @@ HumanInLoop/
 
 ## 前端 ↔ 后端命令（`commands.rs` ↔ `lib/ipc.ts`）
 
-- 弹窗：`popup_init`（取请求+主题+是否置顶）、`submit_popup`、`cancel_popup`
+- 弹窗：`popup_init`（取请求+主题+是否置顶+来源名）、`submit_popup`、`cancel_popup`
+- 附件：`open_path`、`preview_attachments` / `close_preview`(QLPreviewPanel)、`read_image_data_url`(缩略图)、
+  `file_icon_data_url`(系统图标，拖出预览)、`show_attachment_menu`(原生右键菜单)
 - 设置：`get_settings`、`save_settings`、`get_prompt`、`set_theme`、`update_theme`(持久化+应用)、`open_settings`(同进程建设置窗)
 - Cursor Hook：`cursor_hook_status` / `install` / `uninstall` / `reveal`
 - Telegram：`telegram_test`
 
-窗口拖拽用 `data-tauri-drag-region`（导航栏/底部空白）；置顶用前端 `@tauri-apps/api/window` setAlwaysOnTop。
+窗口拖拽用 `data-tauri-drag-region`（导航栏/底部空白/设置 tab 栏）；置顶用前端 `@tauri-apps/api/window` setAlwaysOnTop。
+文件拖入用 `onDragDropEvent`（原生路径）；`-f` 附件拖出用 `tauri-plugin-drag` 的 `startDrag`。
+来源名（弹窗标题 / Telegram 消息头「Question from {名称}」）由环境变量 `ASKHUMAN_ENV_SOURCE_NAME` 定制，缺省「the Loop」。
 
 ## UI / 主题
 
