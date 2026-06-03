@@ -158,13 +158,13 @@ fn launch(state: AppState, view: View) -> tauri::Result<()> {
 
     let app = tauri::Builder::default()
         .manage(state)
-        .manage(crate::commands::PreviewShared::default())
         .invoke_handler(tauri::generate_handler![
             crate::commands::popup_init,
             crate::commands::submit_popup,
             crate::commands::cancel_popup,
             crate::commands::open_path,
-            crate::commands::preview_path,
+            crate::commands::preview_attachments,
+            crate::commands::close_preview,
             crate::commands::read_image_data_url,
             crate::commands::get_settings,
             crate::commands::save_settings,

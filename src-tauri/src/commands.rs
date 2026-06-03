@@ -7,16 +7,8 @@ use crate::integrations::cursor_hook;
 use crate::models::{AskRequest, ChannelAction, ChannelResult, ImageAttachment};
 use crate::telegram::TelegramClient;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, Manager, State};
-
-/// QuickLook 预览会话的共享状态：用「代次」区分「切换」与「真正关闭」。
-#[derive(Default, Clone)]
-pub struct PreviewShared {
-    generation: Arc<AtomicU64>,
-    pid: Arc<Mutex<Option<u32>>>,
-}
+use std::sync::Arc;
+use tauri::{AppHandle, Manager, State};
 
 /// 弹窗初始化负载：请求内容 + 主题 + 是否置顶（前端据此套用样式、初始化导航栏）。
 #[derive(Serialize)]
@@ -77,65 +69,44 @@ pub fn open_path(path: String) -> Result<(), String> {
     open_with_system(&path)
 }
 
-/// 预览文件：macOS 走 QuickLook（qlmanage -p），其它平台回退为「打开」。
-/// `restore_pin`：弹窗原本是否置顶。预览期间临时取消置顶（否则 QuickLook 被压在下面），
-/// QuickLook 真正关闭后恢复为该值。
-///
-/// 切换：若已有预览在开，先结束旧预览再开新的（前端「预览中单击其它附件」即调用此处）。
-/// 用 generation 区分「被切换替换」与「用户关闭」：仅后者恢复置顶并发 `preview-closed`。
+/// 预览附件：macOS 用原生 QLPreviewPanel 展示「全部附件」并定位到 `index`，
+/// 面板内方向键即可在附件间切换（与 Finder 一致）；其它平台回退为「打开」当前项。
 #[tauri::command]
-pub fn preview_path(
+pub fn preview_attachments(
     app: AppHandle,
-    #[allow(unused_variables)] state: State<PreviewShared>,
-    path: String,
-    #[allow(unused_variables)] restore_pin: bool,
+    paths: Vec<String>,
+    index: usize,
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        use std::process::{Command, Stdio};
-        let shared = state.inner().clone();
-        let my_gen = shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
-
-        // 结束上一个预览（切换）。
-        if let Some(old_pid) = shared.pid.lock().unwrap().take() {
-            unsafe {
-                libc::kill(old_pid as i32, libc::SIGTERM);
-            }
-        }
-
-        if let Some(w) = app.get_webview_window("popup") {
-            let _ = w.set_always_on_top(false);
-        }
-
-        let mut child = Command::new("qlmanage")
-            .arg("-p")
-            .arg(&path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("预览失败: {}", e))?;
-        *shared.pid.lock().unwrap() = Some(child.id());
-        let _ = app.emit("preview-opened", ());
-
+        // 取弹窗 NSWindow 指针：把预览控制者插入其响应链，方可经协议控制面板。
+        let win_ptr = app
+            .get_webview_window("popup")
+            .and_then(|w| w.ns_window().ok())
+            .map(|p| p as usize)
+            .unwrap_or(0);
         let app2 = app.clone();
-        let shared2 = shared.clone();
-        std::thread::spawn(move || {
-            let _ = child.wait();
-            // 仍是当前代次 → 用户真正关闭了预览（非被切换替换）。
-            if shared2.generation.load(Ordering::SeqCst) == my_gen {
-                *shared2.pid.lock().unwrap() = None;
-                if let Some(w) = app2.get_webview_window("popup") {
-                    let _ = w.set_always_on_top(restore_pin);
-                }
-                let _ = app2.emit("preview-closed", ());
-            }
+        let _ = app.run_on_main_thread(move || {
+            crate::macos_quicklook::show(app2, win_ptr, &paths, index);
         });
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = app;
-        open_with_system(&path)
+        let path = paths.get(index).ok_or_else(|| "无效的附件索引".to_string())?;
+        open_with_system(path)
+    }
+}
+
+/// 关闭当前 QuickLook 预览（点击附件以外区域时调用）。
+#[tauri::command]
+pub fn close_preview(#[allow(unused_variables)] app: AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.run_on_main_thread(|| {
+            crate::macos_quicklook::hide();
+        });
     }
 }
 

@@ -1,0 +1,214 @@
+//! macOS 原生 QuickLook 预览（QLPreviewPanel），经 objc2 调用。
+//!
+//! 机制（已用纯 Swift 最小程序实证）：
+//! 只有当面板通过【响应链的 QLPreviewPanelController 协议】被控制时，
+//! `previewPanel:handleEvent:` 才会被回调；仅设 `delegate` 不会触发它。
+//! 因此这里定义一个 **NSResponder 子类** 作为控制者，实现：
+//!   - `acceptsPreviewPanelControl:` / `beginPreviewPanelControl:` / `endPreviewPanelControl:`
+//!   - DataSource：`numberOfPreviewItemsInPreviewPanel:`（恒为 1，单文件）/ `previewPanel:previewItemAtIndex:`
+//!   - Delegate：`previewPanel:handleEvent:`（捕获方向键，改当前文件 + reloadData，并回传索引）
+//! 并把该控制者插入弹窗窗口的响应链（`window.nextResponder`）。
+//! 这样：焦点在面板（原生），方向键逐个切换单文件预览，弹窗侧据 `preview-index` 同步高亮；
+//! 面板关闭时经 `endPreviewPanelControl:` 回传 `preview-closed`。
+//! 所有调用都必须在主线程（由调用方经 `run_on_main_thread` 保证）。
+
+use objc2::rc::Retained;
+use objc2::runtime::{AnyClass, AnyObject, Bool, NSObjectProtocol};
+use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{NSEvent, NSEventType, NSResponder};
+use objc2_foundation::{NSString, NSURL};
+use std::cell::{Cell, RefCell};
+use tauri::{AppHandle, Emitter};
+
+const KEY_LEFT: u16 = 123;
+const KEY_RIGHT: u16 = 124;
+const KEY_DOWN: u16 = 125;
+const KEY_UP: u16 = 126;
+/// 面板层级：弹窗置顶时为 NSFloatingWindowLevel(3)，用 NSStatusWindowLevel(25) 压在其上。
+const NS_STATUS_WINDOW_LEVEL: isize = 25;
+
+struct Ivars {
+    urls: RefCell<Vec<Retained<NSURL>>>,
+    index: Cell<usize>,
+    app: AppHandle,
+}
+
+define_class!(
+    #[unsafe(super(NSResponder))]
+    #[name = "HILQuickLookController"]
+    #[ivars = Ivars]
+    struct Controller;
+
+    unsafe impl NSObjectProtocol for Controller {}
+
+    impl Controller {
+        // —— QLPreviewPanelController（响应链）——
+        #[unsafe(method(acceptsPreviewPanelControl:))]
+        fn accepts_control(&self, _panel: *mut AnyObject) -> Bool {
+            Bool::YES
+        }
+
+        #[unsafe(method(beginPreviewPanelControl:))]
+        fn begin_control(&self, panel: *mut AnyObject) {
+            unsafe {
+                let me: *const Controller = self;
+                let _: () = msg_send![panel, setDataSource: me];
+                let _: () = msg_send![panel, setDelegate: me];
+                // 弹窗置顶时面板会被压住，抬高层级；在成为 key 后设置以防被重置。
+                let _: () = msg_send![panel, setLevel: NS_STATUS_WINDOW_LEVEL];
+            }
+        }
+
+        #[unsafe(method(endPreviewPanelControl:))]
+        fn end_control(&self, _panel: *mut AnyObject) {
+            // 面板关闭：通知前端预览已结束。
+            let _ = self.ivars().app.emit("preview-closed", ());
+        }
+
+        // —— DataSource（单文件）——
+        #[unsafe(method(numberOfPreviewItemsInPreviewPanel:))]
+        fn number_of_items(&self, _panel: *mut AnyObject) -> isize {
+            1
+        }
+
+        #[unsafe(method(previewPanel:previewItemAtIndex:))]
+        fn item_at_index(&self, _panel: *mut AnyObject, _index: isize) -> *mut NSURL {
+            let i = self.ivars().index.get();
+            let urls = self.ivars().urls.borrow();
+            if i >= urls.len() {
+                return std::ptr::null_mut();
+            }
+            // 返回 ivars 持有的 NSURL 的借用指针（+0）：对象生命周期由 ivars.urls 保证，
+            // 面板使用期间不会被释放。
+            Retained::as_ptr(&urls[i]) as *mut NSURL
+        }
+
+        // —— Delegate：捕获方向键 ——
+        #[unsafe(method(previewPanel:handleEvent:))]
+        fn handle_event(&self, panel: *mut AnyObject, event: &NSEvent) -> Bool {
+            Bool::new(unsafe { self.handle_key(panel, event) })
+        }
+    }
+);
+
+impl Controller {
+    unsafe fn handle_key(&self, panel: *mut AnyObject, event: &NSEvent) -> bool {
+        // 用强类型 NSEvent 绑定取 type/keyCode，选择器映射正确（避免 raw msg_send 的坑）。
+        if event.r#type() != NSEventType::KeyDown {
+            return false;
+        }
+        let len = self.ivars().urls.borrow().len();
+        if len == 0 {
+            return false;
+        }
+        let code: u16 = event.keyCode();
+        let cur = self.ivars().index.get();
+        let new = match code {
+            KEY_LEFT | KEY_UP => cur.saturating_sub(1),
+            KEY_RIGHT | KEY_DOWN => (cur + 1).min(len - 1),
+            _ => return false,
+        };
+        if new != cur {
+            self.ivars().index.set(new);
+            let _: () = msg_send![panel, reloadData];
+            let _ = self.ivars().app.emit("preview-index", new);
+        }
+        true
+    }
+
+    fn new(app: AppHandle, mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(Ivars {
+            urls: RefCell::new(Vec::new()),
+            index: Cell::new(0),
+            app,
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+thread_local! {
+    /// 持久控制者：插入弹窗响应链一次后常驻；每次 show 仅更新其数据。
+    static CONTROLLER: RefCell<Option<Retained<Controller>>> = const { RefCell::new(None) };
+    /// 标记是否已插入某窗口的响应链，避免重复插入。
+    static CHAIN_INSTALLED: Cell<bool> = const { Cell::new(false) };
+}
+
+fn panel_class() -> Option<&'static AnyClass> {
+    AnyClass::get(c"QLPreviewPanel")
+}
+
+/// 确保控制者存在并已插入 `window` 的响应链。
+unsafe fn ensure_controller(app: &AppHandle, window: usize) -> Retained<Controller> {
+    let existing = CONTROLLER.with(|c| c.borrow().clone());
+    let controller = match existing {
+        Some(c) => c,
+        None => {
+            let mtm = MainThreadMarker::new().expect("ensure_controller 必须在主线程");
+            let c = Controller::new(app.clone(), mtm);
+            CONTROLLER.with(|cell| *cell.borrow_mut() = Some(c.clone()));
+            c
+        }
+    };
+    if window != 0 && !CHAIN_INSTALLED.with(|f| f.get()) {
+        let win = window as *mut AnyObject;
+        // 插入响应链：window -> controller -> (window 原 nextResponder)
+        let old: *mut AnyObject = msg_send![win, nextResponder];
+        let me: *const Controller = &*controller;
+        let _: () = msg_send![win, setNextResponder: me];
+        let _: () = msg_send![&*controller, setNextResponder: old];
+        CHAIN_INSTALLED.with(|f| f.set(true));
+    }
+    controller
+}
+
+/// 打开预览：展示 `paths[index]` 单个文件；方向键经 handleEvent 逐个联动切换。
+pub fn show(app: AppHandle, window: usize, paths: &[String], index: usize) {
+    let urls: Vec<Retained<NSURL>> = paths
+        .iter()
+        .map(|p| NSURL::fileURLWithPath(&NSString::from_str(p)))
+        .collect();
+    if urls.is_empty() {
+        return;
+    }
+    let idx = index.min(urls.len() - 1);
+
+    unsafe {
+        let controller = ensure_controller(&app, window);
+        *controller.ivars().urls.borrow_mut() = urls;
+        controller.ivars().index.set(idx);
+
+        let Some(cls) = panel_class() else {
+            return;
+        };
+        let panel: Retained<AnyObject> = msg_send![cls, sharedPreviewPanel];
+        // 若已可见（切换选中再预览），直接刷新；否则经响应链控制打开。
+        let visible: bool = msg_send![&*panel, isVisible];
+        if visible {
+            let _: () = msg_send![&*panel, reloadData];
+        } else {
+            // makeKeyAndOrderFront 会触发系统沿响应链查找控制者 → 回调 begin。
+            let null: *mut AnyObject = std::ptr::null_mut();
+            let _: () = msg_send![&*panel, makeKeyAndOrderFront: null];
+            let _: () = msg_send![&*panel, setLevel: NS_STATUS_WINDOW_LEVEL];
+        }
+    }
+}
+
+/// 关闭当前预览面板（若存在且可见）。
+pub fn hide() {
+    let Some(cls) = panel_class() else {
+        return;
+    };
+    unsafe {
+        let exists: bool = msg_send![cls, sharedPreviewPanelExists];
+        if !exists {
+            return;
+        }
+        let panel: Retained<AnyObject> = msg_send![cls, sharedPreviewPanel];
+        let visible: bool = msg_send![&*panel, isVisible];
+        if visible {
+            let null: *mut AnyObject = std::ptr::null_mut();
+            let _: () = msg_send![&*panel, orderOut: null];
+        }
+    }
+}

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -9,7 +9,8 @@ import {
   openSettings,
   updateTheme,
   openPath,
-  previewPath,
+  previewAttachments,
+  closePreview,
   readImageDataUrl,
 } from "../lib/ipc";
 import { renderMarkdown } from "../lib/markdown";
@@ -42,36 +43,72 @@ const theme = ref<ThemeMode>("system");
 const attachments = computed<FileAttachment[]>(() => request.value?.files ?? []);
 const selectedFile = ref<number | null>(null);
 const thumbs = ref<Record<string, string>>({});
-const previewActive = ref(false);
-const previewUnlisten: UnlistenFn[] = [];
+const attRefs = ref<HTMLElement[]>([]);
+// 预览是否打开。打开后，面板保持 key，方向键经原生委托回传 preview-index 事件联动切换。
+const previewing = ref(false);
+let unlistenIndex: UnlistenFn | null = null;
+let unlistenFocus: UnlistenFn | null = null;
+
+function setAttRef(el: Element | null, i: number) {
+  if (el) attRefs.value[i] = el as HTMLElement;
+}
 
 function selectFile(index: number) {
-  const changed = selectedFile.value !== index;
-  selectedFile.value = index;
-  // 预览开着时，选其它附件即切换预览（与原生 QuickLook 类似）。
-  if (previewActive.value && changed) {
-    previewFile(attachments.value[index]);
-  }
+  // WebKit 单击 div(tabindex) 默认不赋键盘焦点，需手动 focus，方向键才生效。
+  focusAttachment(index);
 }
 
 function openFile(file: FileAttachment) {
   openPath(file.path).catch(() => {});
 }
 
-function previewFile(file: FileAttachment) {
-  previewPath(file.path, pinned.value).catch(() => {});
+function focusAttachment(index: number) {
+  selectedFile.value = index;
+  attRefs.value[index]?.focus();
 }
 
-function onFileKeydown(e: KeyboardEvent, file: FileAttachment) {
+// 打开预览：预览当前选中项。面板保持 key，后续方向键由原生委托处理并回传索引。
+function previewSelected(index: number) {
+  focusAttachment(index);
+  previewing.value = true;
+  previewAttachments(
+    attachments.value.map((f) => f.path),
+    index
+  ).catch(() => {});
+}
+
+function stopPreview() {
+  if (!previewing.value) return;
+  previewing.value = false;
+  closePreview().catch(() => {});
+}
+
+// 点击附件以外区域：取消选中并关闭预览。
+function onBackgroundClick(e: MouseEvent) {
+  if ((e.target as HTMLElement).closest(".attachment")) return;
+  if (selectedFile.value !== null) selectedFile.value = null;
+  stopPreview();
+}
+
+// 附件列表的键盘操作（在全局 keydown 中处理，不依赖具体 div 的 DOM 焦点；
+// 只要 WKWebView 是 first responder，事件即会冒泡到 window）。返回是否已处理。
+function handleAttachmentKey(e: KeyboardEvent): boolean {
+  if (!attachments.value.length) return false;
+  const i = selectedFile.value;
+  if (i === null) return false;
   if (e.key === "Enter") {
-    e.preventDefault();
-    e.stopPropagation();
-    openFile(file);
+    openFile(attachments.value[i]);
   } else if (e.key === " ") {
-    e.preventDefault();
-    e.stopPropagation();
-    previewFile(file);
+    previewSelected(i);
+  } else if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+    if (i < attachments.value.length - 1) focusAttachment(i + 1);
+  } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+    if (i > 0) focusAttachment(i - 1);
+  } else {
+    return false;
   }
+  e.preventDefault();
+  return true;
 }
 
 function formatBytes(n: number): string {
@@ -199,23 +236,44 @@ function onKeydown(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
     e.preventDefault();
     send();
-  } else if (e.key === "Escape") {
+    return;
+  }
+  // 取消改用 ⌘/Ctrl+W（不再用 Esc，避免误触关闭弹窗）。
+  if ((e.metaKey || e.ctrlKey) && (e.key === "w" || e.key === "W")) {
     e.preventDefault();
     cancel();
+    return;
   }
+  // 在文本输入框内不拦截方向键/空格（让光标正常移动、输入空格）。
+  const tgt = e.target as HTMLElement | null;
+  const typing =
+    tgt && (tgt.tagName === "TEXTAREA" || tgt.tagName === "INPUT");
+  if (!typing) handleAttachmentKey(e);
 }
 
 onMounted(async () => {
   window.addEventListener("paste", onPaste);
   window.addEventListener("keydown", onKeydown);
-  previewUnlisten.push(
-    await listen("preview-opened", () => {
-      previewActive.value = true;
-    }),
-    await listen("preview-closed", () => {
-      previewActive.value = false;
-    })
-  );
+  // 面板内方向键切换时，原生委托回传新索引 → 同步高亮 + 同步把 DOM 焦点移到该项，
+  // 避免「最初点击项仍持有 :focus 焦点环、当前项又有 .selected」的双焦点。
+  unlistenIndex = await listen<number>("preview-index", (e) => {
+    const i = e.payload;
+    if (i >= 0 && i < attachments.value.length) {
+      selectedFile.value = i;
+      nextTick(() => {
+        const el = attRefs.value[i];
+        el?.focus();
+        el?.scrollIntoView({ block: "nearest" });
+      });
+    }
+  });
+  // 面板关闭（Esc/点击外部）经 endPreviewPanelControl 回传 → 复位预览状态，
+  // 并把 DOM 焦点落在当前选中项，保证只有单一焦点。
+  unlistenFocus = await listen("preview-closed", () => {
+    previewing.value = false;
+    const i = selectedFile.value;
+    if (i !== null) nextTick(() => attRefs.value[i]?.focus());
+  });
   try {
     const init = await popupInit();
     applyTheme(init.theme);
@@ -233,7 +291,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("paste", onPaste);
   window.removeEventListener("keydown", onKeydown);
-  previewUnlisten.forEach((un) => un());
+  unlistenIndex?.();
+  unlistenFocus?.();
 });
 </script>
 
@@ -243,7 +302,13 @@ onBeforeUnmount(() => {
     <p v-else class="status-loading">加载中…</p>
   </div>
 
-  <div v-else class="popup" @dragover.prevent @drop.prevent="onDrop">
+  <div
+    v-else
+    class="popup"
+    @dragover.prevent
+    @drop.prevent="onDrop"
+    @click="onBackgroundClick"
+  >
     <header class="navbar" :class="{ scrolled }" data-tauri-drag-region>
       <span class="brand">
         <span class="brand-dot"></span>
@@ -302,28 +367,36 @@ onBeforeUnmount(() => {
       <pre v-else class="plain-body">{{ request.message }}</pre>
 
       <div v-if="attachments.length" class="attachments">
-        <div
-          v-for="(file, i) in attachments"
-          :key="file.path"
-          class="attachment"
-          :class="{ selected: selectedFile === i }"
-          tabindex="0"
-          :title="file.path"
-          @click="selectFile(i)"
-          @dblclick="openFile(file)"
-          @keydown="onFileKeydown($event, file)"
-        >
-          <span class="att-icon">
-            <img v-if="file.isImage && thumbs[file.path]" :src="thumbs[file.path]" alt="" />
-            <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M14 3v4a1 1 0 0 0 1 1h4" />
-              <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
-            </svg>
-          </span>
-          <span class="att-meta">
-            <span class="att-name">{{ file.name }}</span>
-            <span class="att-size">{{ formatBytes(file.size) }}</span>
-          </span>
+        <div class="att-caption">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+          </svg>
+          <span>附件 · {{ attachments.length }}</span>
+        </div>
+        <div class="att-list">
+          <div
+            v-for="(file, i) in attachments"
+            :key="file.path"
+            :ref="(el) => setAttRef(el as Element | null, i)"
+            class="attachment"
+            :class="{ selected: selectedFile === i }"
+            tabindex="0"
+            :title="file.path"
+            @click="selectFile(i)"
+            @dblclick="openFile(file)"
+          >
+            <span class="att-icon" :class="{ 'is-image': file.isImage && thumbs[file.path] }">
+              <img v-if="file.isImage && thumbs[file.path]" :src="thumbs[file.path]" alt="" />
+              <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+                <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
+              </svg>
+            </span>
+            <span class="att-meta">
+              <span class="att-name">{{ file.name }}</span>
+              <span class="att-size">{{ formatBytes(file.size) }}</span>
+            </span>
+          </div>
         </div>
       </div>
 
@@ -344,7 +417,7 @@ onBeforeUnmount(() => {
         ref="inputRef"
         v-model="userInput"
         class="textarea"
-        placeholder="输入你的回复…（⌘/Ctrl+Enter 发送，Esc 取消）"
+        placeholder="输入你的回复…"
       ></textarea>
 
       <div v-if="images.length" class="thumbs">
@@ -371,7 +444,7 @@ onBeforeUnmount(() => {
       />
       <span class="spacer"></span>
       <button class="btn" type="button" :disabled="submitting" @click="cancel">
-        取消
+        取消 <kbd class="sc">⌘W</kbd>
       </button>
       <button
         class="btn btn-primary"
@@ -379,7 +452,7 @@ onBeforeUnmount(() => {
         :disabled="submitting"
         @click="send"
       >
-        发送
+        发送 <kbd class="sc">⌘↵</kbd>
       </button>
     </div>
   </div>
@@ -488,41 +561,65 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: var(--space-2);
 }
+/* 附件区：与「选项」明显区分——填充式胶囊 + 彩色文件瓦片 + 选中外环 */
 .attachments {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 7px;
+}
+.att-caption {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--text-secondary);
+}
+.att-caption svg {
+  width: 13px;
+  height: 13px;
+}
+.att-list {
+  display: flex;
+  flex-flow: row wrap;
+  gap: 8px;
 }
 .attachment {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  gap: 9px;
+  max-width: 100%;
+  padding: 5px 12px 5px 5px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--bg-elevated);
   cursor: default;
   outline: none;
-  transition: background 0.12s ease, border-color 0.12s ease;
+  transition: background 0.12s ease, box-shadow 0.12s ease;
 }
 .attachment:hover {
-  background: var(--bg-elevated);
+  background: color-mix(in srgb, var(--text-primary) 8%, var(--bg-elevated));
 }
 .attachment.selected,
 .attachment:focus-visible {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: 0 0 0 2px var(--accent);
 }
 .att-icon {
   flex: 0 0 auto;
-  width: 36px;
-  height: 36px;
+  width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-secondary);
-  border-radius: 6px;
+  color: var(--accent);
+  border-radius: 50%;
   overflow: hidden;
-  background: var(--bg-elevated);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.att-icon.is-image {
+  border-radius: 7px;
+  background: var(--card-bg);
 }
 .att-icon img {
   width: 100%;
@@ -530,22 +627,25 @@ onBeforeUnmount(() => {
   object-fit: cover;
 }
 .att-icon svg {
-  width: 20px;
-  height: 20px;
+  width: 15px;
+  height: 15px;
 }
 .att-meta {
-  display: flex;
-  flex-direction: column;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
   min-width: 0;
 }
 .att-name {
   font-size: 13px;
   color: var(--text-primary);
+  max-width: 180px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .att-size {
+  flex: 0 0 auto;
   font-size: 11px;
   color: var(--text-secondary);
 }
@@ -561,5 +661,19 @@ onBeforeUnmount(() => {
 .footer .spacer {
   flex: 1 1 auto;
   pointer-events: none;
+}
+/* 按钮上的快捷键标注 */
+.btn .sc {
+  margin-left: 6px;
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.75;
+  font-family: inherit;
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+.btn-primary .sc {
+  opacity: 0.85;
 }
 </style>
