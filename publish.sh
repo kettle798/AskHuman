@@ -75,6 +75,6 @@ git tag -a "$TAG" -m "release: $TAG"
 git push
 git push origin "$TAG"
 
-echo "==> 已推送 $TAG。"
+echo "==> 已推送 ${TAG}。"
 echo "    在 GitHub Actions 的 release 工作流查看发布进度；"
 echo "    成功后可用 'npm view $NAME@$VERSION' 验证。"
