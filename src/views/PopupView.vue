@@ -45,6 +45,7 @@ const visited = ref<boolean[]>([]);
 const submitting = ref(false);
 const inputRef = ref<HTMLTextAreaElement | null>(null);
 const fileRef = ref<HTMLInputElement | null>(null);
+const qHeaderRef = ref<HTMLElement | null>(null);
 const scrolled = ref(false);
 // 取消二次确认（已有部分回答时）。
 const showCancelConfirm = ref(false);
@@ -353,16 +354,20 @@ function markVisited(i: number) {
   if (i >= 0 && i < visited.value.length) visited.value[i] = true;
 }
 
+// 切题时把问题头部滚到可见区顶部：Message 很长时也能露出当前问题。
+function scrollQuestionIntoView() {
+  const el = qHeaderRef.value;
+  if (!el) return;
+  const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  el.scrollIntoView({ block: "start", behavior: reduce ? "auto" : "smooth" });
+}
+
 function goTo(index: number) {
   if (index < 0 || index >= total.value || index === current.value) return;
   stopPreview();
   selectedFile.value = null;
   current.value = index;
   markVisited(index);
-  requestAnimationFrame(() => {
-    inputRef.value?.focus({ preventScroll: true });
-    autoGrow();
-  });
 }
 
 function goPrev() {
@@ -375,10 +380,12 @@ function goNext() {
   goTo(current.value + 1);
 }
 
-// 问题切换动画完成后聚焦输入框并校正高度（out-in 下新元素挂载在此时）。
+// 问题切换动画完成后再聚焦/校正高度/滚动：此时新面板已挂载、高度确定，
+// 避免新旧面板高度不同导致的上下跳动。
 function onQuestionEntered() {
   inputRef.value?.focus({ preventScroll: true });
   autoGrow();
+  scrollQuestionIntoView();
 }
 
 function collectAnswers(): QuestionAnswer[] {
@@ -624,6 +631,7 @@ onBeforeUnmount(() => {
       <!-- 问题头部：间距 + 分割线 + 问号图标 + 「Question i/n」 -->
       <div
         v-if="showQuestionHeader"
+        ref="qHeaderRef"
         class="q-header"
         :class="{ 'with-divider': showDescription }"
       >
@@ -923,6 +931,8 @@ onBeforeUnmount(() => {
 .content {
   flex: 1 1 auto;
   overflow-y: auto;
+  /* 切题滑动时面板水平位移会超出宽度，裁剪掉以免出现横向滚动条 */
+  overflow-x: hidden;
   padding: var(--space-4) var(--space-4) var(--space-3);
   display: flex;
   flex-direction: column;

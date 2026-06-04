@@ -26,6 +26,10 @@
 .btn:active {
   transform: translateY(0.5px);
 }
+.btn:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
 .btn-primary {
   background: var(--accent);
   border-color: transparent;
