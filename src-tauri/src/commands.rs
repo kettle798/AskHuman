@@ -91,7 +91,9 @@ pub fn preview_attachments(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = app;
-        let path = paths.get(index).ok_or_else(|| "无效的附件索引".to_string())?;
+        let path = paths.get(index).ok_or_else(|| {
+            crate::i18n::tr(crate::i18n::Lang::current(), "cmd.invalidAttachmentIndex").to_string()
+        })?;
         open_with_system(path)
     }
 }
@@ -112,7 +114,10 @@ pub fn close_preview(#[allow(unused_variables)] app: AppHandle) {
 pub fn read_image_data_url(path: String) -> Result<String, String> {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
-    let bytes = std::fs::read(&path).map_err(|e| format!("读取文件失败: {}", e))?;
+    let bytes = std::fs::read(&path).map_err(|e| {
+        crate::i18n::tr(crate::i18n::Lang::current(), "cmd.readFileFailed")
+            .replace("{e}", &e.to_string())
+    })?;
     let mime = image_mime_from_path(&path);
     Ok(format!("data:{};base64,{}", mime, B64.encode(bytes)))
 }
@@ -134,7 +139,7 @@ pub fn file_icon_data_url(app: AppHandle, path: String) -> Result<String, String
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, path);
-        Err("当前平台不支持获取文件图标".into())
+        Err(crate::i18n::tr(crate::i18n::Lang::current(), "cmd.fileIconUnsupported").to_string())
     }
 }
 
@@ -174,7 +179,9 @@ fn open_with_system(path: &str) -> Result<(), String> {
         c.arg(path);
         c
     };
-    cmd.spawn().map(|_| ()).map_err(|e| format!("打开失败: {}", e))
+    cmd.spawn().map(|_| ()).map_err(|e| {
+        crate::i18n::tr(crate::i18n::Lang::current(), "cmd.openFailed").replace("{e}", &e.to_string())
+    })
 }
 
 fn image_mime_from_path(path: &str) -> &'static str {
@@ -215,6 +222,14 @@ pub fn save_settings(app: AppHandle, config: AppConfig) -> Result<(), String> {
     config.save().map_err(|e| e.to_string())?;
     // 广播 general 配置，令同进程内已打开的弹窗实时生效（如语音语言/快捷键）。
     let _ = app.emit("settings-updated", &config.general);
+    // 界面语言可能变化：实时更新已打开窗口的原生标题（弹窗标题在 macOS 多隐藏，settings 可见）。
+    let lang = crate::i18n::Lang::resolve(&config.general.language);
+    if let Some(w) = app.get_webview_window("settings") {
+        let _ = w.set_title(crate::i18n::tr(lang, "title.settings"));
+    }
+    if let Some(w) = app.get_webview_window("popup") {
+        let _ = w.set_title(crate::i18n::tr(lang, "title.popup"));
+    }
     Ok(())
 }
 
@@ -228,22 +243,24 @@ pub fn get_prompt() -> String {
 #[tauri::command]
 pub fn open_test_popup() -> Result<(), String> {
     use std::process::{Command, Stdio};
-    let exe = std::env::current_exe().map_err(|e| format!("无法定位程序路径: {}", e))?;
+    let lang = crate::i18n::Lang::current();
+    let exe = std::env::current_exe()
+        .map_err(|e| crate::i18n::tr(lang, "cmd.locateExeFailed").replace("{e}", &e.to_string()))?;
     Command::new(exe)
         .args([
-            "这是一个测试弹窗，用于预览弹出动画与外观。",
+            crate::i18n::tr(lang, "test.message"),
             "-q",
-            "测试问题：弹窗效果看起来如何？",
+            crate::i18n::tr(lang, "test.question"),
             "-o",
-            "很好",
+            crate::i18n::tr(lang, "test.optionGood"),
             "-o",
-            "再调整",
+            crate::i18n::tr(lang, "test.optionAdjust"),
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("启动测试弹窗失败: {}", e))?;
+        .map_err(|e| crate::i18n::tr(lang, "cmd.testPopupFailed").replace("{e}", &e.to_string()))?;
     Ok(())
 }
 
@@ -381,9 +398,10 @@ pub struct TelegramTestArgs {
 
 #[tauri::command]
 pub async fn telegram_test(args: TelegramTestArgs) -> Result<String, String> {
+    let lang = crate::i18n::Lang::current();
     let client = TelegramClient::new(args.bot_token, args.chat_id, args.api_base_url)
-        .map_err(|e| e.to_string())?;
-    client.test_connection().await.map_err(|e| e.to_string())
+        .map_err(|e| e.localized(lang))?;
+    client.test_connection(lang).await.map_err(|e| e.localized(lang))
 }
 
 // ===== 钉钉测试连接 / userId 自动识别 =====
@@ -403,8 +421,9 @@ pub struct DingTalkTestArgs {
 /// 测试连接：换 token（校验 ClientId/Secret）+ 向 userId 单聊发一条测试消息。
 #[tauri::command]
 pub async fn dingtalk_test(args: DingTalkTestArgs) -> Result<String, String> {
+    let lang = crate::i18n::Lang::current();
     if args.user_id.trim().is_empty() {
-        return Err("请先填写 UserId（可点击「自动识别」获取）".to_string());
+        return Err(crate::i18n::tr(lang, "cmd.fillUserId").to_string());
     }
     let cfg = DingTalkChannelConfig {
         enabled: true,
@@ -412,12 +431,12 @@ pub async fn dingtalk_test(args: DingTalkTestArgs) -> Result<String, String> {
         client_secret: args.client_secret,
         user_id: args.user_id,
     };
-    let client = DingTalkClient::new(&cfg).map_err(|e| e.to_string())?;
+    let client = DingTalkClient::new(&cfg).map_err(|e| e.localized(lang))?;
     client
-        .send_oto_text("✅ HumanInLoop 钉钉连接测试成功")
+        .send_oto_text(crate::i18n::tr(lang, "cmd.ddTestRemote"))
         .await
-        .map_err(|e| e.to_string())?;
-    Ok("已向你的单聊发送一条测试消息，请在钉钉查收".to_string())
+        .map_err(|e| e.localized(lang))?;
+    Ok(crate::i18n::tr(lang, "cmd.ddTestSent").to_string())
 }
 
 #[derive(Deserialize)]
@@ -431,15 +450,16 @@ pub struct DingTalkDetectArgs {
 /// 校验不通过则返回中文错误（前端据此不展示识别码、不进入等待）。
 #[tauri::command]
 pub async fn dingtalk_detect_prepare(args: DingTalkDetectArgs) -> Result<String, String> {
+    let lang = crate::i18n::Lang::current();
     let client_id = args.client_id.trim();
     let client_secret = args.client_secret.trim();
     if client_id.is_empty() || client_secret.is_empty() {
-        return Err("请先填写 ClientId 和 ClientSecret".to_string());
+        return Err(crate::i18n::tr(lang, "cmd.fillClientIdSecret").to_string());
     }
     let http = reqwest::Client::new();
     crate::dingtalk::token::get_token(&http, client_id, client_secret)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.localized(lang))?;
     Ok(gen_detect_code())
 }
 
@@ -456,25 +476,26 @@ pub struct DingTalkWaitArgs {
 #[tauri::command]
 pub async fn dingtalk_detect_wait(args: DingTalkWaitArgs) -> Result<String, String> {
     use std::time::Duration;
+    let lang = crate::i18n::Lang::current();
     let client_id = args.client_id.trim();
     let client_secret = args.client_secret.trim();
     if client_id.is_empty() || client_secret.is_empty() {
-        return Err("请先填写 ClientId 和 ClientSecret".to_string());
+        return Err(crate::i18n::tr(lang, "cmd.fillClientIdSecret").to_string());
     }
     let code = args.code.trim().to_string();
     if code.is_empty() {
-        return Err("识别码无效，请重试".to_string());
+        return Err(crate::i18n::tr(lang, "cmd.detectCodeInvalid").to_string());
     }
     let http = reqwest::Client::new();
     let mut stream = StreamConn::connect(http, client_id, client_secret, &[TOPIC_BOT_MESSAGE])
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.localized(lang))?;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return Err("等待超时（120 秒）未收到匹配的识别码，请重试".to_string());
+            return Err(crate::i18n::tr(lang, "cmd.detectTimeout").to_string());
         }
         match tokio::time::timeout(remaining, stream.recv()).await {
             Ok(Some(StreamEvent::BotMessage(data))) => {
@@ -493,10 +514,8 @@ pub async fn dingtalk_detect_wait(args: DingTalkWaitArgs) -> Result<String, Stri
                 }
             }
             Ok(Some(_)) => {}
-            Ok(None) => return Err("Stream 连接断开，请重试".to_string()),
-            Err(_) => {
-                return Err("等待超时（120 秒）未收到匹配的识别码，请重试".to_string())
-            }
+            Ok(None) => return Err(crate::i18n::tr(lang, "cmd.streamDisconnected").to_string()),
+            Err(_) => return Err(crate::i18n::tr(lang, "cmd.detectTimeout").to_string()),
         }
     }
 }

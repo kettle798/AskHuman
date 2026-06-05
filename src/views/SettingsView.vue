@@ -26,6 +26,7 @@ import {
   isModifierOnly,
   shortcutConflict,
   specToString,
+  type ConflictReason,
 } from "../lib/shortcut";
 import { isGlassSupported } from "tauri-plugin-liquid-glass-api";
 import type {
@@ -119,7 +120,8 @@ async function changeAnimation(anim: PopupAnimation) {
 
 // 语音识别语言下拉项：第一项「跟随系统」(auto) + 常用语言（BCP-47）。
 const SPEECH_LANGUAGES: { value: string; label: string }[] = [
-  { value: "auto", label: "跟随系统" },
+  // auto 的显示文案在模板里走 i18n（settings.speech.languageSystem）。
+  { value: "auto", label: "" },
   { value: "zh-CN", label: "简体中文" },
   { value: "zh-TW", label: "繁体中文" },
   { value: "en-US", label: "English (US)" },
@@ -136,7 +138,7 @@ async function changeSpeechLanguage(lang: string) {
 // 语音快捷键录制：点一下进入录制，直接按组合键录入；Esc 取消。
 const recordingShortcut = ref(false);
 const shortcutPreview = ref("");
-const shortcutError = ref<string | null>(null);
+const shortcutError = ref<ConflictReason | null>(null);
 let shortcutHandler: ((e: KeyboardEvent) => void) | null = null;
 
 function previewModifiers(e: KeyboardEvent): string {
@@ -330,7 +332,7 @@ async function runDingtalkDetect() {
     dd.userId = userId;
     await persist();
     dingtalkError.value = false;
-    dingtalkMessage.value = `已识别并填入 UserId：${userId}`;
+    dingtalkMessage.value = t("settings.channels.detected", { userId });
   } catch (e) {
     dingtalkMessage.value = String(e);
     dingtalkError.value = true;
@@ -371,7 +373,7 @@ onMounted(async () => {
         @mousedown="onTabDown"
         @click="onTabClick('general', $event)"
       >
-        通用
+        {{ t("settings.tabs.general") }}
       </button>
       <button
         data-tauri-drag-region
@@ -379,7 +381,7 @@ onMounted(async () => {
         @mousedown="onTabDown"
         @click="onTabClick('integration', $event)"
       >
-        集成
+        {{ t("settings.tabs.integration") }}
       </button>
       <button
         data-tauri-drag-region
@@ -387,7 +389,7 @@ onMounted(async () => {
         @mousedown="onTabDown"
         @click="onTabClick('channel', $event)"
       >
-        通信渠道
+        {{ t("settings.tabs.channel") }}
       </button>
     </nav>
 
@@ -439,9 +441,9 @@ onMounted(async () => {
         </div>
 
         <div class="card">
-          <p class="card-title">弹窗行为</p>
+          <p class="card-title">{{ t("settings.popupBehavior.title") }}</p>
           <div class="row">
-            <span class="label">窗口置顶</span>
+            <span class="label">{{ t("settings.popupBehavior.alwaysOnTop") }}</span>
             <span class="spacer"></span>
             <label class="switch">
               <input
@@ -455,20 +457,22 @@ onMounted(async () => {
           <template v-if="isMac && glassSupported">
             <hr class="divider" />
             <div class="row">
-              <span class="label">窗口效果</span>
+              <span class="label">{{
+                t("settings.popupBehavior.windowEffect")
+              }}</span>
               <span class="spacer"></span>
               <div class="segmented">
                 <button
                   :class="{ active: config.general.windowEffect === 'glass' }"
                   @click="changeWindowEffect('glass')"
                 >
-                  玻璃
+                  {{ t("settings.popupBehavior.effectGlass") }}
                 </button>
                 <button
                   :class="{ active: config.general.windowEffect === 'blur' }"
                   @click="changeWindowEffect('blur')"
                 >
-                  模糊
+                  {{ t("settings.popupBehavior.effectBlur") }}
                 </button>
               </div>
             </div>
@@ -476,7 +480,9 @@ onMounted(async () => {
           <template v-if="isMac">
             <hr class="divider" />
             <div class="row">
-              <span class="label">弹出动画</span>
+              <span class="label">{{
+                t("settings.popupBehavior.appearAnimation")
+              }}</span>
               <span class="spacer"></span>
               <div class="segmented">
                 <button
@@ -504,19 +510,19 @@ onMounted(async () => {
           </template>
           <hr class="divider" />
           <div class="row">
-            <span class="label">弹出测试窗口</span>
+            <span class="label">{{ t("settings.popupBehavior.testPopup") }}</span>
             <span class="spacer"></span>
             <button class="btn" type="button" @click="openTestPopup">
-              测试
+              {{ t("common.test") }}
             </button>
           </div>
         </div>
 
         <!-- 语音输入（仅 macOS） -->
         <div v-if="isMac" class="card">
-          <p class="card-title">语音输入</p>
+          <p class="card-title">{{ t("settings.speech.title") }}</p>
           <div class="row">
-            <span class="label">识别语言</span>
+            <span class="label">{{ t("settings.speech.language") }}</span>
             <span class="spacer"></span>
             <select
               class="select"
@@ -528,13 +534,17 @@ onMounted(async () => {
                 :key="lang.value"
                 :value="lang.value"
               >
-                {{ lang.label }}
+                {{
+                  lang.value === "auto"
+                    ? t("settings.speech.languageSystem")
+                    : lang.label
+                }}
               </option>
             </select>
           </div>
           <hr class="divider" />
           <div class="row">
-            <span class="label">快捷键</span>
+            <span class="label">{{ t("settings.speech.shortcut") }}</span>
             <span class="spacer"></span>
             <button
               class="btn shortcut-rec"
@@ -544,8 +554,10 @@ onMounted(async () => {
             >
               {{
                 recordingShortcut
-                  ? shortcutPreview || "按下快捷键…"
-                  : formatShortcut(config.general.speechShortcut)
+                  ? shortcutPreview || t("settings.speech.recording")
+                  : config.general.speechShortcut
+                  ? formatShortcut(config.general.speechShortcut)
+                  : t("shortcut.none")
               }}
             </button>
             <button
@@ -555,16 +567,18 @@ onMounted(async () => {
               :disabled="!config.general.speechShortcut && !recordingShortcut"
               @click="clearShortcut"
             >
-              清除
+              {{ t("settings.speech.clear") }}
             </button>
           </div>
-          <p v-if="shortcutError" class="result err">{{ shortcutError }}</p>
+          <p v-if="shortcutError" class="result err">
+            {{ t("shortcut.conflict." + shortcutError.key, shortcutError.params || {}) }}
+          </p>
           <p
             v-else-if="recordingShortcut"
             class="card-desc"
             style="margin-top: 6px"
           >
-            按下组合键（需含 ⌘ 或 ⌃），Esc 取消
+            {{ t("settings.speech.recordHint") }}
           </p>
         </div>
       </template>
@@ -573,30 +587,37 @@ onMounted(async () => {
       <template v-else-if="activeTab === 'integration'">
         <div class="card">
           <div class="row">
-            <p class="card-title">参考提示词</p>
+            <p class="card-title">{{ t("settings.integration.promptTitle") }}</p>
             <span class="spacer"></span>
             <button class="btn" type="button" @click="copyPrompt">
-              {{ promptCopied ? "已复制" : "复制" }}
+              {{
+                promptCopied
+                  ? t("settings.integration.copied")
+                  : t("settings.integration.copy")
+              }}
             </button>
           </div>
           <p class="card-desc">
-            把以下提示词加入你的 AI 助手，引导它通过 AskHuman 与你交互。
+            {{ t("settings.integration.promptDesc") }}
           </p>
           <pre class="code-area">{{ prompt }}</pre>
         </div>
 
         <div class="card">
           <div class="row">
-            <p class="card-title">Cursor Hook</p>
+            <p class="card-title">{{ t("settings.integration.hookTitle") }}</p>
             <span class="spacer"></span>
             <span class="badge">
               <span class="dot" :class="hook.installed ? 'on' : 'off'"></span>
-              {{ hook.installed ? "已安装" : "未安装" }}
+              {{
+                hook.installed
+                  ? t("settings.integration.installed")
+                  : t("settings.integration.notInstalled")
+              }}
             </span>
           </div>
           <p class="card-desc">
-            安装后会在 ~/.cursor/hooks.json 注册 preToolUse 钩子：检测到 Shell 调用
-            AskHuman 时自动把超时延长到 24 小时，避免长时间等待被强制取消。移除时仅删除本应用注入的条目。
+            {{ t("settings.integration.hookDesc") }}
           </p>
           <div class="row">
             <button
@@ -606,7 +627,7 @@ onMounted(async () => {
               :disabled="!hook.supported"
               @click="uninstallHook"
             >
-              移除
+              {{ t("settings.integration.uninstall") }}
             </button>
             <button
               v-else
@@ -615,7 +636,7 @@ onMounted(async () => {
               :disabled="!hook.supported"
               @click="installHook"
             >
-              安装
+              {{ t("settings.integration.install") }}
             </button>
             <button
               class="btn"
@@ -623,12 +644,12 @@ onMounted(async () => {
               :disabled="!hook.hooksJsonExists"
               @click="cursorHookReveal"
             >
-              打开 hooks.json
+              {{ t("settings.integration.openHooks") }}
             </button>
             <span class="spacer"></span>
           </div>
           <p v-if="!hook.supported" class="result err">
-            Windows 暂不支持 Cursor Hook
+            {{ t("settings.integration.windowsUnsupported") }}
           </p>
           <p
             v-else-if="hookMessage"
@@ -644,7 +665,7 @@ onMounted(async () => {
       <template v-else>
         <div class="card">
           <div class="row">
-            <p class="card-title">本地弹窗</p>
+            <p class="card-title">{{ t("settings.channels.popupTitle") }}</p>
             <span class="spacer"></span>
             <label class="switch">
               <input
@@ -659,7 +680,7 @@ onMounted(async () => {
           <template v-if="config.channels.popup.enabled">
             <hr class="divider" />
             <div class="row">
-              <span class="label">记住窗口尺寸</span>
+              <span class="label">{{ t("settings.channels.rememberSize") }}</span>
               <span class="spacer"></span>
               <label class="switch">
                 <input
@@ -671,7 +692,7 @@ onMounted(async () => {
               </label>
             </div>
             <div class="row">
-              <span class="label">默认宽度</span>
+              <span class="label">{{ t("settings.channels.defaultWidth") }}</span>
               <span class="spacer"></span>
               <div class="stepper">
                 <button
@@ -692,7 +713,7 @@ onMounted(async () => {
               </div>
             </div>
             <div class="row">
-              <span class="label">默认高度</span>
+              <span class="label">{{ t("settings.channels.defaultHeight") }}</span>
               <span class="spacer"></span>
               <div class="stepper">
                 <button
@@ -719,7 +740,7 @@ onMounted(async () => {
 
         <div class="card">
           <div class="row">
-            <p class="card-title">Telegram</p>
+            <p class="card-title">{{ t("settings.channels.telegramTitle") }}</p>
             <span class="spacer"></span>
             <label class="switch">
               <input
@@ -734,7 +755,7 @@ onMounted(async () => {
           <template v-if="config.channels.telegram.enabled">
             <hr class="divider" />
             <div class="field">
-              <label>Bot Token</label>
+              <label>{{ t("settings.channels.botToken") }}</label>
               <input
                 class="input"
                 v-model="config.channels.telegram.botToken"
@@ -742,7 +763,7 @@ onMounted(async () => {
               />
             </div>
             <div class="field">
-              <label>Chat ID</label>
+              <label>{{ t("settings.channels.chatId") }}</label>
               <input
                 class="input"
                 v-model="config.channels.telegram.chatId"
@@ -750,7 +771,7 @@ onMounted(async () => {
               />
             </div>
             <div class="field">
-              <label>API Base URL</label>
+              <label>{{ t("settings.channels.apiBaseUrl") }}</label>
               <input
                 class="input"
                 v-model="config.channels.telegram.apiBaseUrl"
@@ -764,7 +785,11 @@ onMounted(async () => {
                 :disabled="telegramTesting"
                 @click="runTelegramTest"
               >
-                {{ telegramTesting ? "测试中…" : "测试连接" }}
+                {{
+                  telegramTesting
+                    ? t("settings.channels.testing")
+                    : t("settings.channels.testConnection")
+                }}
               </button>
               <span class="spacer"></span>
             </div>
@@ -780,7 +805,7 @@ onMounted(async () => {
 
         <div class="card">
           <div class="row">
-            <p class="card-title">钉钉</p>
+            <p class="card-title">{{ t("settings.channels.dingtalkTitle") }}</p>
             <span class="spacer"></span>
             <label class="switch">
               <input
@@ -795,7 +820,7 @@ onMounted(async () => {
           <template v-if="config.channels.dingding.enabled">
             <hr class="divider" />
             <div class="field">
-              <label>ClientId（AppKey）</label>
+              <label>{{ t("settings.channels.clientId") }}</label>
               <input
                 class="input"
                 v-model="config.channels.dingding.clientId"
@@ -803,7 +828,7 @@ onMounted(async () => {
               />
             </div>
             <div class="field">
-              <label>ClientSecret（AppSecret）</label>
+              <label>{{ t("settings.channels.clientSecret") }}</label>
               <input
                 class="input"
                 type="password"
@@ -812,7 +837,7 @@ onMounted(async () => {
               />
             </div>
             <div class="field">
-              <label>UserId</label>
+              <label>{{ t("settings.channels.userId") }}</label>
               <div class="row">
                 <input
                   class="input"
@@ -826,14 +851,22 @@ onMounted(async () => {
                   :disabled="dingtalkDetecting"
                   @click="runDingtalkDetect"
                 >
-                  {{ dingtalkDetecting ? "识别中…" : "自动识别" }}
+                  {{
+                    dingtalkDetecting
+                      ? t("settings.channels.detecting")
+                      : t("settings.channels.autoDetect")
+                  }}
                 </button>
               </div>
             </div>
-            <p v-if="dingtalkDetectCode" class="result ok">
-              请用目标钉钉账号私聊机器人发送：<b>{{ dingtalkDetectCode }}</b
-              >（120 秒内有效）
-            </p>
+            <i18n-t
+              v-if="dingtalkDetectCode"
+              keypath="settings.channels.detectHint"
+              tag="p"
+              class="result ok"
+            >
+              <template #code><b>{{ dingtalkDetectCode }}</b></template>
+            </i18n-t>
             <div class="row">
               <button
                 class="btn"
@@ -841,7 +874,11 @@ onMounted(async () => {
                 :disabled="dingtalkTesting"
                 @click="runDingtalkTest"
               >
-                {{ dingtalkTesting ? "测试中…" : "测试连接" }}
+                {{
+                  dingtalkTesting
+                    ? t("settings.channels.testing")
+                    : t("settings.channels.testConnection")
+                }}
               </button>
               <span class="spacer"></span>
             </div>
@@ -856,7 +893,9 @@ onMounted(async () => {
         </div>
 
         <div class="card">
-          <p class="card-desc" style="margin: 0">更多通信 Channel 敬请期待</p>
+          <p class="card-desc" style="margin: 0">
+            {{ t("settings.channels.moreSoon") }}
+          </p>
         </div>
       </template>
     </div>

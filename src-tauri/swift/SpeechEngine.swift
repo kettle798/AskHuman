@@ -9,8 +9,8 @@ import Speech
 // - onCommitted: 新「已最终化」的文本片段，应永久插入到当前光标处。
 // - onVolatile : 当前未最终化的实时片段，应就地替换显示（可随光标移动而重置）。
 // - onLevel    : 输入电平峰值(0~1)，用于录音动效。
-// - onStatus   : 人类可读状态（识别语言/下载/聆听中…）。
-// - onError    : 错误文案（不支持/未授权/下载失败等）。
+// - onStatus   : 状态语义 key（preparing/downloadingModel/modelReady/listening），前端翻译。
+// - onError    : 错误语义 key（如 noAudioFormat、unsupportedLocale|<locale>、generic|<msg>），前端翻译。
 //
 // 关键音频处理：在输入节点开启 Voice Processing 拿到响亮的 AGC 信号，
 // 取第 0 声道做成单声道，再转换到分析器要求的格式，避免 MacBook 多麦阵列原始信号过弱。
@@ -97,21 +97,21 @@ final class SpeechEngine: @unchecked Sendable {
                 self.pendingLock.unlock()
             }
         }
-        onStatus?("准备中…")
+        onStatus?("preparing")
 
         // 2) 初始化识别管线。
         guard let supported = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
-            throw Self.err("当前机型不支持所选语言（\(locale.identifier)）的语音识别")
+            throw Self.err("unsupportedLocale|\(locale.identifier)")
         }
         let probe = SpeechTranscriber(locale: supported, preset: .progressiveTranscription)
         if let req = try await AssetInventory.assetInstallationRequest(supporting: [probe]) {
-            onStatus?("正在下载语言模型…")
+            onStatus?("downloadingModel")
             try await req.downloadAndInstall()
-            onStatus?("模型就绪")
+            onStatus?("modelReady")
         }
         resolvedLocale = supported
         guard let fmt = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [probe]) else {
-            throw Self.err("无法获取兼容的音频格式")
+            throw Self.err("noAudioFormat")
         }
         analyzerFormat = fmt
         converter = AVAudioConverter(from: monoFormat, to: fmt)
@@ -130,13 +130,13 @@ final class SpeechEngine: @unchecked Sendable {
         pending.removeAll()
         live = true
         pendingLock.unlock()
-        onStatus?("聆听中…")
+        onStatus?("listening")
         onReady?()
     }
 
     // 创建全新识别会话（新 transcriber/analyzer/stream/results），不动音频引擎与 tap。
     private func buildNewSession() async throws {
-        guard let supported = resolvedLocale else { throw Self.err("识别语言未解析") }
+        guard let supported = resolvedLocale else { throw Self.err("localeUnresolved") }
         sessionGen += 1
         let gen = sessionGen
 
@@ -180,7 +180,7 @@ final class SpeechEngine: @unchecked Sendable {
         guard let monoFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                              sampleRate: inFormat.sampleRate,
                                              channels: 1, interleaved: false) else {
-            throw Self.err("无法创建单声道音频格式")
+            throw Self.err("noMonoFormat")
         }
 
         input.installTap(onBus: 0, bufferSize: 4096, format: inFormat) { [weak self] buffer, _ in
@@ -232,13 +232,17 @@ final class SpeechEngine: @unchecked Sendable {
 
     // MARK: - 工具
 
-    private static func err(_ m: String) -> NSError {
-        NSError(domain: "AHSpeech", code: 1, userInfo: [NSLocalizedDescriptionKey: m])
+    // 自有错误：description 直接存语义 key（如 "noAudioFormat"、"unsupportedLocale|zh-CN"）。
+    private static func err(_ key: String) -> NSError {
+        NSError(domain: "AHSpeech", code: 1, userInfo: [NSLocalizedDescriptionKey: key])
     }
 
+    // 归一为前端可翻译的语义 key：自有错误原样返回 key；系统错误归到 generic 并附原始描述。
     private static func message(_ e: Error) -> String {
         let ns = e as NSError
-        if let d = ns.userInfo[NSLocalizedDescriptionKey] as? String { return d }
-        return ns.localizedDescription
+        if ns.domain == "AHSpeech", let key = ns.userInfo[NSLocalizedDescriptionKey] as? String {
+            return key
+        }
+        return "generic|\(ns.localizedDescription)"
     }
 }

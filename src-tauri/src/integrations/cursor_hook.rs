@@ -74,23 +74,24 @@ pub fn install() -> Result<String> {
     let script = paths::cursor_hook_script();
     if let Some(dir) = script.parent() {
         std::fs::create_dir_all(dir)
-            .with_context(|| format!("创建脚本目录失败: {}", dir.display()))?;
+            .with_context(|| format!("failed to create script directory: {}", dir.display()))?;
     }
     atomic_write(&script, SCRIPT_CONTENT.as_bytes())
-        .with_context(|| format!("写入脚本失败: {}", script.display()))?;
+        .with_context(|| format!("failed to write script: {}", script.display()))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .with_context(|| "设置脚本可执行权限失败")?;
+            .with_context(|| "failed to set script executable permission")?;
     }
 
     let root = read_root().unwrap_or_else(|| json!({ "version": 1, "hooks": {} }));
     let updated = upsert_entry(root, &script.to_string_lossy());
     write_root(&updated)?;
 
-    Ok("已安装 Cursor Hook".to_string())
+    let lang = crate::i18n::Lang::current();
+    Ok(crate::i18n::tr(lang, "cmd.hookInstalled").to_string())
 }
 
 /// 移除：删除本应用条目 + 删除脚本文件（保留他人条目）。
@@ -103,7 +104,8 @@ pub fn uninstall() -> Result<String> {
     if script.exists() {
         let _ = std::fs::remove_file(&script);
     }
-    Ok("已移除 Cursor Hook".to_string())
+    let lang = crate::i18n::Lang::current();
+    Ok(crate::i18n::tr(lang, "cmd.hookRemoved").to_string())
 }
 
 /// 在文件管理器中定位 hooks.json。

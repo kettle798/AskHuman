@@ -165,7 +165,7 @@ async fn open_ws(
         let msg = v
             .get("message")
             .and_then(|m| m.as_str())
-            .unwrap_or("建立 Stream 连接失败")
+            .unwrap_or("failed to establish Stream connection")
             .to_string();
         return Err(DingTalkError::Api(msg));
     }
@@ -180,6 +180,6 @@ async fn open_ws(
     let url = format!("{}?ticket={}", endpoint, ticket);
     let (ws, _resp) = connect_async(url)
         .await
-        .map_err(|e| DingTalkError::Network(format!("WebSocket 连接失败: {}", e)))?;
+        .map_err(|e| DingTalkError::Network(format!("WebSocket connection failed: {}", e)))?;
     Ok(ws)
 }

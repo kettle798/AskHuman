@@ -12,6 +12,7 @@ use super::conversation::{run_conversation, MessagingChannel, QuestionCtx};
 use super::{Channel, ResultSink};
 use crate::config::DingTalkChannelConfig;
 use crate::dingtalk::client::DingTalkClient;
+use crate::i18n::{self, Lang};
 use crate::dingtalk::stream::{StreamConn, StreamEvent, TOPIC_BOT_MESSAGE};
 use crate::models::{ImageAttachment, MessagePrompt, QuestionAnswer};
 use serde_json::Value;
@@ -49,7 +50,12 @@ impl Channel for DingTalkChannel {
         tauri::async_runtime::spawn(async move {
             let mut session = DingTalkSession::new(config);
             if let Err(e) = session.open().await {
-                eprintln!("警告: 钉钉配置无效，已跳过该 Channel: {}", e);
+                let lang = Lang::current();
+                eprintln!(
+                    "{}{}",
+                    i18n::warn_prefix(lang),
+                    i18n::tr(lang, "channel.ddConfigInvalidSkip").replace("{e}", &e.to_string())
+                );
                 return;
             }
             run_conversation(&mut session, &request, cancelled, sink).await;
@@ -105,11 +111,12 @@ impl MessagingChannel for DingTalkSession {
         message: &MessagePrompt,
         is_markdown: bool,
         source: &str,
+        lang: Lang,
     ) {
         let Some(client) = self.client.as_ref() else {
             return;
         };
-        let header = format!("Question from {}", source);
+        let header = i18n::tr(lang, "channel.questionFrom").replace("{source}", source);
         let result = if is_markdown {
             let body = if message.text.trim().is_empty() {
                 format!("**{}**", header)
@@ -126,15 +133,27 @@ impl MessagingChannel for DingTalkSession {
             client.send_oto_text(&body).await
         };
         if let Err(e) = result {
-            eprintln!("警告: 钉钉 Message 发送失败: {}", e);
+            eprintln!(
+                "{}{}",
+                i18n::warn_prefix(lang),
+                i18n::tr(lang, "channel.ddMessageSendFailed").replace("{e}", &e.to_string())
+            );
         }
 
         // 展示文件：上传媒体后图片→sampleImageMsg，其它→sampleFile。
         for file in &message.files {
             if let Err(e) = send_attachment(client, &file.path, &file.name, file.is_image).await {
-                eprintln!("警告: 钉钉文件发送失败: {}: {}", file.path, e);
+                eprintln!(
+                    "{}{}",
+                    i18n::warn_prefix(lang),
+                    i18n::tr(lang, "channel.ddFileSendFailedLog")
+                        .replace("{path}", &file.path)
+                        .replace("{e}", &e.to_string())
+                );
                 let _ = client
-                    .send_oto_text(&format!("⚠️ 文件发送失败：{}", file.name))
+                    .send_oto_text(
+                        &i18n::tr(lang, "channel.fileSendFailed").replace("{name}", &file.name),
+                    )
                     .await;
             }
         }
@@ -155,7 +174,11 @@ impl MessagingChannel for DingTalkSession {
         let user_id = config.user_id.trim().to_string();
 
         // 1. 发题：头部 + 正文 + 编号选项 + 作答提示。
-        let title = if ctx.header.is_empty() { "提问" } else { ctx.header };
+        let title = if ctx.header.is_empty() {
+            i18n::tr(ctx.lang, "channel.ddTitleFallback")
+        } else {
+            ctx.header
+        };
         let body = build_question_text(ctx, ctx.is_markdown);
         let send_res = if ctx.is_markdown {
             client.send_oto_markdown(title, &body).await
@@ -163,7 +186,11 @@ impl MessagingChannel for DingTalkSession {
             client.send_oto_text(&body).await
         };
         if let Err(e) = send_res {
-            eprintln!("警告: 钉钉提问发送失败: {}", e);
+            eprintln!(
+                "{}{}",
+                i18n::warn_prefix(ctx.lang),
+                i18n::tr(ctx.lang, "channel.ddQuestionSendFailed").replace("{e}", &e.to_string())
+            );
         }
 
         // 2. 等用户「一条消息」作答（编号/文字/图片/文件）；被抢答则返回 None。
@@ -207,13 +234,13 @@ fn build_question_text(ctx: &QuestionCtx<'_>, is_markdown: bool) -> String {
         s.push_str("\n\n");
     }
     if ctx.options.is_empty() {
-        s.push_str("👉 直接回复文字即可；也可发送图片 / 文件");
+        s.push_str(i18n::tr(ctx.lang, "channel.ddHintFree"));
     } else {
         for (i, opt) in ctx.options.iter().enumerate() {
             s.push_str(&format!("{}. {}\n", i + 1, opt));
         }
         s.push('\n');
-        s.push_str("👉 回复编号选择（多选用逗号，如 1,3），或直接输入文字；也可发送图片 / 文件");
+        s.push_str(i18n::tr(ctx.lang, "channel.ddHintOptions"));
     }
     s.trim_end().to_string()
 }
@@ -257,7 +284,12 @@ async fn message_to_answer(
                     files: Vec::new(),
                 }),
                 Err(e) => {
-                    eprintln!("警告: 钉钉图片下载失败: {}", e);
+                    let lang = Lang::current();
+                    eprintln!(
+                        "{}{}",
+                        i18n::warn_prefix(lang),
+                        i18n::tr(lang, "channel.ddImageDownloadFailed").replace("{e}", &e)
+                    );
                     None
                 }
             }
@@ -280,7 +312,12 @@ async fn message_to_answer(
                     files: vec![path],
                 }),
                 Err(e) => {
-                    eprintln!("警告: 钉钉文件下载失败: {}", e);
+                    let lang = Lang::current();
+                    eprintln!(
+                        "{}{}",
+                        i18n::warn_prefix(lang),
+                        i18n::tr(lang, "channel.ddFileDownloadFailed").replace("{e}", &e.to_string())
+                    );
                     None
                 }
             }

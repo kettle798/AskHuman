@@ -16,20 +16,36 @@ pub enum TelegramError {
     BadResponse,
 }
 
+// 源语言(英文) Display：日志/技术细节统一英文；GUI 边界用 `localized()` 取本地化文案。
 impl fmt::Display for TelegramError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TelegramError::EmptyToken => write!(f, "Bot Token 不能为空"),
-            TelegramError::EmptyChatId => write!(f, "Chat ID 不能为空"),
-            TelegramError::InvalidChatId => write!(f, "Chat ID 格式无效，请输入有效的数字 ID"),
-            TelegramError::Api(msg) => write!(f, "Telegram API 错误: {}", msg),
-            TelegramError::Network(msg) => write!(f, "网络错误: {}", msg),
-            TelegramError::BadResponse => write!(f, "无法解析 Telegram 响应"),
+            TelegramError::EmptyToken => write!(f, "Bot Token must not be empty"),
+            TelegramError::EmptyChatId => write!(f, "Chat ID must not be empty"),
+            TelegramError::InvalidChatId => {
+                write!(f, "Invalid Chat ID format; enter a valid numeric ID")
+            }
+            TelegramError::Api(msg) => write!(f, "Telegram API error: {}", msg),
+            TelegramError::Network(msg) => write!(f, "network error: {}", msg),
+            TelegramError::BadResponse => write!(f, "failed to parse Telegram response"),
         }
     }
 }
 
 impl std::error::Error for TelegramError {}
+
+impl TelegramError {
+    /// GUI 可见的本地化文案：校验类按界面语言翻译；技术细节(API/网络/解析)保留英文。
+    pub fn localized(&self, lang: crate::i18n::Lang) -> String {
+        use crate::i18n::tr;
+        match self {
+            TelegramError::EmptyToken => tr(lang, "err.tgEmptyToken").to_string(),
+            TelegramError::EmptyChatId => tr(lang, "err.tgEmptyChatId").to_string(),
+            TelegramError::InvalidChatId => tr(lang, "err.tgInvalidChatId").to_string(),
+            _ => self.to_string(),
+        }
+    }
+}
 
 pub struct TelegramClient {
     token: String,
@@ -95,7 +111,7 @@ impl TelegramClient {
             let desc = v
                 .get("description")
                 .and_then(|d| d.as_str())
-                .unwrap_or("请求失败")
+                .unwrap_or("request failed")
                 .to_string();
             Err(TelegramError::Api(desc))
         }
@@ -133,7 +149,7 @@ impl TelegramClient {
         filename: &str,
     ) -> Result<i64, TelegramError> {
         let bytes = std::fs::read(path)
-            .map_err(|e| TelegramError::Network(format!("读取文件失败: {}", e)))?;
+            .map_err(|e| TelegramError::Network(format!("failed to read file: {}", e)))?;
         let part = reqwest::multipart::Part::bytes(bytes).file_name(filename.to_string());
         let form = reqwest::multipart::Form::new()
             .text("chat_id", self.chat_id.to_string())
@@ -156,7 +172,7 @@ impl TelegramClient {
             let desc = v
                 .get("description")
                 .and_then(|d| d.as_str())
-                .unwrap_or("请求失败")
+                .unwrap_or("request failed")
                 .to_string();
             Err(TelegramError::Api(desc))
         }
@@ -194,10 +210,10 @@ impl TelegramClient {
             .await;
     }
 
-    /// 发送测试消息验证配置。
-    pub async fn test_connection(&self) -> Result<String, TelegramError> {
-        let text = "🤖 HumanInLoop 测试消息\n\n这是一条测试消息，表示 Telegram Bot 配置成功！";
+    /// 发送测试消息验证配置（`lang` 决定远程消息与返回提示的语言）。
+    pub async fn test_connection(&self, lang: crate::i18n::Lang) -> Result<String, TelegramError> {
+        let text = crate::i18n::tr(lang, "cmd.tgTestRemote");
         self.send_message(text, None, None).await?;
-        Ok("测试消息发送成功！Telegram Bot 配置正确。".to_string())
+        Ok(crate::i18n::tr(lang, "cmd.tgTestSent").to_string())
     }
 }

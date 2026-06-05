@@ -3,6 +3,7 @@
 //! `MessagingChannel` 的传输相关原语。
 
 use super::ResultSink;
+use crate::i18n::{self, Lang};
 use crate::models::{AskRequest, ChannelAction, ChannelResult, MessagePrompt, QuestionAnswer};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -17,6 +18,8 @@ pub struct QuestionCtx<'a> {
     /// 0 基序号与总题数（供渠道按需展示进度）。
     pub index: usize,
     pub total: usize,
+    /// 当前界面语言（渠道据此本地化发给用户的提示/按钮）。
+    pub lang: Lang,
 }
 
 /// 会话型消息渠道的传输原语（与编排逻辑解耦）。
@@ -26,7 +29,13 @@ pub trait MessagingChannel: Send {
     /// 建连 / 校验：成功才进入问答；失败返回中文错误（由调用方警告并跳过）。
     async fn open(&mut self) -> Result<(), String>;
     /// 发送共享 Message（头部 + 文本 + 展示文件）。
-    async fn send_message_prompt(&mut self, message: &MessagePrompt, is_markdown: bool, source: &str);
+    async fn send_message_prompt(
+        &mut self,
+        message: &MessagePrompt,
+        is_markdown: bool,
+        source: &str,
+        lang: Lang,
+    );
     /// 发送一道题并等到「用户完成作答」；被抢答（cancelled）时返回 `None`。
     async fn ask_question(
         &mut self,
@@ -52,11 +61,15 @@ pub async fn run_conversation(
     let has_message =
         !request.message.text.trim().is_empty() || !request.message.files.is_empty();
     let source = crate::models::source_name();
+    let lang = Lang::current();
     let mut answers: Vec<QuestionAnswer> = Vec::with_capacity(n);
 
     if n == 1 && !has_message {
         let q = &request.questions[0];
-        let header = format!("「Question from {}」", source);
+        let header = format!(
+            "「{}」",
+            i18n::tr(lang, "channel.questionFrom").replace("{source}", &source)
+        );
         let ctx = QuestionCtx {
             header: &header,
             text: &q.message,
@@ -64,6 +77,7 @@ pub async fn run_conversation(
             is_markdown: request.is_markdown,
             index: 0,
             total: 1,
+            lang,
         };
         match channel.ask_question(&ctx, &cancelled).await {
             Some(answer) => answers.push(answer),
@@ -74,11 +88,13 @@ pub async fn run_conversation(
         }
     } else {
         channel
-            .send_message_prompt(&request.message, request.is_markdown, &source)
+            .send_message_prompt(&request.message, request.is_markdown, &source, lang)
             .await;
         for (index, question) in request.questions.iter().enumerate() {
             let header = if n > 1 {
-                format!("Question {}/{}", index + 1, n)
+                i18n::tr(lang, "channel.questionIndexed")
+                    .replace("{i}", &(index + 1).to_string())
+                    .replace("{n}", &n.to_string())
             } else {
                 String::new()
             };
@@ -89,6 +105,7 @@ pub async fn run_conversation(
                 is_markdown: request.is_markdown,
                 index,
                 total: n,
+                lang,
             };
             match channel.ask_question(&ctx, &cancelled).await {
                 Some(answer) => answers.push(answer),

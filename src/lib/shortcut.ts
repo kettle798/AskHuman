@@ -89,10 +89,10 @@ function keySymbol(key: string): string {
   return key.length === 1 ? key.toUpperCase() : key;
 }
 
-// 规范字符串 → 展示文案（如 "⌘⇧D"）；空串 → "无"。
+// 规范字符串 → 展示文案（如 "⌘⇧D"）；空串 → ""（“无”由调用方按 i18n 渲染）。
 export function formatShortcut(spec: string): string {
   const s = parseShortcut(spec);
-  if (!s) return "无";
+  if (!s) return "";
   let out = "";
   if (s.ctrl) out += "⌃";
   if (s.alt) out += "⌥";
@@ -117,20 +117,26 @@ export function matchShortcut(e: KeyboardEvent, spec: string): boolean {
   );
 }
 
-// 校验录入的组合是否可用；返回错误文案，null 表示通过。
-// 规则：必须含 ⌘ 或 ⌃；不得与弹窗内既有快捷键 / 常用系统编辑键冲突。
-export function shortcutConflict(s: ShortcutSpec): string | null {
-  const mod = s.cmd || s.ctrl;
-  if (!mod) return "请至少包含 ⌘ 或 ⌃";
+// 冲突校验结果：返回 i18n key（+参数），由调用方用 t() 渲染；null 表示通过。
+export interface ConflictReason {
+  key: string;
+  params?: Record<string, string>;
+}
 
-  if (s.key === "enter") return "与「提交 / 下一题」(⌘↩) 冲突";
-  if (s.key === "w") return "与「取消」(⌘W) 冲突";
-  if (s.key === "[" || s.key === "]") return "与「上一题 / 下一题」(⌘[ ⌘]) 冲突";
-  if (s.key >= "1" && s.key <= "9") return "与「选项快捷键」(⌘1–9) 冲突";
+// 校验录入的组合是否可用。
+// 规则：必须含 ⌘ 或 ⌃；不得与弹窗内既有快捷键 / 常用系统编辑键冲突。
+export function shortcutConflict(s: ShortcutSpec): ConflictReason | null {
+  const mod = s.cmd || s.ctrl;
+  if (!mod) return { key: "needMod" };
+
+  if (s.key === "enter") return { key: "enter" };
+  if (s.key === "w") return { key: "cancel" };
+  if (s.key === "[" || s.key === "]") return { key: "brackets" };
+  if (s.key >= "1" && s.key <= "9") return { key: "options" };
 
   // 常用系统/文本编辑键：仅在「⌘/⌃ + 字母」且无 ⌥⇧ 时判冲突，避免误伤 ⌘⇧V 等。
   if (mod && !s.alt && !s.shift && ["a", "c", "v", "x", "z"].includes(s.key)) {
-    return `与系统编辑快捷键 (⌘${s.key.toUpperCase()}) 冲突，建议加 ⇧ 或换一个`;
+    return { key: "editing", params: { key: s.key.toUpperCase() } };
   }
   return null;
 }

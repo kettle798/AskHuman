@@ -81,7 +81,7 @@ impl DingTalkClient {
             let msg = v
                 .get("message")
                 .and_then(|m| m.as_str())
-                .unwrap_or("请求失败")
+                .unwrap_or("request failed")
                 .to_string();
             Err(DingTalkError::Api(msg))
         }
@@ -133,7 +133,7 @@ impl DingTalkClient {
     pub async fn upload_media(&self, path: &str, kind: &str) -> Result<String, DingTalkError> {
         let token = self.token().await?;
         let bytes = std::fs::read(path)
-            .map_err(|e| DingTalkError::Network(format!("读取文件失败: {}", e)))?;
+            .map_err(|e| DingTalkError::Network(format!("failed to read file: {}", e)))?;
         let file_name = std::path::Path::new(path)
             .file_name()
             .and_then(|n| n.to_str())
@@ -159,7 +159,7 @@ impl DingTalkClient {
             let msg = v
                 .get("errmsg")
                 .and_then(|m| m.as_str())
-                .unwrap_or("媒体上传失败")
+                .unwrap_or("media upload failed")
                 .to_string();
             Err(DingTalkError::Api(msg))
         }
@@ -226,7 +226,7 @@ impl DingTalkClient {
 
         let dir = std::env::temp_dir().join("askhuman-dingtalk");
         std::fs::create_dir_all(&dir)
-            .map_err(|e| DingTalkError::Network(format!("创建临时目录失败: {}", e)))?;
+            .map_err(|e| DingTalkError::Network(format!("failed to create temp dir: {}", e)))?;
         let ext = ext.trim_start_matches('.');
         let name = if ext.is_empty() {
             uuid::Uuid::new_v4().to_string()
@@ -235,7 +235,7 @@ impl DingTalkClient {
         };
         let dest = dir.join(name);
         std::fs::write(&dest, &bytes)
-            .map_err(|e| DingTalkError::Network(format!("写入临时文件失败: {}", e)))?;
+            .map_err(|e| DingTalkError::Network(format!("failed to write temp file: {}", e)))?;
         Ok(dest.to_string_lossy().to_string())
     }
 }

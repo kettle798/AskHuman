@@ -27,15 +27,28 @@ pub enum DingTalkError {
     BadResponse,
 }
 
+// 源语言(英文) Display：日志/技术细节统一英文；GUI 边界用 `localized()` 取本地化文案。
 impl fmt::Display for DingTalkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DingTalkError::EmptyConfig(field) => write!(f, "{}不能为空", field),
-            DingTalkError::Api(msg) => write!(f, "钉钉接口错误: {}", msg),
-            DingTalkError::Network(msg) => write!(f, "网络错误: {}", msg),
-            DingTalkError::BadResponse => write!(f, "无法解析钉钉响应"),
+            DingTalkError::EmptyConfig(field) => write!(f, "{} must not be empty", field),
+            DingTalkError::Api(msg) => write!(f, "DingTalk API error: {}", msg),
+            DingTalkError::Network(msg) => write!(f, "network error: {}", msg),
+            DingTalkError::BadResponse => write!(f, "failed to parse DingTalk response"),
         }
     }
 }
 
 impl std::error::Error for DingTalkError {}
+
+impl DingTalkError {
+    /// GUI 可见的本地化文案：校验类按界面语言翻译；技术细节(API/网络/解析)保留英文。
+    pub fn localized(&self, lang: crate::i18n::Lang) -> String {
+        match self {
+            DingTalkError::EmptyConfig(field) => {
+                crate::i18n::tr(lang, "err.ddEmptyConfig").replace("{field}", field)
+            }
+            _ => self.to_string(),
+        }
+    }
+}

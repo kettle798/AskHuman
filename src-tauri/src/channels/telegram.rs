@@ -6,6 +6,7 @@
 use super::conversation::{run_conversation, MessagingChannel, QuestionCtx};
 use super::{Channel, ResultSink};
 use crate::config::TelegramChannelConfig;
+use crate::i18n::{self, Lang};
 use crate::models::{AskRequest, MessagePrompt, QuestionAnswer};
 use crate::telegram::{markdown, TelegramClient};
 use serde_json::{json, Value};
@@ -13,7 +14,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-const SEND_BUTTON: &str = "↗️发送";
+/// 「发送」键盘按钮文案（按界面语言）。发送与回复比对必须用同一语言取值。
+fn send_button(lang: Lang) -> String {
+    i18n::tr(lang, "channel.tgSendButton").to_string()
+}
 
 /// 薄外层：接 Coordinator（并行抢答），把会话委托给 `run_conversation` + `TelegramSession`。
 pub struct TelegramChannel {
@@ -42,7 +46,12 @@ impl Channel for TelegramChannel {
         tauri::async_runtime::spawn(async move {
             let mut session = TelegramSession::new(config);
             if let Err(e) = session.open().await {
-                eprintln!("警告: Telegram 配置无效，已跳过该 Channel: {}", e);
+                let lang = Lang::current();
+                eprintln!(
+                    "{}{}",
+                    i18n::warn_prefix(lang),
+                    i18n::tr(lang, "channel.tgConfigInvalidSkip").replace("{e}", &e.to_string())
+                );
                 return;
             }
             run_conversation(&mut session, &request, cancelled, sink).await;
@@ -93,9 +102,10 @@ impl MessagingChannel for TelegramSession {
         message: &MessagePrompt,
         is_markdown: bool,
         source: &str,
+        lang: Lang,
     ) {
         if let Some(client) = self.client.as_ref() {
-            send_message_prompt(client, message, is_markdown, source).await;
+            send_message_prompt(client, message, is_markdown, source, lang).await;
         }
     }
 
@@ -113,6 +123,7 @@ impl MessagingChannel for TelegramSession {
             ctx.text,
             ctx.options,
             ctx.is_markdown,
+            ctx.lang,
             cancelled,
             offset,
         )
@@ -128,8 +139,12 @@ async fn send_message_prompt(
     message: &MessagePrompt,
     is_markdown: bool,
     source: &str,
+    lang: Lang,
 ) {
-    let header = format!("「Question from {}」", source);
+    let header = format!(
+        "「{}」",
+        i18n::tr(lang, "channel.questionFrom").replace("{source}", source)
+    );
     send_composed(client, &header, &message.text, is_markdown, None).await;
 
     // 发送 Message 的展示文件（图片→sendPhoto，其它→sendDocument）。
@@ -140,9 +155,19 @@ async fn send_message_prompt(
             client.send_document(&file.path, &file.name).await
         };
         if let Err(e) = result {
-            eprintln!("警告: 文件发送失败: {}: {}", file.path, e);
+            eprintln!(
+                "{}{}",
+                i18n::warn_prefix(lang),
+                i18n::tr(lang, "channel.fileSendFailedLog")
+                    .replace("{path}", &file.path)
+                    .replace("{e}", &e.to_string())
+            );
             let _ = client
-                .send_message(&format!("⚠️ 文件发送失败：{}", file.path), None, None)
+                .send_message(
+                    &i18n::tr(lang, "channel.fileSendFailed").replace("{name}", &file.path),
+                    None,
+                    None,
+                )
                 .await;
         }
     }
@@ -157,6 +182,7 @@ async fn ask_question(
     question_text: &str,
     options: &[String],
     is_markdown: bool,
+    lang: Lang,
     cancelled: &AtomicBool,
     offset: &mut i64,
 ) -> Option<QuestionAnswer> {
@@ -176,9 +202,9 @@ async fn ask_question(
     // 2. 操作消息（含「发送」按钮）
     let operation_message_id = client
         .send_message(
-            "在键盘上点「发送」完成回复，或直接回复文字补充说明",
+            i18n::tr(lang, "channel.tgActionHint"),
             None,
-            Some(reply_keyboard()),
+            Some(reply_keyboard(lang)),
         )
         .await
         .unwrap_or(0);
@@ -199,6 +225,7 @@ async fn ask_question(
                         &mut user_input,
                         options_message_id,
                         operation_message_id,
+                        lang,
                     )
                     .await
                     {
@@ -278,6 +305,7 @@ async fn handle_update(
     user_input: &mut String,
     options_message_id: i64,
     operation_message_id: i64,
+    lang: Lang,
 ) -> bool {
     // callback_query：切换选项
     if let Some(cb) = update.get("callback_query") {
@@ -324,7 +352,7 @@ async fn handle_update(
             }
         }
         if let Some(text) = message.get("text").and_then(|t| t.as_str()) {
-            if text == SEND_BUTTON {
+            if text == send_button(lang) {
                 return true;
             }
             *user_input = text.to_string();
@@ -360,9 +388,9 @@ fn inline_keyboard(options: &[String], selected: &[String]) -> Value {
     json!({ "inline_keyboard": rows })
 }
 
-fn reply_keyboard() -> Value {
+fn reply_keyboard(lang: Lang) -> Value {
     json!({
-        "keyboard": [[{ "text": SEND_BUTTON }]],
+        "keyboard": [[{ "text": send_button(lang) }]],
         "resize_keyboard": true,
         "one_time_keyboard": true
     })

@@ -46,7 +46,7 @@ pub async fn get_token(
         let msg = body
             .get("message")
             .and_then(|v| v.as_str())
-            .unwrap_or("换取 access_token 失败（请检查 ClientId/ClientSecret）")
+            .unwrap_or("failed to obtain access_token (check ClientId/ClientSecret)")
             .to_string();
         return Err(DingTalkError::Api(msg));
     }

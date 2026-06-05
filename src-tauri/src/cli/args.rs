@@ -31,8 +31,9 @@ pub struct AskArgs {
 /// - `-f` 始终归 Message（位置不限）。
 /// - `--no-markdown` 全局。
 ///
-/// 失败时返回中文错误描述。
-pub fn parse_ask(args: &[String]) -> Result<AskArgs, String> {
+/// 失败时返回按 `lang` 本地化的错误描述。
+pub fn parse_ask(args: &[String], lang: crate::i18n::Lang) -> Result<AskArgs, String> {
+    use crate::i18n::tr;
     let mut message_text = String::new();
     let mut message_files: Vec<String> = Vec::new();
     let mut questions: Vec<QuestionArgs> = Vec::new();
@@ -51,7 +52,7 @@ pub fn parse_ask(args: &[String]) -> Result<AskArgs, String> {
         match arg.as_str() {
             "-q" | "--question" => {
                 if i + 1 >= args.len() {
-                    return Err(format!("{} 选项缺少参数值", arg));
+                    return Err(tr(lang, "cli.optionMissingValue").replace("{opt}", arg));
                 }
                 questions.push(QuestionArgs {
                     message: args[i + 1].clone(),
@@ -62,7 +63,7 @@ pub fn parse_ask(args: &[String]) -> Result<AskArgs, String> {
             }
             "-o" | "--option" => {
                 if i + 1 >= args.len() {
-                    return Err(format!("{} 选项缺少参数值", arg));
+                    return Err(tr(lang, "cli.optionMissingValue").replace("{opt}", arg));
                 }
                 let value = args[i + 1].clone();
                 match questions.last_mut() {
@@ -70,7 +71,7 @@ pub fn parse_ask(args: &[String]) -> Result<AskArgs, String> {
                     None => {
                         if has_q {
                             // 存在 -q 时，-o 不能出现在第一个 -q 之前。
-                            return Err(format!("{} 不能出现在第一个问题(-q)之前", arg));
+                            return Err(tr(lang, "cli.optionBeforeQuestion").replace("{opt}", arg));
                         }
                         // 无 `-q`：暂存，归一化时归属被提升的问题。
                         lead_options.push(value);
@@ -80,7 +81,7 @@ pub fn parse_ask(args: &[String]) -> Result<AskArgs, String> {
             }
             "-f" | "--file" => {
                 if i + 1 >= args.len() {
-                    return Err(format!("{} 选项缺少参数值", arg));
+                    return Err(tr(lang, "cli.optionMissingValue").replace("{opt}", arg));
                 }
                 message_files.push(args[i + 1].clone());
                 i += 2;
@@ -90,12 +91,12 @@ pub fn parse_ask(args: &[String]) -> Result<AskArgs, String> {
                 i += 1;
             }
             a if a.starts_with('-') => {
-                return Err(format!("未知选项: {}", a));
+                return Err(tr(lang, "cli.unknownOptionColon").replace("{opt}", a));
             }
             _ => {
                 // 位置参数：仅允许作为第一个 token（Message），且需在任何 -q 之前。
                 if seen_positional || seen_question_flag {
-                    return Err("位置参数只能作为 Message，且需在最前".to_string());
+                    return Err(tr(lang, "cli.positionalOnlyMessage").to_string());
                 }
                 message_text = arg.clone();
                 seen_positional = true;
@@ -106,7 +107,7 @@ pub fn parse_ask(args: &[String]) -> Result<AskArgs, String> {
 
     // 有效性校验（归一化前）：至少有 Message 文本 / 一个 -q / 一个 -f；仅 -o 不算有效。
     if message_text.trim().is_empty() && questions.is_empty() && message_files.is_empty() {
-        return Err("缺少提问内容".to_string());
+        return Err(tr(lang, "cli.missingContent").to_string());
     }
 
     // 归一化：无 `-q` 时，第一个参数（含其前置 -o）提升为唯一问题，Message 文本清空。
@@ -129,14 +130,21 @@ pub fn parse_ask(args: &[String]) -> Result<AskArgs, String> {
 mod tests {
     use super::*;
 
+    use crate::i18n::Lang;
+
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
     }
 
+    // 解析逻辑与语言无关：测试统一用英文（源语言）。
+    fn pa(args: &[String]) -> Result<AskArgs, String> {
+        parse_ask(args, Lang::En)
+    }
+
     #[test]
     fn positional_promoted_equals_q() {
-        let a = parse_ask(&v(&["X"])).unwrap();
-        let b = parse_ask(&v(&["-q", "X"])).unwrap();
+        let a = pa(&v(&["X"])).unwrap();
+        let b = pa(&v(&["-q", "X"])).unwrap();
         assert_eq!(a.message_text, "");
         assert_eq!(a.questions, vec![QuestionArgs { message: "X".into(), options: vec![] }]);
         assert_eq!(a.questions, b.questions);
@@ -146,14 +154,14 @@ mod tests {
 
     #[test]
     fn single_with_options_promoted() {
-        let p = parse_ask(&v(&["X", "-o", "A", "--option", "B"])).unwrap();
+        let p = pa(&v(&["X", "-o", "A", "--option", "B"])).unwrap();
         assert_eq!(p.message_text, "");
         assert_eq!(p.questions, vec![QuestionArgs { message: "X".into(), options: v(&["A", "B"]) }]);
     }
 
     #[test]
     fn single_with_files_promoted() {
-        let p = parse_ask(&v(&["X", "-f", "f.png"])).unwrap();
+        let p = pa(&v(&["X", "-f", "f.png"])).unwrap();
         assert_eq!(p.message_text, "");
         assert_eq!(p.message_files, v(&["f.png"]));
         assert_eq!(p.questions, vec![QuestionArgs { message: "X".into(), options: vec![] }]);
@@ -161,7 +169,7 @@ mod tests {
 
     #[test]
     fn multi_message_and_questions() {
-        let p = parse_ask(&v(&[
+        let p = pa(&v(&[
             "M", "-q", "Q1", "-o", "A", "-q", "Q2", "-o", "B",
         ]))
         .unwrap();
@@ -173,7 +181,7 @@ mod tests {
 
     #[test]
     fn file_after_q_belongs_to_message() {
-        let p = parse_ask(&v(&["M", "-q", "Q1", "-f", "x.png"])).unwrap();
+        let p = pa(&v(&["M", "-q", "Q1", "-f", "x.png"])).unwrap();
         assert_eq!(p.message_text, "M");
         assert_eq!(p.message_files, v(&["x.png"]));
         assert_eq!(p.questions[0].options.len(), 0);
@@ -181,14 +189,14 @@ mod tests {
 
     #[test]
     fn optional_message_questions_only() {
-        let p = parse_ask(&v(&["-q", "Q1", "-q", "Q2"])).unwrap();
+        let p = pa(&v(&["-q", "Q1", "-q", "Q2"])).unwrap();
         assert_eq!(p.message_text, "");
         assert_eq!(p.questions.len(), 2);
     }
 
     #[test]
     fn optional_message_file_only() {
-        let p = parse_ask(&v(&["-f", "x.png", "-q", "Q1"])).unwrap();
+        let p = pa(&v(&["-f", "x.png", "-q", "Q1"])).unwrap();
         assert_eq!(p.message_text, "");
         assert_eq!(p.message_files, v(&["x.png"]));
         assert_eq!(p.questions.len(), 1);
@@ -196,51 +204,51 @@ mod tests {
 
     #[test]
     fn no_markdown_is_global() {
-        let p = parse_ask(&v(&["M", "-q", "Q1", "--no-markdown"])).unwrap();
+        let p = pa(&v(&["M", "-q", "Q1", "--no-markdown"])).unwrap();
         assert!(!p.is_markdown);
         assert_eq!(p.questions.len(), 1);
     }
 
     #[test]
     fn option_before_any_question_errors() {
-        assert!(parse_ask(&v(&["M", "-o", "A", "-q", "Q1"])).is_err());
+        assert!(pa(&v(&["M", "-o", "A", "-q", "Q1"])).is_err());
     }
 
     #[test]
     fn option_only_is_invalid() {
-        assert!(parse_ask(&v(&["-o", "A"])).is_err());
+        assert!(pa(&v(&["-o", "A"])).is_err());
     }
 
     #[test]
     fn second_positional_errors() {
-        assert!(parse_ask(&v(&["M", "extra"])).is_err());
-        assert!(parse_ask(&v(&["-q", "Q1", "extra"])).is_err());
+        assert!(pa(&v(&["M", "extra"])).is_err());
+        assert!(pa(&v(&["-q", "Q1", "extra"])).is_err());
     }
 
     #[test]
     fn question_requires_value() {
-        assert!(parse_ask(&v(&["-q"])).is_err());
-        assert!(parse_ask(&v(&["M", "-q"])).is_err());
+        assert!(pa(&v(&["-q"])).is_err());
+        assert!(pa(&v(&["M", "-q"])).is_err());
     }
 
     #[test]
     fn requires_some_content() {
-        assert!(parse_ask(&v(&["--no-markdown"])).is_err());
-        assert!(parse_ask(&v(&[])).is_err());
+        assert!(pa(&v(&["--no-markdown"])).is_err());
+        assert!(pa(&v(&[])).is_err());
     }
 
     #[test]
     fn requires_option_value() {
-        assert!(parse_ask(&v(&["msg", "-o"])).is_err());
+        assert!(pa(&v(&["msg", "-o"])).is_err());
     }
 
     #[test]
     fn requires_file_value() {
-        assert!(parse_ask(&v(&["msg", "-f"])).is_err());
+        assert!(pa(&v(&["msg", "-f"])).is_err());
     }
 
     #[test]
     fn rejects_unknown_flag() {
-        assert!(parse_ask(&v(&["msg", "--foo"])).is_err());
+        assert!(pa(&v(&["msg", "--foo"])).is_err());
     }
 }

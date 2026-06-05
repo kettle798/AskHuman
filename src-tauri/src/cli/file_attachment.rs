@@ -8,18 +8,24 @@ use std::path::{Path, PathBuf};
 const IMAGE_EXTS: [&str; 7] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"];
 
 /// 把命令行给出的原始路径列表解析成 `FileAttachment`。
-/// 任一文件不存在/不可访问 → 返回中文错误（调用方据此退出码 1）。
-pub fn resolve(raw_paths: &[String]) -> Result<Vec<FileAttachment>, String> {
+/// 任一文件不存在/不可访问 → 返回按 `lang` 本地化的错误（调用方据此退出码 1）。
+pub fn resolve(raw_paths: &[String], lang: crate::i18n::Lang) -> Result<Vec<FileAttachment>, String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let home = paths::home();
     let mut out = Vec::with_capacity(raw_paths.len());
     for raw in raw_paths {
-        out.push(resolve_one(raw, &cwd, &home)?);
+        out.push(resolve_one(raw, &cwd, &home, lang)?);
     }
     Ok(out)
 }
 
-fn resolve_one(raw: &str, cwd: &Path, home: &Path) -> Result<FileAttachment, String> {
+fn resolve_one(
+    raw: &str,
+    cwd: &Path,
+    home: &Path,
+    lang: crate::i18n::Lang,
+) -> Result<FileAttachment, String> {
+    use crate::i18n::tr;
     let expanded = expand_tilde(raw, home);
     let abs = if expanded.is_absolute() {
         expanded
@@ -28,9 +34,9 @@ fn resolve_one(raw: &str, cwd: &Path, home: &Path) -> Result<FileAttachment, Str
     };
 
     let meta = std::fs::metadata(&abs)
-        .map_err(|_| format!("文件不存在或无法访问: {}", raw))?;
+        .map_err(|_| tr(lang, "cli.fileNotFound").replace("{path}", raw))?;
     if !meta.is_file() {
-        return Err(format!("不是文件: {}", raw));
+        return Err(tr(lang, "cli.notAFile").replace("{path}", raw));
     }
 
     // 规整为绝对路径（去掉 ./ ../ 等）；失败则退回拼接结果。
@@ -98,7 +104,7 @@ mod tests {
 
     #[test]
     fn resolve_reports_missing_file() {
-        let res = resolve(&["/definitely/not/here-xyz.md".to_string()]);
+        let res = resolve(&["/definitely/not/here-xyz.md".to_string()], crate::i18n::Lang::En);
         assert!(res.is_err());
     }
 
@@ -107,7 +113,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let file = dir.join("humaninloop_test_attachment.txt");
         std::fs::write(&file, b"hello world").unwrap();
-        let res = resolve(&[file.to_string_lossy().into_owned()]).unwrap();
+        let res = resolve(&[file.to_string_lossy().into_owned()], crate::i18n::Lang::En).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(res[0].name, "humaninloop_test_attachment.txt");
         assert_eq!(res[0].size, 11);

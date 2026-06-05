@@ -11,6 +11,7 @@
 //! 实现以原生 NSMenu/NSWorkspace/NSPasteboard 为主，多数调用走 raw msg_send，
 //! 仅菜单项的 target 用 define_class 定义（NSMenuItem.target 为弱引用，故弹出期间须持活）。
 
+use crate::i18n::{tr, Lang};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, NSObject, NSObjectProtocol};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker};
@@ -193,10 +194,10 @@ unsafe fn apps_for_file(path: &str) -> Vec<Retained<NSURL>> {
 }
 
 /// 应用 URL 的显示名（去掉 .app 后缀的 bundle 名）。
-unsafe fn app_display_name(app_url: &NSURL) -> String {
+unsafe fn app_display_name(app_url: &NSURL, lang: Lang) -> String {
     let last: *mut NSString = msg_send![app_url, lastPathComponent];
     if last.is_null() {
-        return "应用".to_string();
+        return tr(lang, "menu.appFallback").to_string();
     }
     let name = (*last).to_string();
     name.strip_suffix(".app").unwrap_or(&name).to_string()
@@ -261,6 +262,7 @@ pub fn show(app: AppHandle, path: String) {
     if MainThreadMarker::new().is_none() {
         return;
     }
+    let lang = Lang::current();
     let name = basename(&path);
     let target = Target::new(app, path.clone());
 
@@ -268,7 +270,7 @@ pub fn show(app: AppHandle, path: String) {
         let menu = new_menu();
 
         // 打开
-        add_item(menu, "打开", TAG_OPEN, &target);
+        add_item(menu, tr(lang, "menu.open"), TAG_OPEN, &target);
 
         // 打开方式 ▸
         let apps = apps_for_file(&path);
@@ -276,7 +278,7 @@ pub fn show(app: AppHandle, path: String) {
         for (i, app_url) in apps.iter().enumerate() {
             let item = add_item(
                 submenu,
-                &app_display_name(app_url),
+                &app_display_name(app_url, lang),
                 TAG_APP_BASE + i as isize,
                 &target,
             );
@@ -288,12 +290,12 @@ pub fn show(app: AppHandle, path: String) {
         if !apps.is_empty() {
             add_separator(submenu);
         }
-        add_item(submenu, "其他…", TAG_OPEN_WITH_OTHER, &target);
+        add_item(submenu, tr(lang, "menu.other"), TAG_OPEN_WITH_OTHER, &target);
         *target.ivars().app_urls.borrow_mut() = apps;
 
         let cls = AnyClass::get(c"NSMenuItem").expect("NSMenuItem");
         let ow_item: *mut AnyObject = msg_send![cls, alloc];
-        let ow_title = NSString::from_str("打开方式");
+        let ow_title = NSString::from_str(tr(lang, "menu.openWith"));
         let empty = NSString::from_str("");
         let null: *mut AnyObject = std::ptr::null_mut();
         let ow_item: *mut AnyObject =
@@ -302,12 +304,22 @@ pub fn show(app: AppHandle, path: String) {
         let _: () = msg_send![menu, addItem: ow_item];
 
         add_separator(menu);
-        add_item(menu, &format!("快速查看「{}」", name), TAG_QUICKLOOK, &target);
-        add_item(menu, "在访达中显示", TAG_REVEAL, &target);
+        add_item(
+            menu,
+            &tr(lang, "menu.quickLook").replace("{name}", &name),
+            TAG_QUICKLOOK,
+            &target,
+        );
+        add_item(menu, tr(lang, "menu.revealInFinder"), TAG_REVEAL, &target);
 
         add_separator(menu);
-        add_item(menu, &format!("拷贝「{}」", name), TAG_COPY_FILE, &target);
-        add_item(menu, "拷贝路径", TAG_COPY_PATH, &target);
+        add_item(
+            menu,
+            &tr(lang, "menu.copyFile").replace("{name}", &name),
+            TAG_COPY_FILE,
+            &target,
+        );
+        add_item(menu, tr(lang, "menu.copyPath"), TAG_COPY_PATH, &target);
 
         // 在当前鼠标位置（屏幕坐标）弹出；inView 传 nil 即按屏幕坐标定位。
         let event_cls = AnyClass::get(c"NSEvent").expect("NSEvent");

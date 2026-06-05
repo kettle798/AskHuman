@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { useI18n } from "vue-i18n";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -34,6 +35,8 @@ import type {
   QuestionAnswer,
   ThemeMode,
 } from "../lib/types";
+
+const { t } = useI18n();
 
 const request = ref<AskRequest | null>(null);
 const loadError = ref<string | null>(null);
@@ -116,7 +119,9 @@ const showDescription = computed(
 const showQuestionHeader = computed(() => showDescription.value || isMulti.value);
 // 多题显示「Question i/n」；单题（仅在有 Message 时显示头部）只显示「Question」。
 const questionHeaderLabel = computed(() =>
-  isMulti.value ? `Question ${current.value + 1}/${total.value}` : "Question"
+  isMulti.value
+    ? t("popup.question.indexed", { i: current.value + 1, n: total.value })
+    : t("popup.question.single")
 );
 // 上一个/下一个的切换方向，驱动左右滑动动画。
 const slideDir = ref<"next" | "prev">("next");
@@ -491,8 +496,38 @@ function dismissCancelConfirm() {
 }
 
 // ===== 语音输入（macOS 26 SpeechAnalyzer，⌘D 切换） =====
-function showSpeechError(msg: string) {
-  speechError.value = msg;
+// 后端(Swift/Rust)语音事件以 "key" 或 "key|param" 上报；此处拆解并交给 i18n 翻译，
+// 故 speechStatus/speechError 存「原始 payload」，模板渲染时再翻译（语言切换可即时重渲染）。
+function parseSpeechPayload(payload: string): { key: string; param: string } {
+  const i = payload.indexOf("|");
+  return i === -1
+    ? { key: payload, param: "" }
+    : { key: payload.slice(0, i), param: payload.slice(i + 1) };
+}
+
+function speechStatusText(payload: string): string {
+  const { key } = parseSpeechPayload(payload);
+  const path = `speech.status.${key}`;
+  const s = t(path);
+  return s === path ? payload : s; // 未知 key → 原样展示
+}
+
+function speechErrorText(payload: string): string {
+  const { key, param } = parseSpeechPayload(payload);
+  const path = `speech.error.${key}`;
+  const params =
+    key === "unsupportedLocale"
+      ? { locale: param }
+      : key === "generic"
+      ? { message: param }
+      : {};
+  const s = t(path, params);
+  return s === path ? param || key : s; // 未知 key → 退回原始信息
+}
+
+// 入参为语义 key（或 key|param），翻译在模板渲染时进行。
+function showSpeechError(payload: string) {
+  speechError.value = payload;
   if (speechErrorTimer) clearTimeout(speechErrorTimer);
   speechErrorTimer = setTimeout(() => {
     speechError.value = null;
@@ -507,7 +542,7 @@ function toggleSpeech() {
 
 function startListening() {
   if (!speechSupported.value) {
-    showSpeechError("语音输入需要 macOS 26 及以上");
+    showSpeechError("needMacos26");
     return;
   }
   if (speechErrorTimer) {
@@ -541,7 +576,7 @@ function startListening() {
   startSpeech(locale).catch((err) => {
     listening.value = false;
     speechReady.value = false;
-    showSpeechError("无法启动语音输入");
+    showSpeechError("startFailed");
     console.error("启动语音失败", err);
   });
 }
@@ -669,7 +704,7 @@ async function setupSpeechListeners() {
     await listen<string>("speech-error", (e) => {
       listening.value = false;
       speechReady.value = false;
-      showSpeechError(e.payload || "语音识别出错");
+      showSpeechError(e.payload || "generic");
     })
   );
   unlistenSpeech.push(
@@ -834,8 +869,10 @@ onBeforeUnmount(() => {
 
 <template>
   <div v-if="!request" class="popup popup-status">
-    <p v-if="loadError" class="status-error">加载失败：{{ loadError }}</p>
-    <p v-else class="status-loading">加载中…</p>
+    <p v-if="loadError" class="status-error">
+      {{ t("popup.loadError", { msg: loadError }) }}
+    </p>
+    <p v-else class="status-loading">{{ t("popup.loading") }}</p>
   </div>
 
   <div
@@ -848,14 +885,16 @@ onBeforeUnmount(() => {
     <header class="navbar" :class="{ scrolled }" data-tauri-drag-region>
       <span class="brand">
         <span class="brand-dot"></span>
-        <span class="brand-title">Question from {{ sourceName }}</span>
+        <span class="brand-title">{{
+          t("popup.questionFrom", { source: sourceName })
+        }}</span>
       </span>
       <span class="nav-actions">
         <button
           class="nav-btn"
           :class="{ active: pinned }"
           type="button"
-          title="窗口置顶"
+          :title="t('popup.nav.pin')"
           @click="togglePin"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -866,7 +905,7 @@ onBeforeUnmount(() => {
         <button
           class="nav-btn"
           type="button"
-          title="切换主题"
+          :title="t('popup.nav.theme')"
           @click="cycleTheme"
         >
           <svg v-if="theme === 'light'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -884,7 +923,7 @@ onBeforeUnmount(() => {
         <button
           class="nav-btn"
           type="button"
-          title="设置"
+          :title="t('popup.nav.settings')"
           @click="openSettingsWindow"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -909,7 +948,7 @@ onBeforeUnmount(() => {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
           </svg>
-          <span>附件 · {{ attachments.length }}</span>
+          <span>{{ t("popup.attachments", { n: attachments.length }) }}</span>
         </div>
         <div class="att-list">
           <div
@@ -987,7 +1026,7 @@ onBeforeUnmount(() => {
               ref="inputRef"
               v-model="userInput"
               class="textarea"
-              placeholder="输入你的回复…"
+              :placeholder="t('popup.inputPlaceholder')"
               @input="autoGrow"
               @keyup="onUserCaretMaybeMoved"
               @mousedown="onTextareaMouseDown"
@@ -999,12 +1038,16 @@ onBeforeUnmount(() => {
               type="button"
               :title="
                 speechReady
-                  ? '停止语音输入' + (speechHotkeyLabel ? ' ' + speechHotkeyLabel : '')
+                  ? t('popup.speech.stop') +
+                    (speechHotkeyLabel ? ' ' + speechHotkeyLabel : '')
                   : listening
-                  ? '准备中…'
-                  : '语音输入' + (speechHotkeyLabel ? ' ' + speechHotkeyLabel : '')
+                  ? t('popup.speech.preparing')
+                  : t('popup.speech.start') +
+                    (speechHotkeyLabel ? ' ' + speechHotkeyLabel : '')
               "
-              :aria-label="listening ? '停止语音输入' : '语音输入'"
+              :aria-label="
+                listening ? t('popup.speech.stop') : t('popup.speech.start')
+              "
               @mousedown.prevent
               @click="toggleSpeech"
             >
@@ -1017,8 +1060,8 @@ onBeforeUnmount(() => {
             <button
               class="img-btn"
               type="button"
-              title="添加图片"
-              aria-label="添加图片"
+              :title="t('popup.addImage')"
+              :aria-label="t('popup.addImage')"
               @click="pickFiles"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -1028,9 +1071,11 @@ onBeforeUnmount(() => {
               </svg>
             </button>
           </div>
-          <p v-if="speechError" class="speech-error">{{ speechError }}</p>
+          <p v-if="speechError" class="speech-error">
+            {{ speechErrorText(speechError) }}
+          </p>
           <p v-else-if="listening && speechStatus" class="speech-status">
-            {{ speechStatus }}
+            {{ speechStatusText(speechStatus) }}
           </p>
 
           <div v-if="images.length" class="thumbs">
@@ -1072,7 +1117,7 @@ onBeforeUnmount(() => {
     <!-- 多问题底部：取消(左) + 上一个/下一个/提交(右) -->
     <div v-if="isMulti" class="footer" data-tauri-drag-region>
       <button class="btn" type="button" :disabled="submitting" @click="requestCancel">
-        取消 <kbd class="sc">⌘W</kbd>
+        {{ t("common.cancel") }} <kbd class="sc">⌘W</kbd>
       </button>
       <span class="spacer"></span>
       <button
@@ -1081,7 +1126,7 @@ onBeforeUnmount(() => {
         :disabled="submitting || current === 0"
         @click="goPrev"
       >
-        上一个 <kbd v-if="current > 0" class="sc">⌘[</kbd>
+        {{ t("popup.prev") }} <kbd v-if="current > 0" class="sc">⌘[</kbd>
       </button>
       <button
         class="btn"
@@ -1090,7 +1135,7 @@ onBeforeUnmount(() => {
         :disabled="submitting || current === total - 1"
         @click="goNext"
       >
-        下一个 <kbd v-if="!onLastQuestion" class="sc">⌘↵</kbd>
+        {{ t("popup.next") }} <kbd v-if="!onLastQuestion" class="sc">⌘↵</kbd>
       </button>
       <button
         v-if="allViewed"
@@ -1100,14 +1145,15 @@ onBeforeUnmount(() => {
         :disabled="submitting"
         @click="submit"
       >
-        提交 <kbd v-if="onLastQuestion" class="sc">⌘↵</kbd>
+        {{ t("common.submit") }}
+        <kbd v-if="onLastQuestion" class="sc">⌘↵</kbd>
       </button>
     </div>
 
     <!-- 单问题底部：取消(左) + 发送(右) -->
     <div v-else class="footer" data-tauri-drag-region>
       <button class="btn" type="button" :disabled="submitting" @click="requestCancel">
-        取消 <kbd class="sc">⌘W</kbd>
+        {{ t("common.cancel") }} <kbd class="sc">⌘W</kbd>
       </button>
       <span class="spacer"></span>
       <button
@@ -1116,21 +1162,21 @@ onBeforeUnmount(() => {
         :disabled="submitting"
         @click="submit"
       >
-        发送 <kbd class="sc">⌘↵</kbd>
+        {{ t("popup.send") }} <kbd class="sc">⌘↵</kbd>
       </button>
     </div>
 
     <!-- 取消二次确认 -->
     <div v-if="showCancelConfirm" class="confirm-overlay" @click.self="dismissCancelConfirm">
       <div class="confirm-box">
-        <p class="confirm-title">确定要取消吗？</p>
-        <p class="confirm-desc">已填写的回答将全部丢失。</p>
+        <p class="confirm-title">{{ t("popup.confirmCancel.title") }}</p>
+        <p class="confirm-desc">{{ t("popup.confirmCancel.desc") }}</p>
         <div class="confirm-actions">
           <button class="btn" type="button" @click="dismissCancelConfirm">
-            继续作答
+            {{ t("popup.confirmCancel.keep") }}
           </button>
           <button class="btn btn-danger" type="button" @click="doCancel">
-            确定取消
+            {{ t("popup.confirmCancel.confirm") }}
           </button>
         </div>
       </div>

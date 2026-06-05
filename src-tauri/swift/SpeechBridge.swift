@@ -38,7 +38,7 @@ final class AHSpeechBridge: NSObject {
     // localeID：BCP-47（如 zh-CN）；空串=跟随系统首选语言。
     @objc func start(_ localeID: NSString) {
         guard #available(macOS 26, *) else {
-            onErrorBlock?("语音输入需要 macOS 26 及以上" as NSString)
+            onErrorBlock?("needMacos26" as NSString)
             return
         }
         let id = localeID as String
@@ -61,7 +61,7 @@ final class AHSpeechBridge: NSObject {
         Task { [weak self] in
             let (speech, mic) = await AHSpeechBridge.requestAuth()
             guard speech, mic else {
-                self?.onErrorBlock?("麦克风或语音识别未获授权" as NSString)
+                self?.onErrorBlock?("authDenied" as NSString)
                 return
             }
             await engine.start()

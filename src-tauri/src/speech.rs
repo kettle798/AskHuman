@@ -23,9 +23,9 @@ const EVENT_COMMITTED: &str = "speech-committed";
 const EVENT_VOLATILE: &str = "speech-volatile";
 /// 输入电平峰值（0~1，录音动效）。
 const EVENT_LEVEL: &str = "speech-level";
-/// 人类可读状态（识别语言/下载/聆听中…）。
+/// 状态语义 key（preparing/downloadingModel/modelReady/listening），前端翻译。
 const EVENT_STATUS: &str = "speech-status";
-/// 错误文案（不支持/未授权/下载失败等）。
+/// 错误语义 key（如 noAudioFormat、unsupportedLocale|<locale>、generic|<msg>），前端翻译。
 const EVENT_ERROR: &str = "speech-error";
 /// 会话结束（前端复位录音 UI）。
 const EVENT_STOPPED: &str = "speech-stopped";
@@ -68,11 +68,11 @@ pub fn is_available() -> bool {
 /// 开始语音输入：`locale` 为 BCP-47（如 zh-CN），空串=跟随系统。
 pub fn start(app: AppHandle, locale: &str) {
     if !is_available() {
-        let _ = app.emit(EVENT_ERROR, "语音输入需要 macOS 26 及以上");
+        let _ = app.emit(EVENT_ERROR, "needMacos26");
         return;
     }
     let Some(cls) = AnyClass::get(c"AHSpeechBridge") else {
-        let _ = app.emit(EVENT_ERROR, "语音桥未就绪");
+        let _ = app.emit(EVENT_ERROR, "bridgeNotReady");
         return;
     };
 
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn speech_bridge_ping() {
         // 验证：Swift 静态库链入成功 + @objc 类注册 + objc2 调用通路。
-        let cls = AnyClass::get(c"AHSpeechBridge").expect("AHSpeechBridge 类未注册");
+        let cls = AnyClass::get(c"AHSpeechBridge").expect("AHSpeechBridge class not registered");
         let s: String = unsafe {
             let p: *mut NSString = msg_send![cls, ping];
             ns_to_string(p)

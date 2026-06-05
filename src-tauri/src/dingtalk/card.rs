@@ -7,6 +7,7 @@
 //! 说明：StandardCard 的 cardData 组件结构以钉钉实测为准，本文件提供初版结构，
 //! 实现期可据真机回调微调（按钮 id / params 约定保持稳定，便于解析）。
 
+use crate::i18n::{tr, Lang};
 use serde_json::{json, Value};
 
 /// 一次卡片按钮回调的解析结果。
@@ -31,6 +32,7 @@ pub fn build_question_card_data(
     options: &[String],
     selected: &[String],
     is_markdown: bool,
+    lang: Lang,
 ) -> String {
     let mut contents: Vec<Value> = Vec::new();
 
@@ -73,7 +75,7 @@ pub fn build_question_card_data(
         "id": "act_submit",
         "actions": [{
             "type": "button",
-            "label": { "type": "text", "text": "发送" },
+            "label": { "type": "text", "text": tr(lang, "channel.cardSendButton") },
             "id": SUBMIT_ID,
             "actionType": "callback",
             "params": { "kind": "submit" }

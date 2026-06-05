@@ -143,7 +143,7 @@ unsafe fn ensure_controller(app: &AppHandle, window: usize) -> Retained<Controll
     let controller = match existing {
         Some(c) => c,
         None => {
-            let mtm = MainThreadMarker::new().expect("ensure_controller 必须在主线程");
+            let mtm = MainThreadMarker::new().expect("ensure_controller must run on the main thread");
             let c = Controller::new(app.clone(), mtm);
             CONTROLLER.with(|cell| *cell.borrow_mut() = Some(c.clone()));
             c
@@ -205,16 +205,16 @@ pub fn file_icon_png_base64(path: &str) -> Result<String, String> {
     // 拖拽预览图标边长（逻辑像素）。系统图标含 512px 大图，需光栅化到此尺寸避免预览过大。
     const ICON_SIZE: f64 = 64.0;
     unsafe {
-        let ws_cls = AnyClass::get(c"NSWorkspace").ok_or("NSWorkspace 不可用")?;
+        let ws_cls = AnyClass::get(c"NSWorkspace").ok_or("NSWorkspace unavailable")?;
         let ws: *mut AnyObject = msg_send![ws_cls, sharedWorkspace];
         let ns_path = NSString::from_str(path);
         let icon: *mut AnyObject = msg_send![ws, iconForFile: &*ns_path];
         if icon.is_null() {
-            return Err("无法获取文件图标".into());
+            return Err("failed to get file icon".into());
         }
         // 将系统图标重绘到固定尺寸的小图，避免 TIFFRepresentation 输出 512px 大图。
         let size = NSSize::new(ICON_SIZE, ICON_SIZE);
-        let img_cls = AnyClass::get(c"NSImage").ok_or("NSImage 不可用")?;
+        let img_cls = AnyClass::get(c"NSImage").ok_or("NSImage unavailable")?;
         let small: *mut AnyObject = msg_send![img_cls, alloc];
         let small: *mut AnyObject = msg_send![small, initWithSize: size];
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), size);
@@ -224,24 +224,24 @@ pub fn file_icon_png_base64(path: &str) -> Result<String, String> {
         let _: () = msg_send![small, unlockFocus];
         let tiff: *mut AnyObject = msg_send![small, TIFFRepresentation];
         if tiff.is_null() {
-            return Err("图标 TIFF 表示为空".into());
+            return Err("icon TIFF representation is empty".into());
         }
-        let rep_cls = AnyClass::get(c"NSBitmapImageRep").ok_or("NSBitmapImageRep 不可用")?;
+        let rep_cls = AnyClass::get(c"NSBitmapImageRep").ok_or("NSBitmapImageRep unavailable")?;
         let rep: *mut AnyObject = msg_send![rep_cls, imageRepWithData: tiff];
         if rep.is_null() {
-            return Err("位图表示为空".into());
+            return Err("bitmap representation is empty".into());
         }
-        let dict_cls = AnyClass::get(c"NSDictionary").ok_or("NSDictionary 不可用")?;
+        let dict_cls = AnyClass::get(c"NSDictionary").ok_or("NSDictionary unavailable")?;
         let props: *mut AnyObject = msg_send![dict_cls, dictionary];
         let png: *mut AnyObject =
             msg_send![rep, representationUsingType: NS_BITMAP_FILE_TYPE_PNG, properties: props];
         if png.is_null() {
-            return Err("PNG 编码失败".into());
+            return Err("PNG encoding failed".into());
         }
         let len: usize = msg_send![png, length];
         let bytes: *const std::ffi::c_void = msg_send![png, bytes];
         if bytes.is_null() || len == 0 {
-            return Err("PNG 数据为空".into());
+            return Err("PNG data is empty".into());
         }
         let slice = std::slice::from_raw_parts(bytes as *const u8, len);
         let b64 = base64::engine::general_purpose::STANDARD.encode(slice);

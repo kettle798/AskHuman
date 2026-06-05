@@ -1,12 +1,79 @@
-// 英文词条（源语言）。命名空间：common / app / popup / settings / speech / shortcut。
-// M1 仅放少量条目以验证切换；完整抽取在 M2。
+// English messages (source language). Keys are grouped by namespace.
 export default {
   common: {
     cancel: "Cancel",
     submit: "Submit",
     test: "Test",
   },
+  popup: {
+    loading: "Loading…",
+    loadError: "Failed to load: {msg}",
+    questionFrom: "Question from {source}",
+    attachments: "Attachments · {n}",
+    inputPlaceholder: "Type your reply…",
+    addImage: "Add image",
+    send: "Send",
+    prev: "Previous",
+    next: "Next",
+    nav: {
+      pin: "Keep on top",
+      theme: "Toggle theme",
+      settings: "Settings",
+    },
+    question: {
+      single: "Question",
+      indexed: "Question {i}/{n}",
+    },
+    confirmCancel: {
+      title: "Discard and cancel?",
+      desc: "All entered answers will be lost.",
+      keep: "Keep answering",
+      confirm: "Discard",
+    },
+    speech: {
+      start: "Voice input",
+      stop: "Stop voice input",
+      preparing: "Preparing…",
+    },
+  },
+  // 后端(Swift/Rust)语音事件以语义 key 上报，前端在此翻译。
+  speech: {
+    status: {
+      preparing: "Preparing…",
+      downloadingModel: "Downloading language model…",
+      modelReady: "Model ready",
+      listening: "Listening…",
+    },
+    error: {
+      needMacos26: "Voice input requires macOS 26 or later",
+      unsupportedLocale:
+        "This device does not support speech recognition for the selected language ({locale})",
+      noAudioFormat: "Unable to get a compatible audio format",
+      noMonoFormat: "Unable to create a mono audio format",
+      localeUnresolved: "Recognition language not resolved",
+      authDenied: "Microphone or speech recognition not authorized",
+      bridgeNotReady: "Speech bridge not ready",
+      startFailed: "Failed to start voice input",
+      generic: "Speech recognition error: {message}",
+    },
+  },
+  shortcut: {
+    none: "None",
+    conflict: {
+      needMod: "Must include ⌘ or ⌃",
+      enter: "Conflicts with Submit / Next (⌘↩)",
+      cancel: "Conflicts with Cancel (⌘W)",
+      brackets: "Conflicts with Previous / Next (⌘[ ⌘])",
+      options: "Conflicts with option shortcuts (⌘1–9)",
+      editing: "Conflicts with system edit shortcut (⌘{key}); add ⇧ or pick another",
+    },
+  },
   settings: {
+    tabs: {
+      general: "General",
+      integration: "Integration",
+      channel: "Channels",
+    },
     appearance: {
       title: "Appearance",
       theme: "Theme",
@@ -15,6 +82,62 @@ export default {
       themeDark: "Dark",
       language: "Language",
       languageSystem: "Follow system",
+    },
+    popupBehavior: {
+      title: "Popup behavior",
+      alwaysOnTop: "Always on top",
+      windowEffect: "Window effect",
+      effectGlass: "Glass",
+      effectBlur: "Blur",
+      appearAnimation: "Appear animation",
+      testPopup: "Open test popup",
+    },
+    speech: {
+      title: "Voice input",
+      language: "Recognition language",
+      languageSystem: "Follow system",
+      shortcut: "Shortcut",
+      recordHint: "Press a combination (must include ⌘ or ⌃), Esc to cancel",
+      recording: "Press shortcut…",
+      clear: "Clear",
+    },
+    integration: {
+      promptTitle: "Reference prompt",
+      copy: "Copy",
+      copied: "Copied",
+      promptDesc:
+        "Add the following prompt to your AI assistant to guide it to interact with you via AskHuman.",
+      hookTitle: "Cursor Hook",
+      installed: "Installed",
+      notInstalled: "Not installed",
+      hookDesc:
+        "Once installed, it registers a preToolUse hook in ~/.cursor/hooks.json: when a Shell call invokes AskHuman, the timeout is extended to 24h to avoid being killed while waiting. Removing it only deletes the entry injected by this app.",
+      install: "Install",
+      uninstall: "Remove",
+      openHooks: "Open hooks.json",
+      windowsUnsupported: "Cursor Hook is not supported on Windows",
+    },
+    channels: {
+      popupTitle: "Local popup",
+      rememberSize: "Remember window size",
+      defaultWidth: "Default width",
+      defaultHeight: "Default height",
+      telegramTitle: "Telegram",
+      botToken: "Bot Token",
+      chatId: "Chat ID",
+      apiBaseUrl: "API Base URL",
+      testConnection: "Test connection",
+      testing: "Testing…",
+      dingtalkTitle: "DingTalk",
+      clientId: "ClientId (AppKey)",
+      clientSecret: "ClientSecret (AppSecret)",
+      userId: "UserId",
+      autoDetect: "Auto-detect",
+      detecting: "Detecting…",
+      detectHint:
+        "Use the target DingTalk account to DM the bot with: {code} (valid for 120s)",
+      detected: "Detected and filled UserId: {userId}",
+      moreSoon: "More channels coming soon",
     },
   },
 };

@@ -8,6 +8,7 @@ use crate::channels::telegram::TelegramChannel;
 use crate::channels::Channel;
 use crate::cli::{image_writer, output};
 use crate::config::{AppConfig, ThemeMode, WindowEffect};
+use crate::i18n::{self, Lang};
 use crate::dingtalk::client::DingTalkClient;
 use crate::models::{AskRequest, ChannelAction, ChannelResult};
 use crate::telegram::TelegramClient;
@@ -39,29 +40,33 @@ pub const EXIT_NO_CHANNEL: i32 = 3;
 /// - 否则若存在可用会话型渠道（Telegram/钉钉）→ headless 路径（不进 Tauri）；
 /// - 都不可用 → stderr 报原因 + 退出码 `EXIT_NO_CHANNEL`。
 pub fn run_ask(request: AskRequest, config: AppConfig) -> ! {
+    let lang = Lang::resolve(&config.general.language);
     let messaging_active = has_active_messaging(&config);
     let popup_wanted = config.channels.popup.enabled;
-    let gui = gui_available();
+    let gui = gui_available(lang);
 
     if popup_wanted && gui.is_ok() {
         run_gui_ask(request, config, messaging_active);
     } else if messaging_active {
         if popup_wanted {
             if let Err(reason) = &gui {
-                stderr_redirect::eprintln_real(&format!(
-                    "本地弹窗不可用：{}；已改用消息渠道",
-                    reason
-                ));
+                stderr_redirect::eprintln_real(
+                    &i18n::tr(lang, "app.popupUnavailableFellBack").replace("{reason}", reason),
+                );
             }
         }
         run_headless(request, config);
     } else {
         let reason = match (popup_wanted, &gui) {
-            (true, Err(r)) => format!("本地弹窗不可用：{}，且未配置可用的消息渠道", r),
-            (false, _) => "本地弹窗已禁用，且未配置可用的消息渠道".to_string(),
+            (true, Err(r)) => i18n::tr(lang, "app.popupUnavailableNoChannel").replace("{reason}", r),
+            (false, _) => i18n::tr(lang, "app.popupDisabledNoChannel").to_string(),
             (true, Ok(())) => unreachable!(),
         };
-        stderr_redirect::eprintln_real(&format!("错误: 无可用的通信 Channel — {}", reason));
+        stderr_redirect::eprintln_real(&format!(
+            "{}{}",
+            i18n::err_prefix(lang),
+            i18n::tr(lang, "app.noChannel").replace("{reason}", &reason)
+        ));
         std::process::exit(EXIT_NO_CHANNEL);
     }
 }
@@ -99,6 +104,7 @@ fn active_messaging_channels(config: &AppConfig) -> Vec<Arc<dyn Channel>> {
 
 /// GUI 弹窗路径；若 Tauri 构建失败（GUI 不可用），按消息渠道是否可用兜底。
 fn run_gui_ask(request: AskRequest, config: AppConfig, messaging_active: bool) -> ! {
+    let lang = Lang::resolve(&config.general.language);
     let state = AppState {
         request: request.clone(),
         config: config.clone(),
@@ -107,15 +113,15 @@ fn run_gui_ask(request: AskRequest, config: AppConfig, messaging_active: bool) -
         Ok(()) => std::process::exit(0), // 成功路径已在 launch 内退出，此处不可达
         Err(e) => {
             if messaging_active {
-                stderr_redirect::eprintln_real(&format!(
-                    "本地弹窗启动失败：{}；已改用消息渠道",
-                    e
-                ));
+                stderr_redirect::eprintln_real(
+                    &i18n::tr(lang, "app.popupStartFailedFellBack").replace("{e}", &e.to_string()),
+                );
                 run_headless(request, config);
             } else {
                 stderr_redirect::eprintln_real(&format!(
-                    "错误: 本地弹窗启动失败：{}，且未配置可用的消息渠道",
-                    e
+                    "{}{}",
+                    i18n::err_prefix(lang),
+                    i18n::tr(lang, "app.popupStartFailedNoChannel").replace("{e}", &e.to_string())
                 ));
                 std::process::exit(EXIT_NO_CHANNEL);
             }
@@ -130,13 +136,18 @@ fn run_gui_ask(request: AskRequest, config: AppConfig, messaging_active: bool) -
 fn run_headless(request: AskRequest, config: AppConfig) -> ! {
     use crate::channels::conversation::{run_conversation, MessagingChannel};
 
+    let lang = Lang::resolve(&config.general.language);
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
         Ok(rt) => rt,
         Err(e) => {
-            stderr_redirect::eprintln_real(&format!("错误: 无法创建运行时: {}", e));
+            stderr_redirect::eprintln_real(&format!(
+                "{}{}",
+                i18n::err_prefix(lang),
+                i18n::tr(lang, "app.runtimeCreateFailed").replace("{e}", &e.to_string())
+            ));
             std::process::exit(1);
         }
     };
@@ -156,7 +167,11 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
             handles.push(tokio::spawn(async move {
                 let mut session = TelegramSession::new(cfg);
                 if let Err(e) = session.open().await {
-                    stderr_redirect::eprintln_real(&format!("警告: Telegram 配置无效: {}", e));
+                    stderr_redirect::eprintln_real(&format!(
+                        "{}{}",
+                        i18n::warn_prefix(lang),
+                        i18n::tr(lang, "app.telegramInvalid").replace("{e}", &e.to_string())
+                    ));
                     return;
                 }
                 run_conversation(&mut session, &req, cancelled, sink).await;
@@ -172,7 +187,11 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
             handles.push(tokio::spawn(async move {
                 let mut session = DingTalkSession::new(cfg);
                 if let Err(e) = session.open().await {
-                    stderr_redirect::eprintln_real(&format!("警告: 钉钉配置无效: {}", e));
+                    stderr_redirect::eprintln_real(&format!(
+                        "{}{}",
+                        i18n::warn_prefix(lang),
+                        i18n::tr(lang, "app.dingtalkInvalid").replace("{e}", &e.to_string())
+                    ));
                     return;
                 }
                 run_conversation(&mut session, &req, cancelled, sink).await;
@@ -185,18 +204,27 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
     });
 
     // 正常情况下用户完成回复 → submit → 进程已退出；走到此处说明全部会话结束仍未获结果。
-    stderr_redirect::eprintln_real("错误: 消息渠道会话结束但未获得结果");
+    stderr_redirect::eprintln_real(&format!(
+        "{}{}",
+        i18n::err_prefix(lang),
+        i18n::tr(lang, "app.sessionEndedNoResult")
+    ));
     std::process::exit(EXIT_NO_CHANNEL);
 }
 
 /// 设置模式：创建设置窗口。
 pub fn run_settings(config: AppConfig) -> ! {
+    let lang = Lang::resolve(&config.general.language);
     let state = AppState {
         request: AskRequest::new(crate::models::MessagePrompt::default(), Vec::new(), false),
         config,
     };
     if let Err(e) = launch(state, View::Settings) {
-        stderr_redirect::eprintln_real(&format!("错误: 无法启动设置界面: {}", e));
+        stderr_redirect::eprintln_real(&format!(
+            "{}{}",
+            i18n::err_prefix(lang),
+            i18n::tr(lang, "app.settingsLaunchFailed").replace("{e}", &e.to_string())
+        ));
         std::process::exit(1);
     }
     std::process::exit(0);
@@ -206,6 +234,7 @@ pub fn run_settings(config: AppConfig) -> ! {
 /// 成功路径在内部进入事件循环并退出进程（不返回）；构建失败返回 `Err` 供调用方兜底。
 fn launch(state: AppState, view: View) -> tauri::Result<()> {
     let theme = window_theme(&state.config);
+    let lang = Lang::resolve(&state.config.general.language);
     let window_bg = background_for(resolved_theme(&state.config));
     let popup_w = state.config.channels.popup.width;
     let popup_h = state.config.channels.popup.height;
@@ -287,7 +316,7 @@ fn launch(state: AppState, view: View) -> tauri::Result<()> {
                             "popup",
                             WebviewUrl::App("index.html?view=popup".into()),
                         )
-                        .title("HumanInLoop")
+                        .title(i18n::tr(lang, "title.popup"))
                         .inner_size(popup_w, popup_h)
                         .min_inner_size(420.0, 480.0)
                         .center()
@@ -336,19 +365,20 @@ fn launch(state: AppState, view: View) -> tauri::Result<()> {
 
 /// 把结果输出到 stdout，返回退出码。供协调器调用。
 pub(crate) fn emit_result(request_id: &str, result: &ChannelResult) -> i32 {
+    let lang = Lang::current();
     match result.action {
         ChannelAction::Cancel => {
-            println!("{}", output::cancel_output());
+            println!("{}", output::cancel_output(lang));
             0
         }
         ChannelAction::Send => {
             // 逐题落盘图片（按题分子目录避免文件名冲突），再聚合输出。
             let mut image_paths_per_q: Vec<Vec<String>> = Vec::with_capacity(result.answers.len());
             for (i, answer) in result.answers.iter().enumerate() {
-                match image_writer::save(&answer.images, request_id, i) {
+                match image_writer::save(&answer.images, request_id, i, lang) {
                     Ok(paths) => image_paths_per_q.push(paths),
                     Err(e) => {
-                        stderr_redirect::eprintln_real(&format!("错误: {}", e));
+                        stderr_redirect::eprintln_real(&format!("{}{}", i18n::err_prefix(lang), e));
                         return 1;
                     }
                 }
@@ -366,7 +396,7 @@ pub(crate) fn emit_result(request_id: &str, result: &ChannelResult) -> i32 {
                 })
                 .collect();
 
-            println!("{}", output::aggregate_output(&rendered));
+            println!("{}", output::aggregate_output(lang, &rendered));
             0
         }
     }
@@ -490,13 +520,14 @@ where
         return Ok(());
     }
     let theme = window_theme(config);
+    let lang = Lang::resolve(&config.general.language);
     let window_bg = background_for(resolved_theme(config));
     let builder = WebviewWindowBuilder::new(
         manager,
         "settings",
         WebviewUrl::App("index.html?view=settings".into()),
     )
-    .title("HumanInLoop 设置")
+    .title(i18n::tr(lang, "title.settings"))
     .inner_size(560.0, 640.0)
     // 最小宽度：保证标题栏内居中的 tab 不会与左上角红绿灯重叠。
     .min_inner_size(480.0, 520.0)
@@ -548,20 +579,20 @@ fn persist_popup_size(window: &tauri::Window) {
 /// 故在 Linux 上先探测显示环境与 WebKitGTK；实际 `build()` 失败仍由调用方按 `Err` 兜底。
 /// macOS / Windows 使用系统 WebView，默认视为可用。
 #[cfg(target_os = "linux")]
-fn gui_available() -> Result<(), String> {
+fn gui_available(lang: Lang) -> Result<(), String> {
     let has_display = std::env::var_os("DISPLAY").is_some()
         || std::env::var_os("WAYLAND_DISPLAY").is_some();
     if !has_display {
-        return Err("无图形显示环境（DISPLAY / WAYLAND_DISPLAY 均未设置）".to_string());
+        return Err(i18n::tr(lang, "app.noDisplay").to_string());
     }
     if !webkitgtk_loadable() {
-        return Err("系统缺少 WebKitGTK（如 libwebkit2gtk-4.1）".to_string());
+        return Err(i18n::tr(lang, "app.noWebkitgtk").to_string());
     }
     Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn gui_available() -> Result<(), String> {
+fn gui_available(_lang: Lang) -> Result<(), String> {
     Ok(())
 }
 

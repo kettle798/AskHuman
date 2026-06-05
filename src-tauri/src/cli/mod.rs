@@ -4,21 +4,23 @@ pub mod help;
 pub mod image_writer;
 pub mod output;
 
+use crate::i18n::{self, Lang};
 use std::process::exit;
 
 /// 入口分发：在创建任何窗口前按 argv 分流。
 pub fn dispatch() {
     let argv: Vec<String> = std::env::args().collect();
+    let lang = Lang::current();
 
     if argv.len() < 2 {
-        eprintln!("错误: 缺少提问内容\n");
-        println!("{}", help::agent_help_text());
+        eprintln!("{}{}\n", i18n::err_prefix(lang), i18n::tr(lang, "cli.missingContent"));
+        println!("{}", help::agent_help_text(lang));
         exit(1);
     }
 
     match argv[1].as_str() {
         "--help" | "-h" => {
-            println!("{}", help::help_text());
+            println!("{}", help::help_text(lang));
             exit(0);
         }
         "--version" | "-v" => {
@@ -26,7 +28,7 @@ pub fn dispatch() {
             exit(0);
         }
         "--agent-help" => {
-            println!("{}", help::agent_help_text());
+            println!("{}", help::agent_help_text(lang));
             exit(0);
         }
         "--settings" => {
@@ -46,17 +48,21 @@ pub fn dispatch() {
                         | "--no-markdown"
                 ) =>
         {
-            eprintln!("错误: 未知选项 {}\n", first);
-            println!("{}", help::agent_help_text());
+            eprintln!(
+                "{}{}\n",
+                i18n::err_prefix(lang),
+                i18n::tr(lang, "cli.unknownOption").replace("{opt}", first)
+            );
+            println!("{}", help::agent_help_text(lang));
             exit(1);
         }
-        _ => match args::parse_ask(&argv[1..]) {
+        _ => match args::parse_ask(&argv[1..], lang) {
             Ok(parsed) => {
                 // 解析 Message 的展示附件（-f 始终归 Message）。
-                let files = match file_attachment::resolve(&parsed.message_files) {
+                let files = match file_attachment::resolve(&parsed.message_files, lang) {
                     Ok(files) => files,
                     Err(e) => {
-                        eprintln!("错误: {}", e);
+                        eprintln!("{}{}", i18n::err_prefix(lang), e);
                         exit(1);
                     }
                 };
@@ -71,8 +77,8 @@ pub fn dispatch() {
                 crate::app::run_ask(request, crate::config::AppConfig::load());
             }
             Err(e) => {
-                eprintln!("错误: {}\n", e);
-                println!("{}", help::agent_help_text());
+                eprintln!("{}{}\n", i18n::err_prefix(lang), e);
+                println!("{}", help::agent_help_text(lang));
                 exit(1);
             }
         },
