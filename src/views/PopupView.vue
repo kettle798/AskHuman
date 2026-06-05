@@ -89,6 +89,14 @@ const allViewed = computed(
 const hasAnyAnswer = computed(() =>
   questions.value.some((_, i) => isAnswered(i))
 );
+// 是否处于最后一题：多题时 CMD+回车 仅在最后一题提交，否则前往下一题。
+const onLastQuestion = computed(() => current.value === total.value - 1);
+
+// CMD+数字 选项快捷键上限（1-9）；超出的选项不分配快捷键。
+const OPTION_HOTKEY_MAX = 9;
+function optionHotkey(i: number): string | null {
+  return i < OPTION_HOTKEY_MAX ? `⌘${i + 1}` : null;
+}
 
 function isAnswered(i: number): boolean {
   return (
@@ -269,6 +277,13 @@ function toggle(option: string) {
   else arr.push(option);
 }
 
+// 通过序号（0 始）切换当前题的选项，供 CMD+数字 调用。
+function toggleByIndex(i: number) {
+  const opts = currentQuestion.value?.predefinedOptions;
+  if (!opts || i < 0 || i >= opts.length) return;
+  toggle(opts[i]);
+}
+
 function pickFiles() {
   fileRef.value?.click();
 }
@@ -435,20 +450,39 @@ function dismissCancelConfirm() {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && e.key === "Enter") {
     e.preventDefault();
-    if (isMulti.value) {
-      if (allViewed.value) submit();
-      else goNext();
-    } else {
-      submit();
-    }
+    // 多题：非最后一题始终前往下一题（即使提交按钮已出现），最后一题才提交。
+    if (isMulti.value && !onLastQuestion.value) goNext();
+    else submit();
     return;
   }
-  if ((e.metaKey || e.ctrlKey) && (e.key === "w" || e.key === "W")) {
+  if (mod && (e.key === "w" || e.key === "W")) {
     e.preventDefault();
     requestCancel();
     return;
+  }
+  // 多题：CMD+] 下一题，CMD+[ 上一题（不影响 CMD+回车）。
+  if (isMulti.value && mod && e.key === "]") {
+    e.preventDefault();
+    goNext();
+    return;
+  }
+  if (isMulti.value && mod && e.key === "[") {
+    e.preventDefault();
+    goPrev();
+    return;
+  }
+  // CMD+数字（1-9）：选中/取消当前题对应序号的选项。
+  if (mod && e.key >= "1" && e.key <= "9") {
+    const idx = Number(e.key) - 1;
+    const opts = currentQuestion.value?.predefinedOptions;
+    if (opts && idx < opts.length && idx < OPTION_HOTKEY_MAX) {
+      e.preventDefault();
+      toggleByIndex(idx);
+      return;
+    }
   }
   const tgt = e.target as HTMLElement | null;
   const typing =
@@ -663,6 +697,7 @@ onBeforeUnmount(() => {
             >
               <span class="check">{{ chosen.includes(opt) ? "✓" : "" }}</span>
               <span class="label">{{ opt }}</span>
+              <kbd v-if="optionHotkey(i)" class="opt-sc">{{ optionHotkey(i) }}</kbd>
             </div>
           </div>
 
@@ -738,25 +773,26 @@ onBeforeUnmount(() => {
         :disabled="submitting || current === 0"
         @click="goPrev"
       >
-        上一个
+        上一个 <kbd v-if="current > 0" class="sc">⌘[</kbd>
       </button>
       <button
         class="btn"
-        :class="{ 'btn-primary': !allViewed }"
+        :class="{ 'btn-primary': !onLastQuestion }"
         type="button"
         :disabled="submitting || current === total - 1"
         @click="goNext"
       >
-        下一个 <kbd v-if="!allViewed" class="sc">⌘↵</kbd>
+        下一个 <kbd v-if="!onLastQuestion" class="sc">⌘↵</kbd>
       </button>
       <button
         v-if="allViewed"
-        class="btn btn-primary"
+        class="btn"
+        :class="{ 'btn-primary': onLastQuestion }"
         type="button"
         :disabled="submitting"
         @click="submit"
       >
-        提交 <kbd class="sc">⌘↵</kbd>
+        提交 <kbd v-if="onLastQuestion" class="sc">⌘↵</kbd>
       </button>
     </div>
 
@@ -1179,6 +1215,26 @@ onBeforeUnmount(() => {
 .reply-file .rf-remove:hover {
   background: rgba(128, 128, 128, 0.4);
   color: var(--text-primary);
+}
+
+/* 选项末尾的快捷键标注（⌘1…⌘9） */
+.option .opt-sc {
+  flex: 0 0 auto;
+  align-self: center;
+  margin-left: 4px;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 5px;
+  opacity: 0.85;
+}
+.option.selected .opt-sc {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 /* 按钮上的快捷键标注 */
