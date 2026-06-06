@@ -522,6 +522,10 @@ where
     let theme = window_theme(config);
     let lang = Lang::resolve(&config.general.language);
     let window_bg = background_for(resolved_theme(config));
+    // 弹窗置顶时，设置窗口与其同级，确保新建并获焦后显示在置顶弹窗之上；
+    // 无弹窗（独立 --settings 启动）或弹窗未置顶时保持普通层级，不上浮于其它 App。
+    let pin_above_popup =
+        manager.get_webview_window("popup").is_some() && config.general.always_on_top;
     let builder = WebviewWindowBuilder::new(
         manager,
         "settings",
@@ -532,6 +536,7 @@ where
     // 最小宽度：保证标题栏内居中的 tab 不会与左上角红绿灯重叠。
     .min_inner_size(480.0, 520.0)
     .center()
+    .always_on_top(pin_above_popup)
     .theme(theme);
     let window_effect = config.general.window_effect;
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
