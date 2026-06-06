@@ -15,6 +15,18 @@
   2. 常驻 daemon——后台进程独占持有 Stream，各 `AskHuman` 经本地 socket 注册等待、由其转发用户消息（真复用 / 连接常热 / 支持并发，但需管理 daemon 生命周期 + IPC，复杂度高）。← **采用此方案（daemon 架构）。**
 - **状态**：修复中（daemon 架构 Phase 2）；完成后删除本条目。
 
+## daemon 架构：待补充的人工实测
+
+> 已通过的真机实测（install 后经新 daemon→GUI Helper 链路）：① 单题弹窗作答（退出 0）；② **并发两请求弹窗不串台**（A→A、B→B）；③ 取消返回 `[Status]` 再问指引（退出 0）；④ `daemon status` 显示 running 且 `im conns: dingtalk, feishu, telegram`（三连接常热单实例）。下列为尚未逐项跑过、建议后续补做的人工测试：
+
+- [ ] **真实 IM 并发（真 TODO#1）**：同时发起两个请求 → 分别在钉钉 / 飞书 / Telegram 的卡片上作答，验证：(a) 回复不串台（按 `outTrackId`/`open_message_id`/callback `message_id` 路由到正确请求）；(b) 自由文字归属正确（Telegram 归「最新活动卡片」、钉钉聊天按 `senderStaffId`、飞书按 `open_id`）；(c) 同一 client_id 仅一条长连接、无多开互抢。
+- [ ] **被抢答 / 跨渠道抢答**：一个请求同时挂多渠道（弹窗 + IM），在某一渠道作答后，其余渠道卡片应即时置灰为「已在 X 回答」（走 OpenAPI `updateCard`/`patchCard`）。
+- [ ] **Phase 3 实时配置（验收 #7）**：弹窗开着时修改 `config.json` 的主题 / 语言（或在设置窗口改并保存）→ 验证打开中的弹窗**实时切换**主题/语言（daemon `config_watch` → `ConfigChanged` → 前端 `settings-updated`）。
+- [ ] **Phase 3 凭据热重载（惰性失效）**：修改某渠道凭据 / 禁用某渠道 → 观察 `daemon.log` 出现 `config reloaded`；下一个请求按新配置重连（旧缓存 Router 被丢弃），进行中的请求保留其原连接直到结束。
+- [ ] **临时目录清理（A10）**：确认 `temp/askhuman/<id>/` 中超过 24h 未改动的目录会在 daemon 启动时 / 每小时被清理，且不会误删刚产出的图片。
+- [ ] **生命周期**：空闲超时自动退出；`daemon stop/restart` 正常；二进制指纹换新（重装后旧 daemon 自动让位、新 daemon 接管）。
+- [ ] **自动识别 userId/open_id（Q6）**：设置窗口点「自动识别」→ 经 daemon `Detect`：若已有同 app 长连接则复用观察（零冲突），否则 daemon 临时开连；非 Unix 走进程内回退。
+
 ## 后续增强 / 性能优化
 
 ### A. 钉钉卡片「变灰」延迟（daemon 架构引入）
