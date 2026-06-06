@@ -15,8 +15,8 @@ use super::{Channel, Preemption, ResultSink};
 use crate::config::DingTalkChannelConfig;
 use crate::dingtalk::card;
 use crate::dingtalk::client::DingTalkClient;
+use crate::dingtalk::router::{DdInbound, DdRouter, RoutedDd};
 use crate::dingtalk::textfile::{self, TextAction};
-use crate::dingtalk::stream::{StreamConn, StreamEvent, TOPIC_BOT_MESSAGE, TOPIC_CARD_CALLBACK};
 use crate::i18n::{self, Lang};
 use crate::models::{ImageAttachment, MessagePrompt, QuestionAnswer};
 use serde_json::{json, Value};
@@ -45,17 +45,36 @@ fn effective_template_id(config: &DingTalkChannelConfig) -> &str {
     }
 }
 
+/// Router 归属：单进程自建一个仅挂本会话的 Router；Daemon 复用共享且常热的 Router。
+#[derive(Clone)]
+enum DdTransport {
+    Own,
+    Shared(Arc<DdRouter>),
+}
+
 /// 薄外层：接 Coordinator（并行抢答），把会话委托给 `run_conversation` + `DingTalkSession`。
 pub struct DingTalkChannel {
     config: DingTalkChannelConfig,
     preempt: Arc<Preemption>,
+    transport: DdTransport,
 }
 
 impl DingTalkChannel {
+    /// 单进程外层：本会话自建并独占一条连接（每进程一个 Router、仅挂本会话）。
     pub fn new(config: DingTalkChannelConfig) -> Self {
         Self {
             config,
             preempt: Arc::new(Preemption::new()),
+            transport: DdTransport::Own,
+        }
+    }
+
+    /// Daemon 外层：复用共享且常热的 Router（跨请求复用，根治多连接抢消息）。
+    pub fn shared(config: DingTalkChannelConfig, router: Arc<DdRouter>) -> Self {
+        Self {
+            config,
+            preempt: Arc::new(Preemption::new()),
+            transport: DdTransport::Shared(router),
         }
     }
 }
@@ -69,14 +88,38 @@ impl Channel for DingTalkChannel {
         let config = self.config.clone();
         let preempt = self.preempt.clone();
         let request = request.clone();
+        let transport = self.transport.clone();
         tauri::async_runtime::spawn(async move {
-            let mut session = DingTalkSession::new(config);
+            let lang = Lang::current();
+            // 取得本会话的事件源句柄（Own：现连一个 Router；Shared：复用）。`_keep` 持有
+            // Own Router 直至会话结束；Shared 的 Router 由 Daemon 持有，不在此处保活。
+            let (events, _keep): (RoutedDd, Option<Arc<DdRouter>>) = match transport {
+                DdTransport::Own => {
+                    match DdRouter::connect(
+                        config.client_id.trim(),
+                        config.client_secret.trim(),
+                    )
+                    .await
+                    {
+                        Ok(router) => (router.register(), Some(router)),
+                        Err(e) => {
+                            eprintln!(
+                                "{}{}",
+                                i18n::warn_prefix(lang),
+                                i18n::tr(lang, "channel.ddConfigInvalidSkip").replace("{e}", &e)
+                            );
+                            return;
+                        }
+                    }
+                }
+                DdTransport::Shared(router) => (router.register(), None),
+            };
+            let mut session = DingTalkSession::new(config, events);
             if let Err(e) = session.open().await {
-                let lang = Lang::current();
                 eprintln!(
                     "{}{}",
                     i18n::warn_prefix(lang),
-                    i18n::tr(lang, "channel.ddConfigInvalidSkip").replace("{e}", &e.to_string())
+                    i18n::tr(lang, "channel.ddConfigInvalidSkip").replace("{e}", &e)
                 );
                 return;
             }
@@ -89,19 +132,19 @@ impl Channel for DingTalkChannel {
     }
 }
 
-/// 传输实现：持有 client 与 Stream 长连接（跨题复用）。
+/// 传输实现：持有 OpenAPI client（发送）与 Router 事件源句柄（接收，长连接由 Router 独占）。
 pub struct DingTalkSession {
     config: DingTalkChannelConfig,
     client: Option<DingTalkClient>,
-    stream: Option<StreamConn>,
+    events: Option<RoutedDd>,
 }
 
 impl DingTalkSession {
-    pub fn new(config: DingTalkChannelConfig) -> Self {
+    pub fn new(config: DingTalkChannelConfig, events: RoutedDd) -> Self {
         Self {
             config,
             client: None,
-            stream: None,
+            events: Some(events),
         }
     }
 }
@@ -113,18 +156,9 @@ impl MessagingChannel for DingTalkSession {
     }
 
     async fn open(&mut self) -> Result<(), String> {
+        // 长连接由 Router 独占，这里只需 OpenAPI client（发送卡片/消息/置灰）。
         let client = DingTalkClient::new(&self.config).map_err(|e| e.to_string())?;
-        // 同时订阅 bot 消息（图片/文件累积）+ 卡片回调（提交）两个 topic。
-        let stream = StreamConn::connect(
-            client.http().clone(),
-            self.config.client_id.trim(),
-            self.config.client_secret.trim(),
-            &[TOPIC_BOT_MESSAGE, TOPIC_CARD_CALLBACK],
-        )
-        .await
-        .map_err(|e| e.to_string())?;
         self.client = Some(client);
-        self.stream = Some(stream);
         Ok(())
     }
 
@@ -221,14 +255,17 @@ impl MessagingChannel for DingTalkSession {
 
         let Self {
             client,
-            stream,
+            events,
             config,
         } = self;
         let client = client.as_ref()?;
-        let stream = stream.as_mut()?;
+        let events = events.as_mut()?;
         let user_id = config.user_id.trim().to_string();
 
-        // 1. 投放互动卡片；失败 → 回退纯文本编号方案。
+        // 先登记卡片精确路由 + 认领本 user 的聊天消息（投放前登记，规避「秒答」竞态）。
+        events.set_active(Some(&out_track_id), &user_id);
+
+        // 1. 投放互动卡片；失败 → 撤销卡片路由，回退纯文本编号方案。
         if let Err(e) = client
             .create_and_deliver_card(&out_track_id, &template_id, param_map, private_param_map)
             .await
@@ -238,38 +275,33 @@ impl MessagingChannel for DingTalkSession {
                 i18n::warn_prefix(ctx.lang),
                 i18n::tr(ctx.lang, "channel.ddCardDeliverFailed").replace("{e}", &e.to_string())
             );
-            return ask_question_text(client, stream, &user_id, ctx, preempt).await;
+            events.clear_active(Some(&out_track_id), "");
+            return ask_question_text(client, events, &user_id, ctx, preempt).await;
         }
 
         // 2. 等卡片「提交」；作答期间累积聊天里的图片/文件；被抢答则收尾返回 None。
         let mut images: Vec<ImageAttachment> = Vec::new();
         let mut files: Vec<String> = Vec::new();
         while !preempt.is_cancelled() {
-            let ev = match tokio::time::timeout(POLL_INTERVAL, stream.recv()).await {
+            let ev = match tokio::time::timeout(POLL_INTERVAL, events.recv()).await {
                 Ok(Some(ev)) => ev,
                 Ok(None) => break,  // 连接彻底断开
                 Err(_) => continue, // 超时：回到循环顶部重新检查 cancelled
             };
             match ev {
-                StreamEvent::CardCallback { data, message_id } => {
-                    match card::parse_card_submit(&data) {
-                        Some(s) if s.out_track_id == out_track_id && s.user_id == user_id => {
-                            // 回包置 submitted=true（私有）让卡片灰显，并写终态文案 submit_status（公有）。
-                            // 公私分开：私有进 userPrivateData，公有进 cardData，避免整份数据被拒。
+                DdInbound::Card(data) => {
+                    if let Some(s) = card::parse_card_submit(&data) {
+                        if s.out_track_id == out_track_id && s.user_id == user_id {
+                            // 即时空 ACK 已由 Router 完成；这里经 OpenAPI 把卡片置灰为「已提交」。
                             let submitted_text = i18n::tr(ctx.lang, "channel.ddSubmitted");
-                            stream
-                                .respond(
-                                    &message_id,
-                                    json!({
-                                        "cardUpdateOptions": {
-                                            "updateCardDataByKey": true,
-                                            "updatePrivateDataByKey": true,
-                                        },
-                                        "cardData": { "cardParamMap": { "submit_status": submitted_text } },
-                                        "userPrivateData": { "cardParamMap": { "submitted": "true" } },
-                                    }),
+                            let _ = client
+                                .update_card_private(
+                                    &out_track_id,
+                                    json!({ "submit_status": submitted_text }),
+                                    json!({ "submitted": "true" }),
                                 )
                                 .await;
+                            events.clear_active(Some(&out_track_id), &user_id);
                             return Some(QuestionAnswer {
                                 selected_options: s.selected_options,
                                 user_input: s.user_input,
@@ -277,11 +309,10 @@ impl MessagingChannel for DingTalkSession {
                                 files,
                             });
                         }
-                        // 非本卡片 / 非提交 → 空回包确认，继续等待。
-                        _ => stream.respond(&message_id, json!({})).await,
                     }
+                    // 非本卡片 / 非提交：忽略，继续等待。
                 }
-                StreamEvent::BotMessage(data) => {
+                DdInbound::Bot(data) => {
                     if bot_message_belongs(&data, &user_id) {
                         accumulate_attachment(client, &data, &mut images, &mut files, ctx.lang)
                             .await;
@@ -304,18 +335,20 @@ impl MessagingChannel for DingTalkSession {
                 json!({ "submitted": "true" }),
             )
             .await;
+        events.clear_active(Some(&out_track_id), &user_id);
         None
     }
 
     async fn close(&mut self) {
-        self.stream = None;
+        // 丢弃事件源句柄 → 从 Router 注销路由（Daemon 下及时清理，避免陈旧路由堆积）。
+        self.events = None;
     }
 }
 
 /// 兜底：纯文本 + 编号选项问一题（卡片投放失败时使用）。用户回一条消息即完成该题。
 async fn ask_question_text(
     client: &DingTalkClient,
-    stream: &mut StreamConn,
+    events: &mut RoutedDd,
     user_id: &str,
     ctx: &QuestionCtx<'_>,
     preempt: &Preemption,
@@ -339,27 +372,30 @@ async fn ask_question_text(
         );
     }
 
+    // 文本兜底无卡片：认领本 user 的聊天消息即可（不登记卡片精确路由）。
+    events.set_active(None, user_id);
+
     while !preempt.is_cancelled() {
-        let ev = match tokio::time::timeout(POLL_INTERVAL, stream.recv()).await {
+        let ev = match tokio::time::timeout(POLL_INTERVAL, events.recv()).await {
             Ok(Some(ev)) => ev,
             Ok(None) => break,
             Err(_) => continue,
         };
         match ev {
-            StreamEvent::BotMessage(data) => {
+            DdInbound::Bot(data) => {
                 if !bot_message_belongs(&data, user_id) {
                     continue;
                 }
                 if let Some(answer) = message_to_answer(client, &data, ctx.options).await {
+                    events.clear_active(None, user_id);
                     return Some(answer);
                 }
             }
-            // 文本兜底路径不期望卡片回调；空回包确认跳过。
-            StreamEvent::CardCallback { message_id, .. } => {
-                stream.respond(&message_id, json!({})).await;
-            }
+            // 文本兜底路径不期望卡片回调；忽略。
+            DdInbound::Card(_) => {}
         }
     }
+    events.clear_active(None, user_id);
     None
 }
 

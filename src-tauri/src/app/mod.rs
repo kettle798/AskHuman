@@ -132,7 +132,7 @@ pub fn run_ask(request: AskRequest, config: AppConfig) -> ! {
 }
 
 /// Telegram 是否已配置且可用（构造 client 成功即视为可用）。
-fn is_telegram_active(config: &AppConfig) -> bool {
+pub(crate) fn is_telegram_active(config: &AppConfig) -> bool {
     let tg = &config.channels.telegram;
     tg.enabled
         && TelegramClient::new(tg.bot_token.clone(), tg.chat_id.clone(), tg.api_base_url.clone())
@@ -140,13 +140,13 @@ fn is_telegram_active(config: &AppConfig) -> bool {
 }
 
 /// 钉钉是否已配置且可用（构造 client 成功——即三项非空——即视为可用）。
-fn is_dingding_active(config: &AppConfig) -> bool {
+pub(crate) fn is_dingding_active(config: &AppConfig) -> bool {
     let dd = &config.channels.dingding;
     dd.enabled && DingTalkClient::new(dd).is_ok()
 }
 
 /// 飞书是否已配置且可用（构造 client 成功且 open_id 非空——即四项齐备——即视为可用）。
-fn is_feishu_active(config: &AppConfig) -> bool {
+pub(crate) fn is_feishu_active(config: &AppConfig) -> bool {
     let fs = &config.channels.feishu;
     fs.enabled
         && !fs.open_id.trim().is_empty()
@@ -256,12 +256,27 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
 
         if is_dingding_active(&config) {
             use crate::channels::dingding::DingTalkSession;
+            use crate::dingtalk::router::DdRouter;
             let cfg = config.channels.dingding.clone();
             let req = request.clone();
             let sink = coordinator.clone();
             let preempt = preempt.clone();
             handles.push(tokio::spawn(async move {
-                let mut session = DingTalkSession::new(cfg);
+                // 单进程：每进程起一个仅挂本会话的 Router（统一走 Router 路径）。
+                let router =
+                    match DdRouter::connect(cfg.client_id.trim(), cfg.client_secret.trim()).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            stderr_redirect::eprintln_real(&format!(
+                                "{}{}",
+                                i18n::warn_prefix(lang),
+                                i18n::tr(lang, "app.dingtalkInvalid").replace("{e}", &e)
+                            ));
+                            return;
+                        }
+                    };
+                let events = router.register();
+                let mut session = DingTalkSession::new(cfg, events);
                 if let Err(e) = session.open().await {
                     stderr_redirect::eprintln_real(&format!(
                         "{}{}",

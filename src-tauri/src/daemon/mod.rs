@@ -26,7 +26,11 @@ pub fn dispatch(args: &[String]) -> ! {
 mod unix_impl {
     use super::lifecycle::{self, DaemonMeta, LockGuard};
     use super::request::{self, RequestEntry, RequestRegistry};
+    use crate::channels::dingding::DingTalkChannel;
+    use crate::channels::Channel;
     use crate::client;
+    use crate::config::AppConfig;
+    use crate::dingtalk::router::DdRouter;
     use crate::i18n::Lang;
     use crate::ipc::{
         self, transport, ClientMsg, HelloAck, HelloStatus, ServerMsg, StatusInfo, TaskRequest,
@@ -110,14 +114,9 @@ mod unix_impl {
                 return 1;
             }
         };
-        let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
-            Ok(rt) => rt,
-            Err(e) => {
-                log(&format!("failed to build runtime: {}", e));
-                return 1;
-            }
-        };
-        rt.block_on(serve(lock))
+        // 复用 tauri 的全局（多线程）tokio 运行时，使各 Channel 的 `tauri::async_runtime::spawn`
+        // 与 Daemon 自身的任务跑在同一运行时上（不初始化任何 GUI / AppKit）。
+        tauri::async_runtime::block_on(serve(lock))
     }
 
     struct ServerState {
@@ -130,6 +129,8 @@ mod unix_impl {
         shutdown: tokio::sync::Notify,
         /// 活动请求登记表。
         registry: Arc<RequestRegistry>,
+        /// 钉钉长连接 Router（惰性建连、常热复用；连接死亡后按需重连）。
+        dd_router: tokio::sync::Mutex<Option<Arc<DdRouter>>>,
     }
 
     async fn serve(_lock: LockGuard) -> i32 {
@@ -165,6 +166,7 @@ mod unix_impl {
             last_active: Mutex::new(Instant::now()),
             shutdown: tokio::sync::Notify::new(),
             registry: RequestRegistry::new(),
+            dd_router: tokio::sync::Mutex::new(None),
         });
 
         // 空闲退出检查。
@@ -318,13 +320,24 @@ mod unix_impl {
             return;
         }
 
+        // 挂接可用的 IM 渠道（钉钉/…）到本请求的协调器，与弹窗并行抢答。
+        let im_attached = attach_im_channels(&entry, state, &mut w, lang).await;
+
         // spawn GUI Helper（独立短命进程，带一次性 token）。
-        if let Err(e) = spawn_gui_helper(&entry.token) {
-            log(&format!("failed to spawn GUI helper: {}", e));
-            let _ = ipc::write_msg(&mut w, &ServerMsg::Warn {
-                text: format!("{}failed to spawn popup: {}", crate::i18n::err_prefix(lang), e),
-            })
-            .await;
+        let popup_ok = match spawn_gui_helper(&entry.token) {
+            Ok(()) => true,
+            Err(e) => {
+                log(&format!("failed to spawn GUI helper: {}", e));
+                let _ = ipc::write_msg(&mut w, &ServerMsg::Warn {
+                    text: format!("{}failed to spawn popup: {}", crate::i18n::err_prefix(lang), e),
+                })
+                .await;
+                false
+            }
+        };
+
+        // 既无弹窗也无 IM 渠道 → 无可用渠道，按错误收尾。
+        if !popup_ok && !im_attached {
             let _ = ipc::write_msg(&mut w, &ServerMsg::Final {
                 stdout: String::new(),
                 exit_code: request::EXIT_NO_CHANNEL,
@@ -334,8 +347,10 @@ mod unix_impl {
             return;
         }
 
-        // 看门狗：GUI Helper 在限定时间内未连上 → 判定弹窗拉起失败。
-        spawn_gui_watchdog(entry.clone(), lang);
+        // 看门狗：弹窗已拉起但限定时间内未连上 → 判失败；但若已挂了 IM 渠道则不致命（让 IM 继续等答）。
+        if popup_ok {
+            spawn_gui_watchdog(entry.clone(), lang, im_attached);
+        }
 
         // 等待结果或 CLI 断开。
         let outcome = tokio::select! {
@@ -451,13 +466,80 @@ mod unix_impl {
     }
 
     /// 看门狗：限定时间内 GUI 未连上 → 经渲染通道送「弹窗拉起失败」结果（退出码 3）。
-    fn spawn_gui_watchdog(entry: Arc<RequestEntry>, lang: Lang) {
+    /// `im_attached` 为真时弹窗未连上不判失败——IM 渠道仍可作答。
+    fn spawn_gui_watchdog(entry: Arc<RequestEntry>, lang: Lang, im_attached: bool) {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(request::GUI_CONNECT_TIMEOUT_SECS)).await;
-            if !entry.gui_connected.load(Ordering::SeqCst) {
+            if !entry.gui_connected.load(Ordering::SeqCst) && !im_attached {
                 let _ = entry.final_tx.send(request::popup_failed_outcome(lang));
             }
         });
+    }
+
+    /// 取得（必要时惰性建连）钉钉 Router；连接已死则重连。失败返回 None。
+    async fn ensure_dd_router(
+        state: &Arc<ServerState>,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Option<Arc<DdRouter>> {
+        let mut guard = state.dd_router.lock().await;
+        if let Some(r) = guard.as_ref() {
+            if r.is_alive() {
+                return Some(r.clone());
+            }
+        }
+        match DdRouter::connect(client_id, client_secret).await {
+            Ok(r) => {
+                log("dingtalk router connected");
+                *guard = Some(r.clone());
+                Some(r)
+            }
+            Err(e) => {
+                log(&format!("dingtalk router connect failed: {}", e));
+                *guard = None;
+                None
+            }
+        }
+    }
+
+    /// 按当前配置把可用 IM 渠道挂到请求协调器上（与弹窗并行抢答）。返回是否至少挂上一个。
+    /// 失败的渠道经 `Warn` 流给 CLI stderr，并记 daemon.log。
+    async fn attach_im_channels(
+        entry: &Arc<RequestEntry>,
+        state: &Arc<ServerState>,
+        w: &mut OwnedWriteHalf,
+        lang: Lang,
+    ) -> bool {
+        let config = AppConfig::load();
+        let request = entry.show.request.clone();
+        let sink = entry.coordinator.clone();
+        let mut attached = false;
+
+        if crate::app::is_dingding_active(&config) {
+            let dd = &config.channels.dingding;
+            match ensure_dd_router(state, dd.client_id.trim(), dd.client_secret.trim()).await {
+                Some(router) => {
+                    let ch: Arc<dyn Channel> =
+                        Arc::new(DingTalkChannel::shared(dd.clone(), router));
+                    entry.coordinator.register(ch.clone());
+                    ch.start(&request, sink.clone());
+                    attached = true;
+                }
+                None => {
+                    let _ = ipc::write_msg(w, &ServerMsg::Warn {
+                        text: format!(
+                            "{}{}",
+                            crate::i18n::warn_prefix(lang),
+                            crate::i18n::tr(lang, "channel.ddConfigInvalidSkip")
+                                .replace("{e}", "Stream connection failed"),
+                        ),
+                    })
+                    .await;
+                }
+            }
+        }
+
+        attached
     }
 
     /// spawn 一个 GUI Helper 进程（`AskHuman --popup --endpoint <sock> --token <tok>`）。

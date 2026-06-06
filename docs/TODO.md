@@ -6,9 +6,19 @@
 
 ### 1. 同一 client-id 同一时刻仅允许一条 Stream（多开相互干扰）
 
+> ⚠️ **由 daemon 架构修复中**：本问题正由 `docs/specs/daemon-architecture.md`（Phase 2：IM 渠道迁入 Daemon + 长连接单实例复用）根治。**待 daemon 架构需求全部开发完成后，删除本条目。**
+
 - **根因**：钉钉官方限制——同一个 client-id 同一时间只允许启动一条 Stream 服务，多开会相互干扰（见官方排查清单）。
 - **现状**：当前每次 `AskHuman` 进程各自开一条 Stream（同一 client-id）。正常「一次只问一题」无碍，但**连续快速 / 并发提问时**多条 Stream 会抢消息，可能把用户回复投递到错误的连接。
 - **候选修复**：
   1. 文件锁串行化——同一时刻只允许一个进程持有 Stream，退出时发 Close 帧干净断连再释放锁（轻量、无常驻进程；每次提问需重新建连，并发会排队）。
-  2. 常驻 daemon——后台进程独占持有 Stream，各 `AskHuman` 经本地 socket 注册等待、由其转发用户消息（真复用 / 连接常热 / 支持并发，但需管理 daemon 生命周期 + IPC，复杂度高）。
-- **状态**：暂不修，已记录（另见 `docs/specs/dingtalk-channel.md` 末尾反馈意见）。
+  2. 常驻 daemon——后台进程独占持有 Stream，各 `AskHuman` 经本地 socket 注册等待、由其转发用户消息（真复用 / 连接常热 / 支持并发，但需管理 daemon 生命周期 + IPC，复杂度高）。← **采用此方案（daemon 架构）。**
+- **状态**：修复中（daemon 架构 Phase 2）；完成后删除本条目。
+
+## 后续增强 / 性能优化
+
+### A. 钉钉卡片「变灰」延迟（daemon 架构引入）
+
+- **背景**：daemon 架构下钉钉长连接由 Router 独占共享，卡片回调由 Router 即时空 ACK（满足 3 秒约束），卡片置灰（「已提交」/「已在 X 回答」）改走 OpenAPI `updateCard`（见 `docs/specs/daemon-architecture.md` §11）。
+- **影响**：相比单进程时代「stream 同步回包即时变灰」，现在变灰是一次独立 HTTPS 调用，慢约 100–300ms（仅视觉延迟，功能一致）。
+- **可选优化**：如需即时变灰，可让会话经 oneshot 把回包回传给 Router 的 Reader，由其在 3 秒内用长连接写回（代价：Reader↔会话耦合、Reader 读循环需短暂等待会话算回包）。当前判断收益有限，暂不做。
