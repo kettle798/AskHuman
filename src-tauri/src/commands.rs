@@ -27,7 +27,8 @@ pub fn popup_init(state: State<AppState>) -> PopupInit {
         request: state.request.clone(),
         theme: theme_str(state.config.general.theme),
         always_on_top: state.config.general.always_on_top,
-        source_name: crate::models::source_name(),
+        // GUI Helper 模式下来源名由 Daemon 上送（A11）；单进程 / 设置回退取本进程环境。
+        source_name: state.source.clone(),
     }
 }
 
@@ -41,6 +42,12 @@ pub struct PopupSubmission {
 
 #[tauri::command]
 pub fn submit_popup(app: AppHandle, submission: PopupSubmission) {
+    // GUI Helper 模式：经 IPC 回传 Daemon。
+    if let Some(bridge) = app.try_state::<crate::app::GuiBridge>() {
+        bridge.send_answer(submission.answers);
+        return;
+    }
+    // 单进程（非 unix 回退）模式：投递本地协调器。
     let result = ChannelResult {
         action: ChannelAction::Send,
         answers: submission.answers,
@@ -53,6 +60,10 @@ pub fn submit_popup(app: AppHandle, submission: PopupSubmission) {
 
 #[tauri::command]
 pub fn cancel_popup(app: AppHandle) {
+    if let Some(bridge) = app.try_state::<crate::app::GuiBridge>() {
+        bridge.send_cancel();
+        return;
+    }
     if let Some(c) = app.try_state::<Arc<Coordinator>>() {
         c.submit(ChannelResult::cancel("popup"));
     }

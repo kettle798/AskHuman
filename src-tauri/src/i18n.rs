@@ -33,6 +33,14 @@ impl Lang {
     pub fn current() -> Lang {
         Lang::resolve(&AppConfig::load().general.language)
     }
+
+    /// 解析后的语言码（"en" / "zh"）。供 CLI 上送 Daemon（A11：使 `auto` 跟随调用方）。
+    pub fn code(self) -> &'static str {
+        match self {
+            Lang::En => "en",
+            Lang::Zh => "zh",
+        }
+    }
 }
 
 /// 二选一：按当前语言取英文或中文文案。

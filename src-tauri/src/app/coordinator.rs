@@ -3,6 +3,7 @@
 //! 收到首个结果后不立即退出，而是给落败渠道一个**收尾窗口**（最多 ~2s，事件驱动、提前结束）
 //! 把卡片改成终态（钉钉灰显「已提交」、Telegram 编辑卡片为「已回答」等），随后输出结果并退出。
 
+use super::RenderOutcome;
 use crate::channels::{Channel, Preemption};
 use crate::i18n::{self, Lang};
 use crate::models::{AskRequest, ChannelResult};
@@ -11,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
+use tokio::sync::mpsc::UnboundedSender;
 
 /// 收尾窗口上限：超过即强制退出，保证进程不会因某端收尾卡住而挂起。
 /// 事件驱动为主（落败端收尾完成即提前退出），此上限仅为兜底；取值偏宽以容忍
@@ -24,10 +26,14 @@ pub enum Exiter {
     Gui(AppHandle),
     /// headless 模式：直接退出进程。
     Process,
+    /// Daemon 模式：不退出进程，把渲染好的结果经通道回传连接处理器（由它写 IPC `final`）。
+    Ipc(UnboundedSender<RenderOutcome>),
 }
 
 pub struct Coordinator {
     inner: Mutex<Inner>,
+    /// 结果渲染 / 收尾文案使用的界面语言（Daemon 模式为调用方上送的 lang；单进程为 `Lang::current()`）。
+    lang: Lang,
     /// 仍在收尾的落败「消息渠道」数（弹窗瞬时关闭，不计入）。
     pending: Arc<AtomicUsize>,
     /// 已采纳的终态结果（首个 submit 写入）。
@@ -51,7 +57,7 @@ struct Inner {
 impl Coordinator {
     /// GUI 模式协调器。
     pub fn new(app: AppHandle, request: AskRequest) -> Arc<Self> {
-        Self::build(Exiter::Gui(app), request, None)
+        Self::build(Exiter::Gui(app), request, None, Lang::current())
     }
 
     /// headless 模式协调器（无 GUI，结果到达后直接退出进程）。
@@ -61,13 +67,25 @@ impl Coordinator {
         preempt: Arc<Preemption>,
         messaging_count: usize,
     ) -> Arc<Self> {
-        Self::build(Exiter::Process, request, Some((preempt, messaging_count)))
+        Self::build(
+            Exiter::Process,
+            request,
+            Some((preempt, messaging_count)),
+            Lang::current(),
+        )
+    }
+
+    /// Daemon 模式协调器：结果到达后渲染并经 `tx` 回传，不退出进程。
+    /// `lang` 为调用方上送的界面语言（A11，使 `auto` 跟随调用方）。
+    pub fn new_ipc(request: AskRequest, lang: Lang, tx: UnboundedSender<RenderOutcome>) -> Arc<Self> {
+        Self::build(Exiter::Ipc(tx), request, None, lang)
     }
 
     fn build(
         exiter: Exiter,
         request: AskRequest,
         headless: Option<(Arc<Preemption>, usize)>,
+        lang: Lang,
     ) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(Inner {
@@ -77,6 +95,7 @@ impl Coordinator {
                 channels: Vec::new(),
                 headless,
             }),
+            lang,
             pending: Arc::new(AtomicUsize::new(0)),
             result: Mutex::new(None),
             finalizing: AtomicBool::new(false),
@@ -106,7 +125,7 @@ impl Coordinator {
             let source = result.source_channel_id.clone();
             *self.result.lock().unwrap() = Some(result);
 
-            let lang = Lang::current();
+            let lang = self.lang;
             let winner = display_name(&source, lang);
 
             let pending = match &inner.headless {
@@ -134,7 +153,8 @@ impl Coordinator {
 
         self.pending.store(pending_count, Ordering::SeqCst);
 
-        // GUI：立即关闭弹窗（赢家是弹窗时它不在 losers 中，需显式关）。
+        // GUI（单进程）：立即关闭弹窗（赢家是弹窗时它不在 losers 中，需显式关）。
+        // Daemon 模式弹窗在独立 GUI Helper 进程，关窗由其自身收到 cancel / 连接断开处理，此处不涉及。
         if let Exiter::Gui(app) = &exiter {
             if let Some(w) = app.get_webview_window("popup") {
                 let _ = w.close();
@@ -155,7 +175,7 @@ impl Coordinator {
             Exiter::Gui(_) => {
                 tauri::async_runtime::spawn(waiter);
             }
-            Exiter::Process => {
+            Exiter::Process | Exiter::Ipc(_) => {
                 tokio::spawn(waiter);
             }
         }
@@ -188,11 +208,18 @@ impl Coordinator {
             // 无结果（headless 全部会话结束仍未作答）：不退出，交由调用方报错。
             return;
         };
+        // Daemon 模式：渲染后回传连接处理器，不打印、不退出（进程常驻）。
+        if let Exiter::Ipc(tx) = &exiter {
+            let outcome = super::render_result(&request_id, &result, self.lang);
+            let _ = tx.send(outcome);
+            return;
+        }
         let code = super::emit_result(&request_id, &result);
         let _ = std::io::stdout().flush();
         match exiter {
             Exiter::Gui(app) => app.exit(code),
             Exiter::Process => std::process::exit(code),
+            Exiter::Ipc(_) => unreachable!("handled above"),
         }
     }
 }

@@ -105,3 +105,68 @@ pub async fn wait_until_down(max: Duration) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+/// 瘦客户端 ask 入口：确保 Daemon 在运行 → 握手 → 提交任务 → 流式取回结果 → 按退出码退出（不返回）。
+pub fn run_ask(task: crate::ipc::TaskRequest) -> ! {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(_) => std::process::exit(3),
+    };
+    std::process::exit(rt.block_on(run_ask_async(task)));
+}
+
+async fn run_ask_async(task: crate::ipc::TaskRequest) -> i32 {
+    use crate::ipc::ServerMsg;
+
+    // 提交前最多重试若干次：覆盖「自启就绪竞争」与「撞上 Daemon 换新」。提交成功后不再重试（避免重复弹窗）。
+    for _ in 0..3 {
+        if ensure_running().await.is_err() {
+            eprintln!("askhuman: failed to start daemon");
+            return 3;
+        }
+        let Ok((mut reader, mut writer)) = connect_split().await else {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
+        };
+        if ipc::write_msg(&mut writer, &ClientMsg::Hello(hello())).await.is_err() {
+            continue;
+        }
+        match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
+            Ok(Some(ServerMsg::HelloAck(ack))) => match ack.status {
+                HelloStatus::Ok => {}
+                HelloStatus::Restarting => {
+                    wait_until_down(Duration::from_secs(5)).await;
+                    continue;
+                }
+            },
+            _ => continue,
+        }
+        // 提交任务。
+        if ipc::write_msg(&mut writer, &ClientMsg::Submit(task.clone())).await.is_err() {
+            continue;
+        }
+        // 流式取回：Warn → stderr；Final → stdout + 退出码；中途断连 → 退出码 3（P4）。
+        loop {
+            match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
+                Ok(Some(ServerMsg::Accepted { .. })) => {}
+                Ok(Some(ServerMsg::Warn { text })) => eprintln!("{}", text),
+                Ok(Some(ServerMsg::Final { stdout, exit_code })) => {
+                    if !stdout.is_empty() {
+                        println!("{}", stdout);
+                    }
+                    return exit_code;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => {
+                    eprintln!("askhuman: daemon connection lost");
+                    return 3;
+                }
+            }
+        }
+    }
+    eprintln!("askhuman: could not reach daemon");
+    3
+}

@@ -11,6 +11,7 @@ pub mod transport;
 pub use codec::{read_msg, write_msg};
 
 use crate::daemon::lifecycle::Fingerprint;
+use crate::models::{AskRequest, ChannelAction, MessagePrompt, Question, QuestionAnswer};
 use serde::{Deserialize, Serialize};
 
 /// IPC 协议版本：不兼容变更时 +1，握手不一致即触发换新。
@@ -60,16 +61,60 @@ pub struct StatusInfo {
     pub active_requests: usize,
 }
 
-/// 客户端 → Daemon 的消息。
+/// CLI 提交的一次提问任务（A11：`-f` 已在 CLI 解析为绝对路径；硬性上送 source name 与解析好的 lang；
+/// `request_id` 由 Daemon 分配，故此处不含 id）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRequest {
+    /// 共享 Message：描述文本与展示附件（绝对路径）。
+    pub message: MessagePrompt,
+    /// 问题列表（CLI 已归一化，恒 ≥1）。
+    pub questions: Vec<Question>,
+    /// 是否按 Markdown 渲染（全局）。
+    pub is_markdown: bool,
+    /// 调用方来源名（来自 `ASKHUMAN_ENV_SOURCE_NAME`，CLI 读取后上送）。
+    pub source: String,
+    /// CLI 解析好的界面语言（"en" / "zh"），使 `auto` 跟随调用方而非 Daemon。
+    pub lang: String,
+}
+
+/// Daemon → GUI Helper 的题目下发（show 是 submit 的子集 + Daemon 分配的 request_id + 上下文）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShowPayload {
+    pub request_id: String,
+    /// 完整请求（含 Daemon 分配的 id），供弹窗渲染。
+    pub request: AskRequest,
+    /// 调用方来源名（弹窗标题「Question from {source}」）。
+    pub source: String,
+    /// 界面语言（"en" / "zh"）。
+    pub lang: String,
+}
+
+/// 客户端（CLI / GUI Helper）→ Daemon 的消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ClientMsg {
+    /// CLI / 控制连接握手。
     Hello(ClientHello),
+    /// `daemon status`。
     Status,
+    /// `daemon stop`。
     Stop,
+    /// CLI 提交一次提问任务（握手后发送）。
+    Submit(TaskRequest),
+    /// GUI Helper 握手：出示 Daemon 下发的一次性 token。
+    GuiHello { token: String },
+    /// GUI Helper 回传用户作答（`action` 区分发送/取消）。
+    Answer {
+        request_id: String,
+        action: ChannelAction,
+        #[serde(default)]
+        answers: Vec<QuestionAnswer>,
+    },
 }
 
-/// Daemon → 客户端的消息。
+/// Daemon → 客户端（CLI / GUI Helper）的消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ServerMsg {
@@ -77,4 +122,14 @@ pub enum ServerMsg {
     Status(StatusInfo),
     Stopping,
     Error { message: String },
+    /// 任务已受理，回带 Daemon 分配的 request_id（D→CLI）。
+    Accepted { request_id: String },
+    /// 流式警告 / 诊断 → CLI 的 stderr（D→CLI）。
+    Warn { text: String },
+    /// 终态：渲染好的结果文本 + 退出码（D→CLI）。CLI 原样打印 stdout 后按码退出。
+    Final { stdout: String, exit_code: i32 },
+    /// 下发题目（D→GUI）。
+    Show(ShowPayload),
+    /// 被其它渠道抢答，通知 GUI 收尾关窗（D→GUI）。
+    Cancel { request_id: String, winner: String },
 }

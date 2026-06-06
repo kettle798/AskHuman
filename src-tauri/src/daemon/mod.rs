@@ -4,6 +4,7 @@
 //! 单实例（flock）、自启、空闲退出。渠道 / 弹窗 / 提交将在后续 Phase 接入。
 
 pub mod lifecycle;
+pub mod request;
 #[cfg(unix)]
 pub mod spawn;
 
@@ -24,13 +25,21 @@ pub fn dispatch(args: &[String]) -> ! {
 #[cfg(unix)]
 mod unix_impl {
     use super::lifecycle::{self, DaemonMeta, LockGuard};
+    use super::request::{self, RequestEntry, RequestRegistry};
     use crate::client;
-    use crate::ipc::{self, transport, ClientMsg, HelloAck, HelloStatus, ServerMsg, StatusInfo};
+    use crate::i18n::Lang;
+    use crate::ipc::{
+        self, transport, ClientMsg, HelloAck, HelloStatus, ServerMsg, StatusInfo, TaskRequest,
+    };
+    use crate::models::{ChannelResult, ChannelAction};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tokio::io::BufReader;
+    use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
     use tokio::net::UnixStream;
+
+    type Reader = BufReader<OwnedReadHalf>;
 
     /// 无活动且无连接持续此时长后自动退出。可用 `ASKHUMAN_DAEMON_IDLE_SECS` 覆盖（便于测试）。
     const DEFAULT_IDLE_SECS: u64 = 300;
@@ -114,9 +123,13 @@ mod unix_impl {
     struct ServerState {
         startup_fp: lifecycle::Fingerprint,
         started_at: u64,
+        /// 当前打开的连接数（CLI 提交连接 / GUI 连接 / 控制连接）。用于空闲退出判定：
+        /// 提交连接在请求存续期间保持打开，故人在环里的长等待算「活动」，不会被空闲计时杀掉。
         active: AtomicUsize,
         last_active: Mutex<Instant>,
         shutdown: tokio::sync::Notify,
+        /// 活动请求登记表。
+        registry: Arc<RequestRegistry>,
     }
 
     async fn serve(_lock: LockGuard) -> i32 {
@@ -151,6 +164,7 @@ mod unix_impl {
             active: AtomicUsize::new(0),
             last_active: Mutex::new(Instant::now()),
             shutdown: tokio::sync::Notify::new(),
+            registry: RequestRegistry::new(),
         });
 
         // 空闲退出检查。
@@ -190,20 +204,42 @@ mod unix_impl {
         0
     }
 
+    /// 控制阶段的产物：收到接管型消息（提交 / GUI 握手）或连接关闭。
+    enum Control {
+        Submit(TaskRequest),
+        Gui(String),
+        Closed,
+    }
+
     async fn handle_conn(stream: UnixStream, state: Arc<ServerState>) {
         state.active.fetch_add(1, Ordering::SeqCst);
-        let (r, mut w) = stream.into_split();
+        let (r, w) = stream.into_split();
         let mut reader = BufReader::new(r);
+        let mut w = w;
 
+        match control_loop(&mut reader, &mut w, &state).await {
+            Control::Submit(task) => handle_submit(task, reader, w, &state).await,
+            Control::Gui(token) => handle_gui(token, reader, w, &state).await,
+            Control::Closed => {}
+        }
+
+        if let Ok(mut t) = state.last_active.lock() {
+            *t = Instant::now();
+        }
+        state.active.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// 控制阶段：处理 Hello / Status / Stop（即时应答）；遇到 Submit / GuiHello 返回以便接管连接。
+    async fn control_loop(reader: &mut Reader, w: &mut OwnedWriteHalf, state: &Arc<ServerState>) -> Control {
         loop {
-            let msg: Option<ClientMsg> = match ipc::read_msg(&mut reader).await {
+            let msg: Option<ClientMsg> = match ipc::read_msg(reader).await {
                 Ok(m) => m,
                 Err(e) => {
                     log(&format!("read error: {}", e));
-                    break;
+                    return Control::Closed;
                 }
             };
-            let Some(msg) = msg else { break }; // EOF / 对端关闭
+            let Some(msg) = msg else { return Control::Closed }; // EOF / 对端关闭
 
             match msg {
                 ClientMsg::Hello(hello) => {
@@ -230,11 +266,11 @@ mod unix_impl {
                             None
                         },
                     };
-                    let _ = ipc::write_msg(&mut w, &ServerMsg::HelloAck(ack)).await;
+                    let _ = ipc::write_msg(w, &ServerMsg::HelloAck(ack)).await;
                     if restarting {
                         log("stale binary/protocol detected; shutting down for restart");
                         state.shutdown.notify_one();
-                        break;
+                        return Control::Closed;
                     }
                 }
                 ClientMsg::Status => {
@@ -244,23 +280,201 @@ mod unix_impl {
                         protocol_version: ipc::PROTOCOL_VERSION,
                         uptime_secs: now_secs().saturating_sub(state.started_at),
                         socket: transport::socket_path().display().to_string(),
-                        active_requests: 0, // Phase 0：尚无请求
+                        active_requests: state.registry.active_count(),
                     };
-                    let _ = ipc::write_msg(&mut w, &ServerMsg::Status(info)).await;
+                    let _ = ipc::write_msg(w, &ServerMsg::Status(info)).await;
                 }
                 ClientMsg::Stop => {
-                    let _ = ipc::write_msg(&mut w, &ServerMsg::Stopping).await;
+                    let _ = ipc::write_msg(w, &ServerMsg::Stopping).await;
                     log("stop requested");
                     state.shutdown.notify_one();
+                    return Control::Closed;
+                }
+                ClientMsg::Submit(task) => return Control::Submit(task),
+                ClientMsg::GuiHello { token } => return Control::Gui(token),
+                // Answer 只应在 GUI 接管阶段出现；控制阶段收到即忽略。
+                ClientMsg::Answer { .. } => {}
+            }
+        }
+    }
+
+    /// CLI 提交一次任务：建请求、spawn GUI Helper、流式回结果；CLI 断开则取消。
+    async fn handle_submit(
+        task: TaskRequest,
+        mut reader: Reader,
+        mut w: OwnedWriteHalf,
+        state: &Arc<ServerState>,
+    ) {
+        let lang = Lang::resolve(&task.lang);
+        let (entry, mut final_rx) = state.registry.create(task);
+        let request_id = entry.request_id.clone();
+        log(&format!("request {} accepted", request_id));
+
+        if ipc::write_msg(&mut w, &ServerMsg::Accepted { request_id: request_id.clone() })
+            .await
+            .is_err()
+        {
+            state.registry.remove(&request_id);
+            return;
+        }
+
+        // spawn GUI Helper（独立短命进程，带一次性 token）。
+        if let Err(e) = spawn_gui_helper(&entry.token) {
+            log(&format!("failed to spawn GUI helper: {}", e));
+            let _ = ipc::write_msg(&mut w, &ServerMsg::Warn {
+                text: format!("{}failed to spawn popup: {}", crate::i18n::err_prefix(lang), e),
+            })
+            .await;
+            let _ = ipc::write_msg(&mut w, &ServerMsg::Final {
+                stdout: String::new(),
+                exit_code: request::EXIT_NO_CHANNEL,
+            })
+            .await;
+            state.registry.remove(&request_id);
+            return;
+        }
+
+        // 看门狗：GUI Helper 在限定时间内未连上 → 判定弹窗拉起失败。
+        spawn_gui_watchdog(entry.clone(), lang);
+
+        // 等待结果或 CLI 断开。
+        let outcome = tokio::select! {
+            o = final_rx.recv() => o,
+            _ = wait_cli_eof(&mut reader) => {
+                log(&format!("request {} cli disconnected; cancelling", request_id));
+                entry.cancel.notify_waiters();
+                state.registry.remove(&request_id);
+                return;
+            }
+        };
+
+        match outcome {
+            Some(o) => {
+                if let Some(err) = &o.stderr {
+                    let _ = ipc::write_msg(&mut w, &ServerMsg::Warn { text: err.clone() }).await;
+                }
+                let _ = ipc::write_msg(&mut w, &ServerMsg::Final {
+                    stdout: o.stdout,
+                    exit_code: o.exit_code,
+                })
+                .await;
+            }
+            None => {
+                // 渲染通道意外关闭：判异常退出码 3。
+                let _ = ipc::write_msg(&mut w, &ServerMsg::Final {
+                    stdout: String::new(),
+                    exit_code: 3,
+                })
+                .await;
+            }
+        }
+        entry.cancel.notify_waiters();
+        state.registry.remove(&request_id);
+        log(&format!("request {} done", request_id));
+    }
+
+    /// GUI Helper 连接：凭 token 关联请求、下发 show、收 answer 投递协调器。
+    async fn handle_gui(
+        token: String,
+        mut reader: Reader,
+        w: OwnedWriteHalf,
+        state: &Arc<ServerState>,
+    ) {
+        let Some(entry) = state.registry.attach_gui(&token) else {
+            log("gui hello with unknown token; closing");
+            return;
+        };
+        entry.gui_connected.store(true, Ordering::SeqCst);
+
+        // GUI 发送端：专用写任务串行写出 ServerMsg，供 show 下发与 adapter cancel 共用。
+        let (gui_tx, mut gui_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMsg>();
+        let mut w = w;
+        let writer = tokio::spawn(async move {
+            while let Some(msg) = gui_rx.recv().await {
+                if ipc::write_msg(&mut w, &msg).await.is_err() {
                     break;
                 }
             }
+        });
+        if let Ok(mut slot) = entry.gui.lock() {
+            *slot = Some(gui_tx.clone());
         }
 
-        if let Ok(mut t) = state.last_active.lock() {
-            *t = Instant::now();
+        // 下发题目。
+        let _ = gui_tx.send(request::show_msg(&entry));
+
+        // 读 GUI 答复 / 收到取消通知。
+        loop {
+            tokio::select! {
+                msg = ipc::read_msg::<_, ClientMsg>(&mut reader) => {
+                    match msg {
+                        Ok(Some(ClientMsg::Answer { action, answers, .. })) => {
+                            let result = match action {
+                                ChannelAction::Send => ChannelResult {
+                                    action: ChannelAction::Send,
+                                    answers,
+                                    source_channel_id: "popup".to_string(),
+                                },
+                                ChannelAction::Cancel => ChannelResult::cancel("popup"),
+                            };
+                            entry.coordinator.submit(result);
+                            break;
+                        }
+                        Ok(Some(_)) => {}
+                        Ok(None) | Err(_) => {
+                            // Helper 断开且未作答：视为取消（已完成则为 no-op）。
+                            entry.coordinator.submit(ChannelResult::cancel("popup"));
+                            break;
+                        }
+                    }
+                }
+                _ = entry.cancel.notified() => break,
+            }
         }
-        state.active.fetch_sub(1, Ordering::SeqCst);
+
+        // 收尾：清空发送端槽位并丢弃发送端 → 写任务结束 → GUI 连接关闭 → Helper 收到 EOF 退出。
+        if let Ok(mut slot) = entry.gui.lock() {
+            *slot = None;
+        }
+        drop(gui_tx);
+        let _ = writer.await;
+    }
+
+    /// 等待 CLI 提交连接断开（提交后 CLI 不再发消息；任何 EOF/错误即视为断开）。
+    async fn wait_cli_eof(reader: &mut Reader) {
+        loop {
+            match ipc::read_msg::<_, ClientMsg>(reader).await {
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => return,
+            }
+        }
+    }
+
+    /// 看门狗：限定时间内 GUI 未连上 → 经渲染通道送「弹窗拉起失败」结果（退出码 3）。
+    fn spawn_gui_watchdog(entry: Arc<RequestEntry>, lang: Lang) {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(request::GUI_CONNECT_TIMEOUT_SECS)).await;
+            if !entry.gui_connected.load(Ordering::SeqCst) {
+                let _ = entry.final_tx.send(request::popup_failed_outcome(lang));
+            }
+        });
+    }
+
+    /// spawn 一个 GUI Helper 进程（`AskHuman --popup --endpoint <sock> --token <tok>`）。
+    fn spawn_gui_helper(token: &str) -> std::io::Result<()> {
+        use std::process::{Command, Stdio};
+        let exe = std::env::current_exe()?;
+        Command::new(exe)
+            .arg("--popup")
+            .arg("--endpoint")
+            .arg(transport::socket_path())
+            .arg("--token")
+            .arg(token)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
     }
 
     fn cleanup() {

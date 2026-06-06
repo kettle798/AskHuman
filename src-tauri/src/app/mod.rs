@@ -12,9 +12,10 @@ use crate::config::{AppConfig, ThemeMode, WindowEffect};
 use crate::i18n::{self, Lang};
 use crate::dingtalk::client::DingTalkClient;
 use crate::feishu::client::FeishuClient;
-use crate::models::{AskRequest, ChannelAction, ChannelResult};
+use crate::models::{AskRequest, ChannelAction, ChannelResult, QuestionAnswer};
 use crate::telegram::TelegramClient;
 use coordinator::Coordinator;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 #[cfg(target_os = "macos")]
@@ -24,12 +25,69 @@ use tauri::window::{Effect, EffectState, EffectsBuilder};
 pub struct AppState {
     pub request: AskRequest,
     pub config: AppConfig,
+    /// 来源名（弹窗标题「Question from {source}」）。Daemon 模式由调用方上送（A11）；
+    /// 设置 / 非 Daemon 回退路径取本进程环境。
+    pub source: String,
 }
 
 #[derive(Clone, Copy)]
 enum View {
     Popup,
     Settings,
+}
+
+/// GUI Helper 模式下，弹窗 ↔ Daemon 的 IPC 接线（由 `run_gui_helper` 建好后传入 `launch`）。
+pub struct PopupIpc {
+    /// 向 Daemon 发送 `answer` 等消息（写任务已在 `run_gui_helper` 中起好）。
+    pub gui_tx: tokio::sync::mpsc::UnboundedSender<crate::ipc::ClientMsg>,
+    /// Daemon 分配的 request_id（回带在 `answer` 中）。
+    pub request_id: String,
+    /// 读取 Daemon → GUI 的消息流（cancel / 连接断开）。
+    pub reader: std::pin::Pin<Box<dyn tokio::io::AsyncBufRead + Send>>,
+}
+
+/// 弹窗作答 → Daemon 的桥：把前端 `submit_popup` / `cancel_popup` 转成 IPC `answer` 发回 Daemon。
+/// 仅 GUI Helper 模式存在；单进程（非 unix 回退）路径用 `Coordinator`。
+pub struct GuiBridge {
+    tx: tokio::sync::mpsc::UnboundedSender<crate::ipc::ClientMsg>,
+    request_id: String,
+    /// 仅投递一次（发送/取消互斥，去重）。
+    done: AtomicBool,
+    app: tauri::AppHandle,
+}
+
+impl GuiBridge {
+    fn terminal(&self, action: ChannelAction, answers: Vec<QuestionAnswer>) {
+        if self.done.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let _ = self.tx.send(crate::ipc::ClientMsg::Answer {
+            request_id: self.request_id.clone(),
+            action,
+            answers,
+        });
+        // 即时关窗，视觉上与单进程一致（进程随后由 Daemon 关闭连接 / 安全网驱动退出）。
+        if let Some(w) = self.app.get_webview_window("popup") {
+            let _ = w.close();
+        }
+        // 安全网：正常情况下 Daemon 收到答复后关闭连接 → reader EOF → 退出；
+        // 万一 Daemon 无响应，到时也主动退出，避免弹窗进程悬挂。
+        let app = self.app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            app.exit(0);
+        });
+    }
+
+    /// 提交作答。
+    pub fn send_answer(&self, answers: Vec<QuestionAnswer>) {
+        self.terminal(ChannelAction::Send, answers);
+    }
+
+    /// 取消（关窗 / Cmd+Q）。
+    pub fn send_cancel(&self) {
+        self.terminal(ChannelAction::Cancel, Vec::new());
+    }
 }
 
 /// 无任何可用通信 Channel 时的退出码（供下游据此降级）。
@@ -121,8 +179,9 @@ fn run_gui_ask(request: AskRequest, config: AppConfig, messaging_active: bool) -
     let state = AppState {
         request: request.clone(),
         config: config.clone(),
+        source: crate::models::source_name(),
     };
-    match launch(state, View::Popup) {
+    match launch(state, View::Popup, None) {
         Ok(()) => std::process::exit(0), // 成功路径已在 launch 内退出，此处不可达
         Err(e) => {
             if messaging_active {
@@ -258,8 +317,9 @@ pub fn run_settings(config: AppConfig) -> ! {
     let state = AppState {
         request: AskRequest::new(crate::models::MessagePrompt::default(), Vec::new(), false),
         config,
+        source: crate::models::source_name(),
     };
-    if let Err(e) = launch(state, View::Settings) {
+    if let Err(e) = launch(state, View::Settings, None) {
         stderr_redirect::eprintln_real(&format!(
             "{}{}",
             i18n::err_prefix(lang),
@@ -270,9 +330,75 @@ pub fn run_settings(config: AppConfig) -> ! {
     std::process::exit(0);
 }
 
+/// GUI Helper 模式入口（`AskHuman --popup --endpoint <sock> --token <tok>`，由 Daemon 拉起）。
+///
+/// 流程：连 Daemon → 出示一次性 token → 收 `show` → 本进程主线程跑 Tauri 弹窗；
+/// 用户作答 / 取消经 IPC `answer` 回 Daemon；收到 `cancel` 或连接断开即退出。
+#[cfg(unix)]
+pub fn run_gui_helper(_endpoint: String, token: String) -> ! {
+    use crate::ipc::{self, transport, ClientMsg, ServerMsg};
+    use tokio::io::BufReader;
+
+    // 连接 + 握手 + 读 show（在 Tauri 全局运行时上完成，确保后续读写任务同一 reactor）。
+    let connected = tauri::async_runtime::block_on(async move {
+        let stream = transport::connect().await?;
+        let (r, mut w) = stream.into_split();
+        let mut reader = BufReader::new(r);
+        ipc::write_msg(&mut w, &ClientMsg::GuiHello { token }).await?;
+        loop {
+            match ipc::read_msg::<_, ServerMsg>(&mut reader).await? {
+                Some(ServerMsg::Show(show)) => return Ok::<_, std::io::Error>((show, reader, w)),
+                Some(_) => continue,
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "daemon closed before show",
+                    ))
+                }
+            }
+        }
+    });
+
+    let (show, reader, writer) = match connected {
+        Ok(v) => v,
+        Err(e) => {
+            stderr_redirect::eprintln_real(&format!("askhuman popup helper: {}", e));
+            std::process::exit(3);
+        }
+    };
+
+    // 写任务：把 answer / 取消等消息串行写回 Daemon。
+    let (gui_tx, mut gui_rx) = tokio::sync::mpsc::unbounded_channel::<ClientMsg>();
+    tauri::async_runtime::spawn(async move {
+        let mut writer = writer;
+        while let Some(msg) = gui_rx.recv().await {
+            if ipc::write_msg(&mut writer, &msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let request_id = show.request_id.clone();
+    let state = AppState {
+        request: show.request,
+        config: AppConfig::load(),
+        source: show.source,
+    };
+    let popup_ipc = PopupIpc {
+        gui_tx,
+        request_id,
+        reader: Box::pin(reader),
+    };
+    if let Err(e) = launch(state, View::Popup, Some(popup_ipc)) {
+        stderr_redirect::eprintln_real(&format!("askhuman popup helper failed: {}", e));
+        std::process::exit(3);
+    }
+    std::process::exit(0);
+}
+
 /// 统一启动入口：`generate_context!` 每个二进制只能展开一次，故所有窗口共用此路径。
 /// 成功路径在内部进入事件循环并退出进程（不返回）；构建失败返回 `Err` 供调用方兜底。
-fn launch(state: AppState, view: View) -> tauri::Result<()> {
+fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Result<()> {
     let theme = window_theme(&state.config);
     let lang = Lang::resolve(&state.config.general.language);
     let window_bg = background_for(resolved_theme(&state.config));
@@ -283,11 +409,13 @@ fn launch(state: AppState, view: View) -> tauri::Result<()> {
     #[cfg(target_os = "macos")]
     let appear_behavior = state.config.general.appear_animation.ns_animation_behavior();
 
-    // 通道启用判定（仅提问模式使用）。
+    // GUI Helper 模式（Daemon 拉起的弹窗进程）：弹窗是唯一渠道，恒显示窗口；作答经 IPC 回 Daemon。
+    let is_helper = popup_ipc.is_some();
+    // 通道启用判定（仅单进程提问模式使用）。
     let messaging_active = has_active_messaging(&state.config);
-    // 弹窗禁用且无可用消息渠道时，兜底仍开弹窗，避免无任何 Channel 导致进程挂起。
-    let show_popup = state.config.channels.popup.enabled || !messaging_active;
-    // 提问模式下抑制「关窗即退出」：抢答收尾时弹窗会先关，需留进程给协调器输出结果并主动退出。
+    // Helper：恒开弹窗。单进程：弹窗禁用且无可用消息渠道时兜底仍开弹窗，避免进程挂起。
+    let show_popup = is_helper || state.config.channels.popup.enabled || !messaging_active;
+    // 提问模式下抑制「关窗即退出」：收尾 / 等待 Daemon 收尾时弹窗会先关，需留进程主动退出。
     // 设置模式不抑制，关窗即正常退出。
     let prevent_autoexit = matches!(view, View::Popup);
 
@@ -334,8 +462,13 @@ fn launch(state: AppState, view: View) -> tauri::Result<()> {
                 // 弹窗：关闭即取消 / 记忆尺寸。
                 "popup" => match event {
                     WindowEvent::CloseRequested { .. } => {
-                        if let Some(c) = window.app_handle().try_state::<Arc<Coordinator>>() {
+                        let app = window.app_handle();
+                        if let Some(c) = app.try_state::<Arc<Coordinator>>() {
+                            // 单进程路径：投递协调器。
                             c.submit(ChannelResult::cancel("popup"));
+                        } else if let Some(b) = app.try_state::<GuiBridge>() {
+                            // GUI Helper 路径：经 IPC 通知 Daemon 取消。
+                            b.send_cancel();
                         }
                     }
                     WindowEvent::Resized(_) => persist_popup_size(window),
@@ -358,11 +491,12 @@ fn launch(state: AppState, view: View) -> tauri::Result<()> {
             crate::macos_dock_icon::set_dock_icon();
             match view {
                 View::Popup => {
-                    let request = app.state::<AppState>().request.clone();
                     // Dock 跳动 + 角标提问数（仅 popup）。
                     #[cfg(target_os = "macos")]
-                    crate::macos_dock_icon::announce_questions(request.questions.len());
-                    let coordinator = Coordinator::new(app.handle().clone(), request.clone());
+                    {
+                        let count = app.state::<AppState>().request.questions.len();
+                        crate::macos_dock_icon::announce_questions(count);
+                    }
 
                     if show_popup {
                         let builder = WebviewWindowBuilder::new(
@@ -391,16 +525,65 @@ fn launch(state: AppState, view: View) -> tauri::Result<()> {
                             apply_liquid_glass(&win);
                         }
                         let _ = win.show();
-                        coordinator.register(Arc::new(PopupChannel::new(app.handle().clone())));
+                        // GUI Helper 由 Daemon 拉起，可能不自动获焦 → 尽力前置。
+                        if is_helper {
+                            let _ = win.set_focus();
+                        }
                     }
 
-                    let config = app.state::<AppState>().config.clone();
-                    for ch in active_messaging_channels(&config) {
-                        coordinator.register(ch.clone());
-                        ch.start(&request, coordinator.clone());
+                    match popup_ipc {
+                        // —— GUI Helper 模式：作答经 IPC 回 Daemon，无本地协调器 / 消息渠道 ——
+                        Some(ipc) => {
+                            let PopupIpc {
+                                gui_tx,
+                                request_id,
+                                reader,
+                            } = ipc;
+                            app.manage(GuiBridge {
+                                tx: gui_tx,
+                                request_id,
+                                done: AtomicBool::new(false),
+                                app: app.handle().clone(),
+                            });
+                            // 读 Daemon → GUI 的消息：被抢答 cancel / 连接断开 → 退出本进程。
+                            let app_handle = app.handle().clone();
+                            tauri::async_runtime::spawn(async move {
+                                let mut reader = reader;
+                                loop {
+                                    match crate::ipc::read_msg::<_, crate::ipc::ServerMsg>(
+                                        &mut reader,
+                                    )
+                                    .await
+                                    {
+                                        Ok(Some(crate::ipc::ServerMsg::Cancel { .. })) => {
+                                            app_handle.exit(0);
+                                            break;
+                                        }
+                                        Ok(Some(_)) => {}
+                                        Ok(None) | Err(_) => {
+                                            app_handle.exit(0);
+                                            break;
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        // —— 单进程模式（非 unix 回退）：协调器 + 弹窗 Channel + 并行消息渠道 ——
+                        None => {
+                            let request = app.state::<AppState>().request.clone();
+                            let coordinator = Coordinator::new(app.handle().clone(), request.clone());
+                            if show_popup {
+                                coordinator
+                                    .register(Arc::new(PopupChannel::new(app.handle().clone())));
+                            }
+                            let config = app.state::<AppState>().config.clone();
+                            for ch in active_messaging_channels(&config) {
+                                coordinator.register(ch.clone());
+                                ch.start(&request, coordinator.clone());
+                            }
+                            app.manage(coordinator);
+                        }
                     }
-
-                    app.manage(coordinator);
                 }
                 View::Settings => {
                     let config = AppConfig::load();
@@ -414,18 +597,25 @@ fn launch(state: AppState, view: View) -> tauri::Result<()> {
     // 构建成功后、进入事件循环前静默系统噪音日志（如 macOS 的 TSM CapsLock 日志）。
     stderr_redirect::silence();
     app.run(move |app_handle, event| {
-        // 提问模式且已进入收尾：拦下关窗触发的退出（code=None），
-        // 仅放行协调器 `app.exit(code)`（code=Some），确保结果先输出再退出。
-        // 收尾前不拦（Cmd+Q / 正常关窗照常退出，行为同改动前）。
+        // 提问模式：拦下关窗触发的退出（code=None），由协调器 / GUI Helper 逻辑决定真正退出时机。
+        // 设置模式不拦，关窗即正常退出。
         if prevent_autoexit {
             if let RunEvent::ExitRequested { code, api, .. } = &event {
                 if code.is_none() {
-                    let finalizing = app_handle
-                        .try_state::<Arc<Coordinator>>()
-                        .map(|c| c.is_finalizing())
-                        .unwrap_or(false);
-                    if finalizing {
+                    if let Some(bridge) = app_handle.try_state::<GuiBridge>() {
+                        // GUI Helper：关窗 / Cmd+Q → 通知 Daemon 取消，等其收尾关闭连接后由
+                        // reader 驱动 `app.exit(0)`（或安全网超时），确保取消已送达 Daemon。
                         api.prevent_exit();
+                        bridge.send_cancel();
+                    } else {
+                        // 单进程：仅在收尾阶段拦下，放行协调器 `app.exit(code)` 先输出结果。
+                        let finalizing = app_handle
+                            .try_state::<Arc<Coordinator>>()
+                            .map(|c| c.is_finalizing())
+                            .unwrap_or(false);
+                        if finalizing {
+                            api.prevent_exit();
+                        }
                     }
                 }
             }
@@ -434,14 +624,28 @@ fn launch(state: AppState, view: View) -> tauri::Result<()> {
     std::process::exit(0);
 }
 
-/// 把结果输出到 stdout，返回退出码。供协调器调用。
-pub(crate) fn emit_result(request_id: &str, result: &ChannelResult) -> i32 {
-    let lang = Lang::current();
+/// 渲染结果：把一个终态 `ChannelResult` 转成「给 stdout 的文本 / 给 stderr 的错误 + 退出码」。
+///
+/// 纯函数（除图片落盘的 IO 外），不打印、不退出，便于 Daemon 复用后经 IPC 回传 CLI。
+/// 单进程路径由 `emit_result` 包一层做实际打印 / 退出。
+#[derive(Debug, Clone)]
+pub struct RenderOutcome {
+    /// 给 CLI stdout 的结果区块文本（不含尾换行；打印方负责换行）。
+    pub stdout: String,
+    /// 给 CLI stderr 的错误文本（仅错误路径有值；含 `Error:` 前缀）。
+    pub stderr: Option<String>,
+    /// 退出码：0（发送/取消正常）/ 1（落盘等错误）。
+    pub exit_code: i32,
+}
+
+/// 渲染终态结果（图片落盘到 `temp/askhuman/<request_id>/`）。文案按传入 `lang` 本地化。
+pub(crate) fn render_result(request_id: &str, result: &ChannelResult, lang: Lang) -> RenderOutcome {
     match result.action {
-        ChannelAction::Cancel => {
-            println!("{}", output::cancel_output(lang));
-            0
-        }
+        ChannelAction::Cancel => RenderOutcome {
+            stdout: output::cancel_output(lang),
+            stderr: None,
+            exit_code: 0,
+        },
         ChannelAction::Send => {
             // 逐题落盘图片（按题分子目录避免文件名冲突），再聚合输出。
             let mut image_paths_per_q: Vec<Vec<String>> = Vec::with_capacity(result.answers.len());
@@ -449,8 +653,11 @@ pub(crate) fn emit_result(request_id: &str, result: &ChannelResult) -> i32 {
                 match image_writer::save(&answer.images, request_id, i, lang) {
                     Ok(paths) => image_paths_per_q.push(paths),
                     Err(e) => {
-                        stderr_redirect::eprintln_real(&format!("{}{}", i18n::err_prefix(lang), e));
-                        return 1;
+                        return RenderOutcome {
+                            stdout: String::new(),
+                            stderr: Some(format!("{}{}", i18n::err_prefix(lang), e)),
+                            exit_code: 1,
+                        };
                     }
                 }
             }
@@ -467,10 +674,24 @@ pub(crate) fn emit_result(request_id: &str, result: &ChannelResult) -> i32 {
                 })
                 .collect();
 
-            println!("{}", output::aggregate_output(lang, &rendered));
-            0
+            RenderOutcome {
+                stdout: output::aggregate_output(lang, &rendered),
+                stderr: None,
+                exit_code: 0,
+            }
         }
     }
+}
+
+/// 把结果输出到 stdout（或 stderr），返回退出码。供单进程协调器调用。
+pub(crate) fn emit_result(request_id: &str, result: &ChannelResult) -> i32 {
+    let outcome = render_result(request_id, result, Lang::current());
+    if let Some(err) = &outcome.stderr {
+        stderr_redirect::eprintln_real(err);
+    } else {
+        println!("{}", outcome.stdout);
+    }
+    outcome.exit_code
 }
 
 /// 解析“实际”主题：system 时探测系统深/浅色。

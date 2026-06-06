@@ -34,6 +34,34 @@ pub fn dispatch() {
         "--settings" => {
             crate::app::run_settings(crate::config::AppConfig::load());
         }
+        // 隐藏的 GUI Helper 角色：由 Daemon spawn（`--popup --endpoint <sock> --token <tok>`）。
+        "--popup" => {
+            #[cfg(unix)]
+            {
+                let mut endpoint = String::new();
+                let mut token = String::new();
+                let mut i = 2;
+                while i < argv.len() {
+                    match argv[i].as_str() {
+                        "--endpoint" if i + 1 < argv.len() => {
+                            endpoint = argv[i + 1].clone();
+                            i += 2;
+                        }
+                        "--token" if i + 1 < argv.len() => {
+                            token = argv[i + 1].clone();
+                            i += 2;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                crate::app::run_gui_helper(endpoint, token);
+            }
+            #[cfg(not(unix))]
+            {
+                eprintln!("--popup is not supported on this platform");
+                exit(1);
+            }
+        }
         // 常驻 Daemon 管理子命令：AskHuman daemon <run|start|stop|restart|status|logs>。
         // 极端歧义（问题正好是 "daemon"）可用 `AskHuman -q daemon` 规避。
         "daemon" => {
@@ -72,14 +100,30 @@ pub fn dispatch() {
                     }
                 };
                 let message = crate::models::MessagePrompt::new(parsed.message_text, files);
-                let questions = parsed
+                let questions: Vec<crate::models::Question> = parsed
                     .questions
                     .into_iter()
                     .map(|q| crate::models::Question::new(q.message, q.options))
                     .collect();
-                let request =
-                    crate::models::AskRequest::new(message, questions, parsed.is_markdown);
-                crate::app::run_ask(request, crate::config::AppConfig::load());
+                // unix：瘦客户端经 Daemon + GUI Helper（A11：上送 source name 与解析好的 lang）。
+                #[cfg(unix)]
+                {
+                    let task = crate::ipc::TaskRequest {
+                        message,
+                        questions,
+                        is_markdown: parsed.is_markdown,
+                        source: crate::models::source_name(),
+                        lang: lang.code().to_string(),
+                    };
+                    crate::client::run_ask(task);
+                }
+                // 非 unix：暂无 Daemon，沿用单进程内运行（Windows named pipe 待后续 Phase）。
+                #[cfg(not(unix))]
+                {
+                    let request =
+                        crate::models::AskRequest::new(message, questions, parsed.is_markdown);
+                    crate::app::run_ask(request, crate::config::AppConfig::load());
+                }
             }
             Err(e) => {
                 eprintln!("{}{}\n", i18n::err_prefix(lang), e);
