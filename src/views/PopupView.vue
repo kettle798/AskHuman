@@ -825,10 +825,16 @@ onMounted(async () => {
   }
   // 设置变更实时生效（同进程内设置窗口保存后广播 general 配置）。
   unlistenSettings = await listen<{
+    theme?: ThemeMode;
     language?: string;
     speechLanguage?: string;
     speechShortcut?: string;
   }>("settings-updated", (e) => {
+    // daemon 架构下由 Daemon 经 IPC 下发（独立 GUI Helper 进程）；单进程下由设置窗口同进程广播。
+    if (typeof e.payload.theme === "string") {
+      applyTheme(e.payload.theme);
+      theme.value = e.payload.theme;
+    }
     if (typeof e.payload.language === "string") applyLanguage(e.payload.language);
     if (typeof e.payload.speechLanguage === "string")
       speechLang.value = e.payload.speechLanguage || "auto";

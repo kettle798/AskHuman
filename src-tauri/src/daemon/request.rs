@@ -118,6 +118,18 @@ impl RequestRegistry {
     pub fn active_count(&self) -> usize {
         self.inner.lock().unwrap().by_id.len()
     }
+
+    /// 向所有已连上的活动 GUI Helper 广播一条消息（如 `ConfigChanged` 实时切主题/语言，A12）。
+    pub fn broadcast_to_guis(&self, msg: ServerMsg) {
+        let inner = self.inner.lock().unwrap();
+        for entry in inner.by_id.values() {
+            if let Ok(slot) = entry.gui.lock() {
+                if let Some(tx) = slot.as_ref() {
+                    let _ = tx.send(msg.clone());
+                }
+            }
+        }
+    }
 }
 
 /// 看门狗等待时长：GUI Helper 在此时长内未连上即判定弹窗拉起失败。

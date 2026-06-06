@@ -602,6 +602,12 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                                             app_handle.exit(0);
                                             break;
                                         }
+                                        // 配置实时变更（A12）：转发给前端实时切主题/语言。
+                                        // 复用既有 "settings-updated" 事件（前端已监听 general 配置）。
+                                        Ok(Some(crate::ipc::ServerMsg::ConfigChanged { general })) => {
+                                            use tauri::Emitter;
+                                            let _ = app_handle.emit("settings-updated", general);
+                                        }
                                         Ok(Some(_)) => {}
                                         Ok(None) | Err(_) => {
                                             app_handle.exit(0);

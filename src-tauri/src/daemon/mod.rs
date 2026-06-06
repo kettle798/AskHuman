@@ -6,6 +6,8 @@
 pub mod lifecycle;
 pub mod request;
 #[cfg(unix)]
+pub mod config_watch;
+#[cfg(unix)]
 pub mod spawn;
 
 /// `AskHuman daemon <sub>` 入口。永不返回（自行退出进程）。
@@ -24,6 +26,7 @@ pub fn dispatch(args: &[String]) -> ! {
 
 #[cfg(unix)]
 mod unix_impl {
+    use super::config_watch;
     use super::lifecycle::{self, DaemonMeta, LockGuard};
     use super::request::{self, RequestEntry, RequestRegistry};
     use crate::channels::dingding::DingTalkChannel;
@@ -140,6 +143,8 @@ mod unix_impl {
         fs_router: tokio::sync::Mutex<Option<Arc<FsRouter>>>,
         /// Telegram 长轮询 Router（惰性建连、常热复用；单一 offset）。
         tg_router: tokio::sync::Mutex<Option<Arc<TgRouter>>>,
+        /// 最近一次已知配置快照（config watch 据此比对差异，决定哪些 Router 需失效，A12）。
+        config: Mutex<AppConfig>,
     }
 
     async fn serve(_lock: LockGuard) -> i32 {
@@ -178,6 +183,7 @@ mod unix_impl {
             dd_router: tokio::sync::Mutex::new(None),
             fs_router: tokio::sync::Mutex::new(None),
             tg_router: tokio::sync::Mutex::new(None),
+            config: Mutex::new(AppConfig::load()),
         });
 
         // 空闲退出检查。
@@ -199,6 +205,25 @@ mod unix_impl {
             });
         }
 
+        // 配置实时生效（A12）：监听 config.json 变更 → 重载 + 失效改动的 Router + 通知活动 GUI。
+        {
+            let state = state.clone();
+            let mut rx = config_watch::spawn();
+            tokio::spawn(async move {
+                while rx.recv().await.is_some() {
+                    on_config_changed(&state).await;
+                }
+            });
+        }
+
+        // 临时目录清理（A10）：启动即清一次，之后每小时清理过期 temp/askhuman/<id>/。
+        tokio::spawn(async move {
+            loop {
+                cleanup_temp_dirs();
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        });
+
         loop {
             tokio::select! {
                 _ = state.shutdown.notified() => break,
@@ -212,6 +237,11 @@ mod unix_impl {
             }
         }
 
+        // 收尾：主动丢弃常热 Router（其 Drop 中止 reader 任务、关闭 IM 长连接），再清理 socket/meta。
+        // 进行中的请求各自持有 Router Arc 克隆，故仅在无人持有时才真正断连。
+        *state.dd_router.lock().await = None;
+        *state.fs_router.lock().await = None;
+        *state.tg_router.lock().await = None;
         cleanup();
         log("stopped");
         0
@@ -870,6 +900,76 @@ mod unix_impl {
     fn cleanup() {
         let _ = std::fs::remove_file(transport::socket_path());
         let _ = std::fs::remove_file(lifecycle::meta_path());
+    }
+
+    /// 临时产物保留时长：消费者(AI)在 CLI 退出后才读图片路径，留足窗口避免误删刚产出的文件。
+    const TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
+
+    /// 清理 `temp/askhuman/<id>/` 中超过 `TEMP_MAX_AGE` 未改动的目录（A10，启动 + 每小时）。
+    fn cleanup_temp_dirs() {
+        let base = std::env::temp_dir().join("askhuman");
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            return;
+        };
+        let now = SystemTime::now();
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let age = e
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| now.duration_since(t).ok());
+            if matches!(age, Some(a) if a >= TEMP_MAX_AGE) {
+                let _ = std::fs::remove_dir_all(&p);
+            }
+        }
+    }
+
+    /// config.json 变更（已去抖）：重载配置 → 失效凭据改动/被禁用渠道的缓存 Router → 通知活动 GUI。
+    async fn on_config_changed(state: &Arc<ServerState>) {
+        let new = AppConfig::load();
+        let old = { state.config.lock().unwrap().clone() };
+        invalidate_changed_routers(state, &old, &new).await;
+        *state.config.lock().unwrap() = new.clone();
+        let general = serde_json::to_value(&new.general).unwrap_or(serde_json::Value::Null);
+        state
+            .registry
+            .broadcast_to_guis(ServerMsg::ConfigChanged { general });
+        log("config reloaded");
+    }
+
+    /// 比对新旧配置：凭据变更或渠道被禁用 → 丢弃对应缓存 Router（惰性失效，Q1）。
+    ///
+    /// 进行中的请求仍持有自己的 Router `Arc` 克隆，故其连接保留到该请求结束；
+    /// 下一个请求会经 `ensure_*_router` 用新配置重连。注意：若仅改了同 client_id 的 secret，
+    /// 且旧请求未结束时新请求又到达，可能短暂出现两条同 client_id 连接（平台会踢掉旧的）——
+    /// 属配置在「问题进行中」被改动的少见边角，可接受。
+    async fn invalidate_changed_routers(state: &Arc<ServerState>, old: &AppConfig, new: &AppConfig) {
+        let dd_changed = !crate::app::is_dingding_active(new)
+            || old.channels.dingding.client_id != new.channels.dingding.client_id
+            || old.channels.dingding.client_secret != new.channels.dingding.client_secret;
+        if dd_changed {
+            *state.dd_router.lock().await = None;
+        }
+
+        let fs_changed = !crate::app::is_feishu_active(new)
+            || old.channels.feishu.app_id != new.channels.feishu.app_id
+            || old.channels.feishu.app_secret != new.channels.feishu.app_secret
+            || old.channels.feishu.base_url != new.channels.feishu.base_url;
+        if fs_changed {
+            *state.fs_router.lock().await = None;
+        }
+
+        let tg_changed = !crate::app::is_telegram_active(new)
+            || old.channels.telegram.bot_token != new.channels.telegram.bot_token
+            || old.channels.telegram.chat_id != new.channels.telegram.chat_id
+            || old.channels.telegram.api_base_url != new.channels.telegram.api_base_url;
+        if tg_changed {
+            *state.tg_router.lock().await = None;
+        }
     }
 
     // —— start / stop / restart / status / logs：作为客户端操作 Daemon ——

@@ -159,4 +159,6 @@ pub enum ServerMsg {
     Show(ShowPayload),
     /// 被其它渠道抢答，通知 GUI 收尾关窗（D→GUI）。
     Cancel { request_id: String, winner: String },
+    /// 配置实时变更，下发新的 `general` 配置给活动 GUI Helper 以即时切主题/语言（D→GUI，A12）。
+    ConfigChanged { general: serde_json::Value },
 }
