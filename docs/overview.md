@@ -9,10 +9,16 @@
 - **运行模型（当前）**：单进程。既是 CLI（纯信息命令直接终端输出、不起 GUI），又能进程内启动 Tauri 事件循环弹窗。**stdout 只输出结果区块，所有日志走 stderr。**
 - **运行模型（规划中）**：正迁往「常驻 Daemon + 瘦客户端 CLI + 独立 GUI Helper」三进程架构（见下节）。本文「运行流程」等小节描述的仍是当前单进程实现，迁移完成后再整体替换。
 
-## 架构演进：常驻 Daemon（规划中，影响后续所有需求）
+## 架构演进：常驻 Daemon（开发中，影响后续所有需求）
 
 > 详见 `docs/specs/daemon-architecture.md`（需求/设计）与 `docs/plans/daemon-architecture.md`（实现计划）。分支 `feat/daemon-architecture`。
 > **新需求设计时应按此目标架构考量**：渠道/长连接/抢答归 Daemon，GUI 归独立短命进程，CLI 仅做入参与结果转发。
+>
+> **实现进度（本分支，Unix 已落地；非 Unix 仍走单进程回退）**：
+> - **Phase 0**：IPC 骨架（`ipc/`：NDJSON over Unix socket）+ daemon 生命周期（`daemon/lifecycle.rs`、`daemon/spawn.rs`：flock 单实例 / 二进制指纹换新 / 空闲退出）。
+> - **Phase 1**：弹窗经 Daemon + 独立 GUI Helper（`--popup`）跑通；CLI 瘦客户端化（`client/`）；Coordinator 解耦为 IPC 回传渲染结果（`RenderOutcome`）。
+> - **Phase 2**：三种 IM 渠道迁入 Daemon，**每种全局仅一条长连接**，由各自 Router 独占并按键路由到对应会话（根治 `docs/TODO.md` 问题 1）：`dingtalk/router.rs`（卡片按 `outTrackId`、聊天按 `senderStaffId`）、`feishu/router.rs`（卡片按 `open_message_id`、聊天按 `open_id`）、`telegram/router.rs`（单一 `getUpdates` 长轮询 + 单 offset；callback 按卡片 `message_id`、自由文字归「最新活动卡片」）。「自动识别 userId/open_id」亦经 Daemon 长连接完成（`ClientMsg::Detect`：复用现有同 app 连接，否则临时开连）。`daemon status` 增报当前常热 IM 连接。
+> - **未完成**：配置实时热重载/重连（Phase 3）、Windows named-pipe daemon、整体 install 实测。
 
 **动机**：单进程模型下每次 ask 各自开 IM 长连接，违反「同一 client-id/app 同一时刻仅一条 Stream/长连接」的平台限制，并发提问会串扰（`docs/TODO.md` 问题 1）；且无法在「无提问」时接收渠道消息（未来「渠道主动发起任务」）。
 
@@ -83,17 +89,24 @@ AskHuman/
       telegram/
         mod.rs               TelegramClient：reqwest 手写 Bot API + 错误类型
         markdown.rs          标准 Markdown → Telegram MarkdownV2（保护代码块/转义）
+        router.rs            TgRouter：单一长轮询(单 offset) 独占 + 按卡片 message_id / 最新活动分发
       dingtalk/
         mod.rs / token.rs / client.rs / stream.rs / card.rs / textfile.rs / docx.rs
                              钉钉客户端层 + Stream 长连(JSON 帧) + 卡片 + 文本附件处理
+        router.rs            DdRouter：独占 StreamConn + 按 outTrackId/senderStaffId 分发(即时空ACK)
       feishu/
         mod.rs               错误类型 + 模块声明
         token.rs             tenant_access_token 缓存
         client.rs            OpenAPI：发文本/图片/文件/卡片、媒体上传、资源下载、PATCH 卡片
         ws.rs                长连接(WebSocket)：protobuf 帧(pbbp2) + 心跳/分片/回包/重连
         card.rs              卡片 JSON 2.0 组装（表单+勾选器+输入框+提交）+ 回调解析
+        router.rs            FsRouter：独占 FeishuWs + 按 open_message_id/open_id 分发(即时空ACK)
       integrations/
         cursor_hook.rs       Cursor Hook 安装/移除/状态/reveal（mac/Linux；含内嵌脚本）
+      ipc/                   IPC 协议：mod.rs(消息类型) / codec.rs(NDJSON) / transport.rs(Unix socket)
+      client/                (Unix) CLI 作为 Daemon 客户端：连接/握手/自启/submit/detect/status/stop
+      daemon/                (Unix) 常驻 Daemon：mod.rs(分发/serve) / lifecycle.rs(单实例·指纹·空闲) /
+                             spawn.rs(脱离启动) / request.rs(请求登记表·Coordinator·GUI token)
 ```
 
 ## 运行流程
