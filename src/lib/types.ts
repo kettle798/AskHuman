@@ -86,6 +86,7 @@ export interface DingTalkChannelConfig {
   clientId: string;
   clientSecret: string;
   userId: string;
+  cardTemplateId: string;
 }
 
 export interface ChannelsConfig {

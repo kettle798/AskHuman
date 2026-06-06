@@ -199,6 +199,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "channel.ddMessageSendFailed" => pick(lang, "failed to send DingTalk Message: {e}", "钉钉 Message 发送失败: {e}"),
         "channel.ddFileSendFailedLog" => pick(lang, "failed to send DingTalk file: {path}: {e}", "钉钉文件发送失败: {path}: {e}"),
         "channel.ddQuestionSendFailed" => pick(lang, "failed to send DingTalk question: {e}", "钉钉提问发送失败: {e}"),
+        "channel.ddCardDeliverFailed" => pick(lang, "failed to deliver DingTalk card, falling back to text: {e}", "钉钉互动卡片投放失败，回退纯文本: {e}"),
         "channel.ddImageDownloadFailed" => pick(lang, "failed to download DingTalk image: {e}", "钉钉图片下载失败: {e}"),
         "channel.ddFileDownloadFailed" => pick(lang, "failed to download DingTalk file: {e}", "钉钉文件下载失败: {e}"),
 

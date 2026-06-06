@@ -129,6 +129,8 @@ pub struct DingTalkChannelConfig {
     pub client_secret: String,
     /// 接收/作答用户的 userId（单聊）。
     pub user_id: String,
+    /// 互动卡片高级版模板 ID（可空）。留空则用代码内置默认模板（见 channels::dingding）。
+    pub card_template_id: String,
 }
 
 impl Default for DingTalkChannelConfig {
@@ -138,6 +140,7 @@ impl Default for DingTalkChannelConfig {
             client_id: String::new(),
             client_secret: String::new(),
             user_id: String::new(),
+            card_template_id: String::new(),
         }
     }
 }
@@ -213,6 +216,7 @@ mod tests {
         assert_eq!(c.channels.telegram.api_base_url, "https://api.telegram.org");
         assert!(!c.channels.dingding.enabled);
         assert!(c.channels.dingding.client_id.is_empty());
+        assert!(c.channels.dingding.card_template_id.is_empty());
     }
 
     #[test]

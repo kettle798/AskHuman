@@ -137,6 +137,8 @@ export default {
       detectHint:
         "Use the target DingTalk account to DM the bot with: {code} (valid for 120s)",
       detected: "Detected and filled UserId: {userId}",
+      cardTemplateId: "Card template ID",
+      cardTemplateIdPlaceholder: "Leave empty to use the built-in default template",
       moreSoon: "More channels coming soon",
     },
   },

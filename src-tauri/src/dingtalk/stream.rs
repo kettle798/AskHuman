@@ -17,10 +17,11 @@ type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// 上抛给上层的事件（`data` 为已解析的 JSON）。
 pub enum StreamEvent {
-    /// 机器人收到用户消息（文字/图片/文件/富文本）。
+    /// 机器人收到用户消息（文字/图片/文件/富文本）。已自动 ACK。
     BotMessage(Value),
-    /// 卡片回调（按钮点选/发送）。
-    CardCallback(Value),
+    /// 卡片回调（按钮点选/提交）。**未自动 ACK**：上层须在 3 秒内调用 `respond(message_id, ..)`
+    /// 回包（更新卡片）或空回包，否则钉钉会重推。
+    CardCallback { data: Value, message_id: String },
 }
 
 pub struct StreamConn {
@@ -96,17 +97,31 @@ impl StreamConn {
                 self.ack(&message_id, json!({})).await;
                 None
             }
-            "CALLBACK" | "EVENT" => {
-                // 先 ACK（3 秒内），再上抛。
-                self.ack(&message_id, json!({})).await;
-                match topic {
-                    TOPIC_BOT_MESSAGE => Some(StreamEvent::BotMessage(data)),
-                    TOPIC_CARD_CALLBACK => Some(StreamEvent::CardCallback(data)),
-                    _ => None,
+            "CALLBACK" | "EVENT" => match topic {
+                TOPIC_BOT_MESSAGE => {
+                    // bot 消息：立即空 ACK 再上抛。
+                    self.ack(&message_id, json!({})).await;
+                    Some(StreamEvent::BotMessage(data))
                 }
-            }
+                TOPIC_CARD_CALLBACK => {
+                    // 卡片回调：延迟 ACK——由上层算出回包后调 respond()（须 3 秒内）。
+                    Some(StreamEvent::CardCallback { data, message_id })
+                }
+                _ => {
+                    self.ack(&message_id, json!({})).await;
+                    None
+                }
+            },
             _ => None,
         }
+    }
+
+    /// 回复一个卡片回调（带回包，用于更新卡片）。须在收到回调后 3 秒内调用。
+    /// `data` 为业务响应体（如 `{cardUpdateOptions, cardData, userPrivateData}`）；空对象即
+    /// 「仅确认、不更新」。按钉钉 Stream 协议，CALLBACK 的响应体须再包一层 `{"response": data}`
+    /// 才能被网关识别（否则卡片端会提示「提交失败」且不更新）。
+    pub async fn respond(&mut self, message_id: &str, data: Value) {
+        self.ack(message_id, json!({ "response": data })).await;
     }
 
     /// 发送 ACK / 响应帧（带回原 messageId）。

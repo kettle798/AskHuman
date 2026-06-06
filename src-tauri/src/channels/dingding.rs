@@ -1,9 +1,11 @@
-//! 钉钉 Channel：Stream 长连接收（用户文字/图片/文件）+ OpenAPI 发（Message 文本/文件、逐题提问）。
+//! 钉钉 Channel：Stream 长连接收（卡片回调 + 用户文字/图片/文件）+ OpenAPI 发（Message、互动卡片）。
 //!
-//! 方案 B（当前）：提问以「纯文本 + 编号选项」下发，用户**回复一条消息即完成该题**——
-//! 回复编号（多选用逗号）映射预定义选项，或直接输入文字，或发送图片/文件。
-//! 钉钉互动卡片「普通版」不支持 Stream 回调；按钮快捷回复（高级版卡片 A 方案）作为后续增强，
-//! 相关构造/发送/回调解析代码暂以 `#[allow(dead_code)]` 保留（见 `dingtalk::card` / `client::send_card`）。
+//! 方案 A（默认）：提问以**互动卡片高级版**下发，用户在卡片内勾选预定义选项（多选）、可补充文字，
+//! 点「提交」完成该题；作答期间在聊天里发的图片/文件会被累积进答案（纯文字忽略，请用卡片输入框）。
+//! 卡片回调走 Stream（topic `/v1.0/card/instances/callback`），零公网。
+//!
+//! 方案 B（兜底）：当卡片投放失败时，回退为「纯文本 + 编号选项」——用户回复一条消息即完成该题
+//! （回复编号映射选项，或直接输入文字，或发图片/文件）。
 //!
 //! 编排逻辑复用 `conversation::run_conversation`，本文件提供传输实现 `DingTalkSession`
 //! （`MessagingChannel`）+ 薄外层 `DingTalkChannel`。
@@ -11,17 +13,31 @@
 use super::conversation::{run_conversation, MessagingChannel, QuestionCtx};
 use super::{Channel, ResultSink};
 use crate::config::DingTalkChannelConfig;
+use crate::dingtalk::card;
 use crate::dingtalk::client::DingTalkClient;
+use crate::dingtalk::stream::{StreamConn, StreamEvent, TOPIC_BOT_MESSAGE, TOPIC_CARD_CALLBACK};
 use crate::i18n::{self, Lang};
-use crate::dingtalk::stream::{StreamConn, StreamEvent, TOPIC_BOT_MESSAGE};
 use crate::models::{ImageAttachment, MessagePrompt, QuestionAnswer};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 /// 抢答轮询粒度：每隔此时长检查一次 `cancelled`。
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// 内置默认卡片模板 ID（设置项 `cardTemplateId` 留空时使用）。
+const DEFAULT_CARD_TEMPLATE_ID: &str = "6cfe19d3-3b36-4681-827d-e7c1d0574d0a.schema";
+
+/// 取生效的卡片模板 ID：配置非空用配置，否则用内置默认。
+fn effective_template_id(config: &DingTalkChannelConfig) -> &str {
+    let t = config.card_template_id.trim();
+    if t.is_empty() {
+        DEFAULT_CARD_TEMPLATE_ID
+    } else {
+        t
+    }
+}
 
 /// 薄外层：接 Coordinator（并行抢答），把会话委托给 `run_conversation` + `DingTalkSession`。
 pub struct DingTalkChannel {
@@ -92,12 +108,12 @@ impl MessagingChannel for DingTalkSession {
 
     async fn open(&mut self) -> Result<(), String> {
         let client = DingTalkClient::new(&self.config).map_err(|e| e.to_string())?;
-        // B 方案只需接收用户消息（文字/图片/文件）；卡片回调 topic 暂不订阅。
+        // 同时订阅 bot 消息（图片/文件累积）+ 卡片回调（提交）两个 topic。
         let stream = StreamConn::connect(
             client.http().clone(),
             self.config.client_id.trim(),
             self.config.client_secret.trim(),
-            &[TOPIC_BOT_MESSAGE],
+            &[TOPIC_BOT_MESSAGE, TOPIC_CARD_CALLBACK],
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -164,6 +180,16 @@ impl MessagingChannel for DingTalkSession {
         ctx: &QuestionCtx<'_>,
         cancelled: &AtomicBool,
     ) -> Option<QuestionAnswer> {
+        // 题首：无则用兜底标题。
+        let title = if ctx.header.is_empty() {
+            i18n::tr(ctx.lang, "channel.ddTitleFallback")
+        } else {
+            ctx.header
+        };
+        let template_id = effective_template_id(&self.config).to_string();
+        let out_track_id = uuid::Uuid::new_v4().to_string();
+        let param_map = card::build_card_param_map(title, ctx.text, ctx.options);
+
         let Self {
             client,
             stream,
@@ -173,48 +199,180 @@ impl MessagingChannel for DingTalkSession {
         let stream = stream.as_mut()?;
         let user_id = config.user_id.trim().to_string();
 
-        // 1. 发题：头部 + 正文 + 编号选项 + 作答提示。
-        let title = if ctx.header.is_empty() {
-            i18n::tr(ctx.lang, "channel.ddTitleFallback")
-        } else {
-            ctx.header
-        };
-        let body = build_question_text(ctx, ctx.is_markdown);
-        let send_res = if ctx.is_markdown {
-            client.send_oto_markdown(title, &body).await
-        } else {
-            client.send_oto_text(&body).await
-        };
-        if let Err(e) = send_res {
+        // 1. 投放互动卡片；失败 → 回退纯文本编号方案。
+        if let Err(e) = client
+            .create_and_deliver_card(&out_track_id, &template_id, param_map)
+            .await
+        {
             eprintln!(
                 "{}{}",
                 i18n::warn_prefix(ctx.lang),
-                i18n::tr(ctx.lang, "channel.ddQuestionSendFailed").replace("{e}", &e.to_string())
+                i18n::tr(ctx.lang, "channel.ddCardDeliverFailed").replace("{e}", &e.to_string())
             );
+            return ask_question_text(client, stream, &user_id, ctx, cancelled).await;
         }
 
-        // 2. 等用户「一条消息」作答（编号/文字/图片/文件）；被抢答则返回 None。
+        // 2. 等卡片「提交」；作答期间累积聊天里的图片/文件；被抢答则收尾返回 None。
+        let mut images: Vec<ImageAttachment> = Vec::new();
+        let mut files: Vec<String> = Vec::new();
         while !cancelled.load(Ordering::SeqCst) {
             let ev = match tokio::time::timeout(POLL_INTERVAL, stream.recv()).await {
                 Ok(Some(ev)) => ev,
-                Ok(None) => break,    // 连接彻底断开
-                Err(_) => continue,   // 超时：回到循环顶部重新检查 cancelled
+                Ok(None) => break,  // 连接彻底断开
+                Err(_) => continue, // 超时：回到循环顶部重新检查 cancelled
             };
-            if let StreamEvent::BotMessage(data) = ev {
-                if !bot_message_belongs(&data, &user_id) {
-                    continue;
+            match ev {
+                StreamEvent::CardCallback { data, message_id } => {
+                    match card::parse_card_submit(&data) {
+                        Some(s) if s.out_track_id == out_track_id && s.user_id == user_id => {
+                            // 回包置 submitted=true 让卡片灰显；同时更新公有 + 私有数据，
+                            // 以兼容模板把 `submitted` 配成公有或私有变量两种情况。
+                            stream
+                                .respond(
+                                    &message_id,
+                                    json!({
+                                        "cardUpdateOptions": {
+                                            "updateCardDataByKey": true,
+                                            "updatePrivateDataByKey": true,
+                                        },
+                                        "cardData": { "cardParamMap": { "submitted": "true" } },
+                                        "userPrivateData": { "cardParamMap": { "submitted": "true" } },
+                                    }),
+                                )
+                                .await;
+                            return Some(QuestionAnswer {
+                                selected_options: s.selected_options,
+                                user_input: s.user_input,
+                                images,
+                                files,
+                            });
+                        }
+                        // 非本卡片 / 非提交 → 空回包确认，继续等待。
+                        _ => stream.respond(&message_id, json!({})).await,
+                    }
                 }
-                if let Some(answer) = message_to_answer(client, &data, ctx.options).await {
-                    return Some(answer);
+                StreamEvent::BotMessage(data) => {
+                    if bot_message_belongs(&data, &user_id) {
+                        accumulate_attachment(client, &data, &mut images, &mut files, ctx.lang)
+                            .await;
+                    }
                 }
-                // 非可作答消息（贴纸等）→ 继续等待。
             }
         }
+
+        // 被抢答 / 断连：尽力把卡片置为「已提交」（失败忽略）。
+        let _ = client
+            .update_card_private(&out_track_id, json!({ "submitted": "true" }))
+            .await;
         None
     }
 
     async fn close(&mut self) {
         self.stream = None;
+    }
+}
+
+/// 兜底：纯文本 + 编号选项问一题（卡片投放失败时使用）。用户回一条消息即完成该题。
+async fn ask_question_text(
+    client: &DingTalkClient,
+    stream: &mut StreamConn,
+    user_id: &str,
+    ctx: &QuestionCtx<'_>,
+    cancelled: &AtomicBool,
+) -> Option<QuestionAnswer> {
+    let title = if ctx.header.is_empty() {
+        i18n::tr(ctx.lang, "channel.ddTitleFallback")
+    } else {
+        ctx.header
+    };
+    let body = build_question_text(ctx, ctx.is_markdown);
+    let send_res = if ctx.is_markdown {
+        client.send_oto_markdown(title, &body).await
+    } else {
+        client.send_oto_text(&body).await
+    };
+    if let Err(e) = send_res {
+        eprintln!(
+            "{}{}",
+            i18n::warn_prefix(ctx.lang),
+            i18n::tr(ctx.lang, "channel.ddQuestionSendFailed").replace("{e}", &e.to_string())
+        );
+    }
+
+    while !cancelled.load(Ordering::SeqCst) {
+        let ev = match tokio::time::timeout(POLL_INTERVAL, stream.recv()).await {
+            Ok(Some(ev)) => ev,
+            Ok(None) => break,
+            Err(_) => continue,
+        };
+        match ev {
+            StreamEvent::BotMessage(data) => {
+                if !bot_message_belongs(&data, user_id) {
+                    continue;
+                }
+                if let Some(answer) = message_to_answer(client, &data, ctx.options).await {
+                    return Some(answer);
+                }
+            }
+            // 文本兜底路径不期望卡片回调；空回包确认跳过。
+            StreamEvent::CardCallback { message_id, .. } => {
+                stream.respond(&message_id, json!({})).await;
+            }
+        }
+    }
+    None
+}
+
+/// 累积聊天里收到的图片/文件（卡片作答期间）；纯文字等忽略。
+async fn accumulate_attachment(
+    client: &DingTalkClient,
+    data: &Value,
+    images: &mut Vec<ImageAttachment>,
+    files: &mut Vec<String>,
+    lang: Lang,
+) {
+    let msgtype = data.get("msgtype").and_then(|v| v.as_str()).unwrap_or("");
+    match msgtype {
+        "picture" => {
+            let Some(code) = data
+                .get("content")
+                .and_then(|c| c.get("downloadCode"))
+                .and_then(|v| v.as_str())
+            else {
+                return;
+            };
+            match download_image(client, code).await {
+                Ok(img) => images.push(img),
+                Err(e) => eprintln!(
+                    "{}{}",
+                    i18n::warn_prefix(lang),
+                    i18n::tr(lang, "channel.ddImageDownloadFailed").replace("{e}", &e)
+                ),
+            }
+        }
+        "file" => {
+            let content = data.get("content");
+            let Some(code) = content
+                .and_then(|c| c.get("downloadCode"))
+                .and_then(|v| v.as_str())
+            else {
+                return;
+            };
+            let file_name = content
+                .and_then(|c| c.get("fileName"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("file");
+            let ext = ext_of(file_name);
+            match client.download_message_file_to(code, ext).await {
+                Ok(path) => files.push(path),
+                Err(e) => eprintln!(
+                    "{}{}",
+                    i18n::warn_prefix(lang),
+                    i18n::tr(lang, "channel.ddFileDownloadFailed").replace("{e}", &e.to_string())
+                ),
+            }
+        }
+        _ => {} // 文字 / 贴纸等：卡片模式下忽略（请用卡片输入框）。
     }
 }
 

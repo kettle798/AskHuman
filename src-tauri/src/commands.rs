@@ -430,6 +430,7 @@ pub async fn dingtalk_test(args: DingTalkTestArgs) -> Result<String, String> {
         client_id: args.client_id,
         client_secret: args.client_secret,
         user_id: args.user_id,
+        card_template_id: String::new(),
     };
     let client = DingTalkClient::new(&cfg).map_err(|e| e.localized(lang))?;
     client

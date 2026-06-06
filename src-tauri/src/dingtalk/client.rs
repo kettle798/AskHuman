@@ -64,10 +64,20 @@ impl DingTalkClient {
     /// 调用新版接口（`https://api.dingtalk.com{path}`，header 携带 access_token），返回响应体。
     /// 以 HTTP 2xx 判定成功；失败时取 body.message 作为错误信息。
     pub(crate) async fn call_new(&self, path: &str, body: Value) -> Result<Value, DingTalkError> {
+        self.call_new_method(reqwest::Method::POST, path, body).await
+    }
+
+    /// 同 `call_new`，但可指定 HTTP method（如更新卡片用 PUT）。
+    async fn call_new_method(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Value,
+    ) -> Result<Value, DingTalkError> {
         let token = self.token().await?;
         let resp = self
             .http
-            .post(format!("{}{}", API_BASE, path))
+            .request(method, format!("{}{}", API_BASE, path))
             .header("x-acs-dingtalk-access-token", token)
             .json(&body)
             .send()
@@ -165,34 +175,52 @@ impl DingTalkClient {
         }
     }
 
-    // ===== 互动卡片（保留给高级版卡片 A 方案，B 方案暂不使用）=====
+    // ===== 互动卡片高级版（创建并投放 / 更新）=====
 
-    /// 发送题目互动卡片到单聊。`biz_id` 同时作为 cardBizId / outTrackId（幂等 + 回调定位）。
-    #[allow(dead_code)]
-    pub async fn send_card(&self, biz_id: &str, card_data: &str) -> Result<(), DingTalkError> {
-        let receiver = json!({ "userId": self.user_id }).to_string();
+    /// 创建并投放互动卡片高级版到机器人单聊。回调走 Stream（`callbackType=STREAM`）。
+    /// `card_param_map` 为已组装好的公有数据（值均为字符串）；`out_track_id` 唯一标识本卡片实例。
+    pub async fn create_and_deliver_card(
+        &self,
+        out_track_id: &str,
+        card_template_id: &str,
+        card_param_map: Value,
+    ) -> Result<(), DingTalkError> {
         let body = json!({
-            "cardTemplateId": "StandardCard",
-            "cardBizId": biz_id,
-            "robotCode": self.robot_code(),
-            "singleChatReceiver": receiver,
-            "cardData": card_data,
+            "cardTemplateId": card_template_id,
+            "outTrackId": out_track_id,
+            "cardData": { "cardParamMap": card_param_map },
+            "openSpaceId": format!("dtv1.card//IM_ROBOT.{}", self.user_id),
+            "imRobotOpenSpaceModel": { "supportForward": true },
+            "imRobotOpenDeliverModel": { "spaceType": "IM_ROBOT", "robotCode": self.robot_code() },
             "callbackType": "STREAM",
+            "userIdType": 1,
         });
-        self.call_new("/v1.0/im/v1.0/robot/interactiveCards/send", body)
+        self.call_new("/v1.0/card/instances/createAndDeliver", body)
             .await?;
         Ok(())
     }
 
-    /// 更新已发出的卡片（点选后刷新高亮）。
-    #[allow(dead_code)]
-    pub async fn update_card(&self, biz_id: &str, card_data: &str) -> Result<(), DingTalkError> {
+    /// 按 key 更新卡片数据（公有 + 当前用户私有同时更新）。用于收尾/抢答时 best-effort
+    /// 置 `submitted=true`；同时写公有 `cardData` 与私有 `privateData`，以兼容模板把对应变量
+    /// 配成公有或私有两种情况。`param_map` 值均为字符串。
+    pub async fn update_card_private(
+        &self,
+        out_track_id: &str,
+        param_map: Value,
+    ) -> Result<(), DingTalkError> {
+        let mut private = serde_json::Map::new();
+        private.insert(self.user_id.clone(), json!({ "cardParamMap": param_map.clone() }));
         let body = json!({
-            "cardBizId": biz_id,
-            "cardData": card_data,
-            "robotCode": self.robot_code(),
+            "outTrackId": out_track_id,
+            "cardData": { "cardParamMap": param_map },
+            "privateData": Value::Object(private),
+            "cardUpdateOptions": {
+                "updateCardDataByKey": true,
+                "updatePrivateDataByKey": true,
+            },
+            "userIdType": 1,
         });
-        self.call_new("/v1.0/im/v1.0/robot/interactiveCards", body)
+        self.call_new_method(reqwest::Method::PUT, "/v1.0/card/instances", body)
             .await?;
         Ok(())
     }

@@ -134,6 +134,8 @@ export default {
       detecting: "识别中…",
       detectHint: "请用目标钉钉账号私聊机器人发送：{code}（120 秒内有效）",
       detected: "已识别并填入 UserId：{userId}",
+      cardTemplateId: "卡片模板 ID",
+      cardTemplateIdPlaceholder: "留空使用内置默认模板",
       moreSoon: "更多通信 Channel 敬请期待",
     },
   },

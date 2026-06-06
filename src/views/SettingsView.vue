@@ -867,6 +867,15 @@ onMounted(async () => {
             >
               <template #code><b>{{ dingtalkDetectCode }}</b></template>
             </i18n-t>
+            <div class="field">
+              <label>{{ t("settings.channels.cardTemplateId") }}</label>
+              <input
+                class="input"
+                v-model="config.channels.dingding.cardTemplateId"
+                :placeholder="t('settings.channels.cardTemplateIdPlaceholder')"
+                @change="persist"
+              />
+            </div>
             <div class="row">
               <button
                 class="btn"
