@@ -47,13 +47,13 @@ AskHuman --version                    # version
 
 Results are written to stdout in `[Selected options]` / `[User input]` / `[Images]` / `[Files]` / `[Status]` blocks; logs go to stderr. For the full invocation and output format, see `AskHuman --agent-help`.
 
-### 2. Pairing with an AI Agent / Cursor
+### 2. Pairing with an AI Agent
 
-To make an agent "ask the human before finishing", there are usually three steps:
+To make an agent "ask the human before finishing", there are a few ways to use it:
 
-1. **Put the prompt in rules**: the settings "Integrations" tab provides a copyable reference prompt. Add it to your agent's rules (e.g. Cursor rules / `AGENTS.md`) to guide the agent to call `AskHuman` when finishing or needing confirmation.
-2. **Cursor Hook** (macOS / Linux only): install it with one click from settings. It registers a script in `~/.cursor/hooks.json` that, when it detects a Shell call to `AskHuman`, extends the tool-call timeout to 24 hours so it isn't force-canceled while waiting for your reply.
-3. **Program integration**: add `askhuman` to your project (`npm i askhuman`); `npm install` pulls the current platform's binary, and at runtime you resolve the path and call it:
+- **Put the prompt in rules**: the settings "Integrations" tab provides a copyable reference prompt. Add it to your agent's rules (e.g. Cursor rules / `AGENTS.md` / `CLAUDE.md`) to guide the agent to call `AskHuman` when finishing or needing confirmation.
+- **Cursor Hook** (macOS / Linux only): install it with one click from settings. It registers a script in `~/.cursor/hooks.json` that, when it detects a Shell call to `AskHuman`, extends the tool-call timeout to 24 hours so it isn't force-canceled while waiting for your reply.
+- **Program integration**: add `askhuman` to your project (`npm i askhuman`); `npm install` pulls the current platform's binary, and at runtime you resolve the path and call it:
 
 ```js
 import { getBinaryPath, isAvailable } from "askhuman";

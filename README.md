@@ -47,13 +47,13 @@ AskHuman --version               # 版本
 
 结果按 `[选择的选项]` / `[用户输入]` / `[图片]` / `[文件]` / `[状态]` 区块写入 stdout，日志走 stderr。完整的调用方式与输出格式见 `AskHuman --agent-help`。
 
-### 二、与 AI Agent / Cursor 搭配
+### 二、与 AI Agent 搭配
 
-让 Agent「结束前先问人」，通常三步：
+让 Agent「结束前先问人」，有以下几种使用方式：
 
-1. **提示词进 rules**：设置页「集成」Tab 提供可复制的参考提示词，把它加入你的 Agent 规则（如 Cursor 的 rules / `AGENTS.md`），引导 Agent 在结束或需要确认时调用 `AskHuman`。
-2. **Cursor Hook**（仅 macOS / Linux）：设置页一键安装，向 `~/.cursor/hooks.json` 注册脚本——检测到 Shell 调用 `AskHuman` 时，自动把工具调用超时延长到 24 小时，避免等待你回应时被强制取消。
-3. **程序集成**：把 `askhuman` 加入项目依赖（`npm i askhuman`），`npm install` 会自动装上当前平台二进制，运行时解析路径并调用：
+- **提示词进 rules**：设置页「集成」Tab 提供可复制的参考提示词，把它加入你的 Agent 规则（如 Cursor 的 rules / `AGENTS.md` / `CLAUDE.md`），引导 Agent 在结束或需要确认时调用 `AskHuman`。
+- **Cursor Hook**（仅 macOS / Linux）：设置页一键安装，向 `~/.cursor/hooks.json` 注册脚本——检测到 Shell 调用 `AskHuman` 时，自动把工具调用超时延长到 24 小时，避免等待你回应时被强制取消。
+- **程序集成**：把 `askhuman` 加入项目依赖（`npm i askhuman`），`npm install` 会自动装上当前平台二进制，运行时解析路径并调用：
 
 ```js
 import { getBinaryPath, isAvailable } from "askhuman";
