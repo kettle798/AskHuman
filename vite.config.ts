@@ -6,6 +6,8 @@ const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig({
   plugins: [vue()],
+  // 前端源码与入口 index.html 都在 src/，故以 src 为 Vite 根目录。
+  root: "src",
   // Tauri CLI 通过 env 注入，避免 vite 清屏吞掉 Rust 日志
   clearScreen: false,
   server: {
@@ -22,7 +24,8 @@ export default defineConfig({
   },
   build: {
     target: "es2021",
-    outDir: "dist",
+    // 输出到仓库根的 dist/（tauri.conf.json 的 frontendDist=../dist）。
+    outDir: "../dist",
     emptyOutDir: true,
   },
 });

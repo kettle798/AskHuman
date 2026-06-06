@@ -6,12 +6,13 @@
 #      （编译 4 平台二进制 → npm publish 主包+子包 → 创建 GitHub Release）
 #
 # 用法:
-#   ./publish.sh          # 交互确认后发布
-#   ./publish.sh -y       # 跳过确认直接发布
+#   ./scripts/publish.sh          # 交互确认后发布
+#   ./scripts/publish.sh -y       # 跳过确认直接发布
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 
 REGISTRY="https://registry.npmjs.org"
 PKG="packaging/npm/humaninloop/package.json"

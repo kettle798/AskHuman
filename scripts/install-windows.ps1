@@ -2,8 +2,9 @@
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RepoRoot = Split-Path -Parent $ScriptDir
 $InstallDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\AskHuman" }
-Set-Location $ScriptDir
+Set-Location $RepoRoot
 
 if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
   Write-Error "需要 pnpm（npm i -g pnpm）"; exit 1

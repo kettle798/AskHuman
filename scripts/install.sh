@@ -3,8 +3,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
-cd "$SCRIPT_DIR"
+cd "$REPO_ROOT"
 
 if ! command -v pnpm >/dev/null 2>&1; then
   echo "错误: 需要 pnpm（npm i -g pnpm）" >&2
