@@ -15,6 +15,7 @@ use super::{Channel, Preemption, ResultSink};
 use crate::config::DingTalkChannelConfig;
 use crate::dingtalk::card;
 use crate::dingtalk::client::DingTalkClient;
+use crate::dingtalk::textfile::{self, TextAction};
 use crate::dingtalk::stream::{StreamConn, StreamEvent, TOPIC_BOT_MESSAGE, TOPIC_CARD_CALLBACK};
 use crate::i18n::{self, Lang};
 use crate::models::{ImageAttachment, MessagePrompt, QuestionAnswer};
@@ -24,6 +25,12 @@ use std::time::Duration;
 
 /// 抢答轮询粒度：每隔此时长检查一次抢答信号。
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Message（正文+附件）发完到发第一道题之间的等待时长。
+/// 钉钉 oToMessages/batchSend 是异步投递（HTTP 200 仅代表受理，真正落到聊天有队列延迟），
+/// 而卡片 createAndDeliver 投递更快，会插队先到，导致问题把内联内容顶上去、默认看不见。
+/// 这里短暂等待让 batchSend 的正文/内联先落地，保证「先 message 后题目」的视觉顺序。
+const MESSAGE_SETTLE_DELAY: Duration = Duration::from_millis(1000);
 
 /// 内置默认卡片模板 ID（设置项 `cardTemplateId` 留空时使用）。
 const DEFAULT_CARD_TEMPLATE_ID: &str = "748d7d3c-232c-4671-a7c4-cce94790d9e1.schema";
@@ -155,8 +162,27 @@ impl MessagingChannel for DingTalkSession {
             );
         }
 
-        // 展示文件：上传媒体后图片→sampleImageMsg，其它→sampleFile。
+        // 展示文件：图片→sampleImageMsg；文本类→短内联/长转 docx；其余→原样 sampleFile。
+        let cfg = &self.config;
         for file in &message.files {
+            // 非图片文本类：先按计划内联或转 docx；失败/不适用再原样发送。
+            let handled = if file.is_image {
+                false
+            } else {
+                match textfile::plan(cfg, &file.path, &file.name) {
+                    TextAction::Inline { title, text } => {
+                        client.send_oto_markdown(&title, &text).await.is_ok()
+                    }
+                    TextAction::Docx { file_name, bytes } => {
+                        send_docx(client, &file_name, &bytes).await.is_ok()
+                    }
+                    TextAction::PassThrough => false,
+                }
+            };
+            if handled {
+                continue;
+            }
+            // 原样发送（图片，或文本处理不适用/失败的兜底）。
             if let Err(e) = send_attachment(client, &file.path, &file.name, file.is_image).await {
                 eprintln!(
                     "{}{}",
@@ -172,6 +198,9 @@ impl MessagingChannel for DingTalkSession {
                     .await;
             }
         }
+
+        // 等 batchSend 的正文/内联先落地，再让调用方发首题卡片（见常量说明）。
+        tokio::time::sleep(MESSAGE_SETTLE_DELAY).await;
     }
 
     async fn ask_question(
@@ -562,6 +591,27 @@ async fn send_attachment(
         let ext = ext_of(name);
         client.send_oto_file(&media_id, name, ext).await
     }
+}
+
+/// 把 docx 字节写临时文件后上传并以 sampleFile(fileType=docx) 发送。
+async fn send_docx(
+    client: &DingTalkClient,
+    file_name: &str,
+    bytes: &[u8],
+) -> Result<(), crate::dingtalk::DingTalkError> {
+    use crate::dingtalk::DingTalkError;
+    let tmp = std::env::temp_dir().join(format!("ha-{}.docx", uuid::Uuid::new_v4()));
+    std::fs::write(&tmp, bytes)
+        .map_err(|e| DingTalkError::Network(format!("write temp docx failed: {}", e)))?;
+    let result = async {
+        let media_id = client
+            .upload_media(tmp.to_str().unwrap_or_default(), "file")
+            .await?;
+        client.send_oto_file(&media_id, file_name, "docx").await
+    }
+    .await;
+    let _ = std::fs::remove_file(&tmp);
+    result
 }
 
 /// 取文件扩展名（无则空串）。

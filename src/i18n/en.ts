@@ -140,6 +140,12 @@ export default {
       detected: "Detected and filled UserId: {userId}",
       cardTemplateId: "Card template ID",
       cardTemplateIdPlaceholder: "Leave empty to use the built-in default template",
+      inlineSmallText: "Inline small text files",
+      inlineSmallTextHint:
+        "Short text attachments (\u22643000 chars) are posted inline in the DingTalk message (with a filename/size/lines header) instead of as a file.",
+      convertTextToDocx: "Send text files as docx",
+      convertTextToDocxHint:
+        "Text files that aren't inlined (e.g. long ones) are converted to docx so DingTalk can preview them; turn off to send the original file.",
       moreSoon: "More channels coming soon",
     },
   },

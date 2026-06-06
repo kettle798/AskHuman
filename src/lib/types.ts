@@ -87,6 +87,8 @@ export interface DingTalkChannelConfig {
   clientSecret: string;
   userId: string;
   cardTemplateId: string;
+  inlineSmallText: boolean;
+  convertTextToDocx: boolean;
 }
 
 export interface ChannelsConfig {

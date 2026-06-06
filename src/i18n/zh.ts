@@ -137,6 +137,12 @@ export default {
       detected: "已识别并填入 UserId：{userId}",
       cardTemplateId: "卡片模板 ID",
       cardTemplateIdPlaceholder: "留空使用内置默认模板",
+      inlineSmallText: "小文件内联到正文",
+      inlineSmallTextHint:
+        "短文本附件（≤3000 字符）直接贴进钉钉消息正文（顶部标注文件名/大小/行数），不再发文件。",
+      convertTextToDocx: "文本文件转 docx 发送",
+      convertTextToDocxHint:
+        "未内联的文本文件（长文件等）转成 docx 发送，确保钉钉可预览；关闭则发送源文件。",
       moreSoon: "更多通信 Channel 敬请期待",
     },
   },

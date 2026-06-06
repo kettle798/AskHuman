@@ -876,6 +876,37 @@ onMounted(async () => {
                 @change="persist"
               />
             </div>
+            <hr class="divider" />
+            <div class="row">
+              <label>{{ t("settings.channels.inlineSmallText") }}</label>
+              <span class="spacer"></span>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  v-model="config.channels.dingding.inlineSmallText"
+                  @change="persist"
+                />
+                <span class="track"></span>
+              </label>
+            </div>
+            <p class="card-desc" style="margin-top: 0">
+              {{ t("settings.channels.inlineSmallTextHint") }}
+            </p>
+            <div class="row">
+              <label>{{ t("settings.channels.convertTextToDocx") }}</label>
+              <span class="spacer"></span>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  v-model="config.channels.dingding.convertTextToDocx"
+                  @change="persist"
+                />
+                <span class="track"></span>
+              </label>
+            </div>
+            <p class="card-desc" style="margin-top: 0">
+              {{ t("settings.channels.convertTextToDocxHint") }}
+            </p>
             <div class="row">
               <button
                 class="btn"

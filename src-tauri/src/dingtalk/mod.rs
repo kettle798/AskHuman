@@ -10,7 +10,9 @@
 
 pub mod card;
 pub mod client;
+pub mod docx;
 pub mod stream;
+pub mod textfile;
 pub mod token;
 
 use std::fmt;
