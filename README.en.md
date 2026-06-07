@@ -12,7 +12,20 @@ A cross-platform human-in-the-loop tool. When an AI agent is about to end a conv
 - Built on **Tauri 2 (Rust + Vue 3)**, supports **macOS / Windows / Linux**
 - Multiple channels: local popup + Telegram + DingTalk + Feishu, independently toggleable and racing in parallel when several are on
 - Reply history: review recent messages and answers per project (including the reply channel), recorded uniformly across all channels
-- Built-in settings UI, Cursor Hook, reference prompt; native macOS glass look
+
+## Screenshots
+
+<p align="center">
+  <img src="assets/channels.webp" alt="Reply to your agent from the local popup, DingTalk, Feishu, or Telegram" width="900">
+  <br/>
+  <em>Answer the same question from the local popup or DingTalk / Feishu / Telegram</em>
+</p>
+
+<p align="center">
+  <img src="assets/history.webp" alt="Browse message and reply history per project" width="680">
+  <br/>
+  <em>Browse past messages and your replies, grouped by project</em>
+</p>
 
 ## Install
 

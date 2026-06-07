@@ -12,7 +12,20 @@
 - 基于 **Tauri 2（Rust + Vue 3）**，支持 **macOS / Windows / Linux**
 - 多通信渠道：本地弹窗 + Telegram + 钉钉 + 飞书，可独立开关、多开并行「抢答」
 - 回复历史：按项目回看最近的消息与回答（含回复渠道），跨所有渠道统一记录
-- 内置设置界面、Cursor Hook、参考提示词；macOS 原生毛玻璃外观
+
+## 功能预览
+
+<p align="center">
+  <img src="assets/channels.webp" alt="在本地弹窗、钉钉、飞书、Telegram 等多渠道回复 Agent" width="900">
+  <br/>
+  <em>同一个问题，可在本地弹窗或钉钉 / 飞书 / Telegram 等渠道回复</em>
+</p>
+
+<p align="center">
+  <img src="assets/history.webp" alt="按项目查看消息与回复历史" width="680">
+  <br/>
+  <em>按项目回看历史消息与当时的回复</em>
+</p>
 
 ## 安装
 
