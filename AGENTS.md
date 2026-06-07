@@ -18,6 +18,10 @@ After making any change to this project's functionality or logic, verify the res
 ./scripts/install-windows.ps1
 ```
 
+## Code comments
+
+Write code comments in English.
+
 ## Commit messages
 
 Write git commit messages in English.
