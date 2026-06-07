@@ -20,7 +20,7 @@ use crate::dingtalk::textfile::{self, TextAction};
 use crate::i18n::{self, Lang};
 use crate::models::{ImageAttachment, MessagePrompt, QuestionAnswer};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// 抢答轮询粒度：每隔此时长检查一次抢答信号。
@@ -279,9 +279,11 @@ impl MessagingChannel for DingTalkSession {
             return ask_question_text(client, events, &user_id, ctx, preempt).await;
         }
 
-        // 2. 等卡片「提交」；作答期间累积聊天里的图片/文件；被抢答则收尾返回 None。
-        let mut images: Vec<ImageAttachment> = Vec::new();
-        let mut files: Vec<String> = Vec::new();
+        // 2. 等卡片「提交」；作答期间收到的图片/文件**并发下载**（不阻塞收事件循环，保证提交一到
+        //    就能被立刻处理、即时回 ACK，A 方案）。下载结果累积进共享集合，提交时再收尾。
+        let images: Arc<Mutex<Vec<ImageAttachment>>> = Arc::new(Mutex::new(Vec::new()));
+        let files: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut downloads: Vec<tauri::async_runtime::JoinHandle<()>> = Vec::new();
         while !preempt.is_cancelled() {
             let ev = match tokio::time::timeout(POLL_INTERVAL, events.recv()).await {
                 Ok(Some(ev)) => ev,
@@ -289,10 +291,15 @@ impl MessagingChannel for DingTalkSession {
                 Err(_) => continue, // 超时：回到循环顶部重新检查 cancelled
             };
             match ev {
-                DdInbound::Card(data) => {
-                    if let Some(s) = card::parse_card_submit(&data) {
-                        if s.out_track_id == out_track_id && s.user_id == user_id {
-                            // 即时空 ACK 已由 Router 完成；这里经 OpenAPI 把卡片置灰为「已提交」。
+                DdInbound::Card { data, ack } => {
+                    match card::parse_card_submit(&data) {
+                        Some(s) if s.out_track_id == out_track_id && s.user_id == user_id => {
+                            // 立刻回成功裁决：消除「请求失败」、置灰点击者（不在此等任何慢活）。
+                            let _ = ack.send(card::submit_ack_success());
+                            // 收尾并发下载（不在 3 秒关键路径），再经 OpenAPI 写公有终态文案。
+                            for h in downloads {
+                                let _ = h.await;
+                            }
                             let submitted_text = i18n::tr(ctx.lang, "channel.ddSubmitted");
                             let _ = client
                                 .update_card_private(
@@ -302,6 +309,8 @@ impl MessagingChannel for DingTalkSession {
                                 )
                                 .await;
                             events.clear_active(Some(&out_track_id), &user_id);
+                            let images = std::mem::take(&mut *images.lock().unwrap());
+                            let files = std::mem::take(&mut *files.lock().unwrap());
                             return Some(QuestionAnswer {
                                 selected_options: s.selected_options,
                                 user_input: s.user_input,
@@ -309,13 +318,22 @@ impl MessagingChannel for DingTalkSession {
                                 files,
                             });
                         }
+                        // 非本卡片（理论上不会路由到此）：回空包让 Router 别空等，继续。
+                        _ => {
+                            let _ = ack.send(json!({}));
+                        }
                     }
-                    // 非本卡片 / 非提交：忽略，继续等待。
                 }
                 DdInbound::Bot(data) => {
                     if bot_message_belongs(&data, &user_id) {
-                        accumulate_attachment(client, &data, &mut images, &mut files, ctx.lang)
-                            .await;
+                        // 并发下载：spawn 后立刻回到循环收事件，避免大文件下载卡住提交处理。
+                        let client = client.clone();
+                        let images = images.clone();
+                        let files = files.clone();
+                        let lang = ctx.lang;
+                        downloads.push(tauri::async_runtime::spawn(async move {
+                            accumulate_attachment(&client, &data, &images, &files, lang).await;
+                        }));
                     }
                 }
             }
@@ -391,8 +409,10 @@ async fn ask_question_text(
                     return Some(answer);
                 }
             }
-            // 文本兜底路径不期望卡片回调；忽略。
-            DdInbound::Card(_) => {}
+            // 文本兜底路径未登记卡片路由，不会收到卡片提交回调；忽略（回空包以防万一）。
+            DdInbound::Card { ack, .. } => {
+                let _ = ack.send(json!({}));
+            }
         }
     }
     events.clear_active(None, user_id);
@@ -400,11 +420,12 @@ async fn ask_question_text(
 }
 
 /// 累积聊天里收到的图片/文件（卡片作答期间）；纯文字等忽略。
+/// 在并发下载任务中调用：下载完成后再锁住共享集合追加（锁期间不 await）。
 async fn accumulate_attachment(
     client: &DingTalkClient,
     data: &Value,
-    images: &mut Vec<ImageAttachment>,
-    files: &mut Vec<String>,
+    images: &Mutex<Vec<ImageAttachment>>,
+    files: &Mutex<Vec<String>>,
     lang: Lang,
 ) {
     let msgtype = data.get("msgtype").and_then(|v| v.as_str()).unwrap_or("");
@@ -418,7 +439,7 @@ async fn accumulate_attachment(
                 return;
             };
             match download_image(client, code).await {
-                Ok(img) => images.push(img),
+                Ok(img) => images.lock().unwrap().push(img),
                 Err(e) => eprintln!(
                     "{}{}",
                     i18n::warn_prefix(lang),
@@ -440,7 +461,7 @@ async fn accumulate_attachment(
                 .unwrap_or("file");
             let ext = ext_of(file_name);
             match client.download_message_file_to(code, ext).await {
-                Ok(path) => files.push(path),
+                Ok(path) => files.lock().unwrap().push(path),
                 Err(e) => eprintln!(
                     "{}{}",
                     i18n::warn_prefix(lang),

@@ -10,6 +10,7 @@
 //! 单进程与 Daemon 复用同一套：Daemon 持**共享且常热**的 Router（跨请求复用，根治多连接抢消息）；
 //! 单进程则每进程起一个只挂 1 个会话的同款 Router。
 
+use super::card;
 use super::stream::{StreamConn, StreamEvent, TOPIC_BOT_MESSAGE, TOPIC_CARD_CALLBACK};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -17,11 +18,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
+
+/// 提交回调等待会话裁决的上限：会话认出提交后会**立刻**经 oneshot 回包（微秒级），此上限仅兜底
+/// 「会话恰好在忙/已退出」的极少数情况；务必 < 钉钉 3 秒回包窗口。
+const SUBMIT_ACK_TIMEOUT: Duration = Duration::from_millis(2500);
 
 /// 分发给某个会话的入站事件。
 pub enum DdInbound {
-    /// 卡片回调（已被 Router 即时空 ACK；会话据此解析提交、经 OpenAPI 置灰）。
-    Card(Value),
+    /// 卡片「提交」回调：会话裁决后经 `ack` 回包（成功置灰 / 空包），由 Router 写回连接。
+    /// 仅提交回调才转发（选项切换等非提交回调由 Router 直接空 ACK、不转发）。
+    Card { data: Value, ack: oneshot::Sender<Value> },
     /// 聊天消息（图片/文件/文字；已被底层 `StreamConn` 自动 ACK）。
     Bot(Value),
 }
@@ -167,22 +174,38 @@ async fn reader_task(mut stream: StreamConn, routes: Arc<Mutex<Routes>>, alive: 
     while let Some(ev) = stream.recv().await {
         match ev {
             StreamEvent::CardCallback { data, message_id } => {
-                // 即时空 ACK（满足钉钉 3 秒约束）；卡片置灰由会话经 OpenAPI 完成。
-                stream.respond(&message_id, json!({})).await;
+                // 非提交回调（选项切换等）：会话本就忽略 → 直接空 ACK、不转发。
+                if !card::is_submit(&data) {
+                    stream.respond(&message_id, json!({})).await;
+                    continue;
+                }
                 let otid = data
                     .get("outTrackId")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                if otid.is_empty() {
-                    continue;
-                }
-                let sink = {
+                let sink = if otid.is_empty() {
+                    None
+                } else {
                     let r = routes.lock().unwrap();
                     r.cards.get(otid).and_then(|rid| r.sinks.get(rid).cloned())
                 };
-                if let Some(tx) = sink {
-                    let _ = tx.send(DdInbound::Card(data));
-                }
+                // 提交回调：转发给会话并带 oneshot 回执；超时等其裁决，按裁决回包（满足 3 秒）。
+                // 孤儿提交（无活动会话登记 / 会话已退出 / 超时）→ 空包：诚实地不显示成功。
+                let resp = match sink {
+                    Some(tx) => {
+                        let (ack_tx, ack_rx) = oneshot::channel();
+                        if tx.send(DdInbound::Card { data, ack: ack_tx }).is_ok() {
+                            match tokio::time::timeout(SUBMIT_ACK_TIMEOUT, ack_rx).await {
+                                Ok(Ok(payload)) => payload,
+                                _ => json!({}),
+                            }
+                        } else {
+                            json!({})
+                        }
+                    }
+                    None => json!({}),
+                };
+                stream.respond(&message_id, resp).await;
             }
             StreamEvent::BotMessage(data) => {
                 dispatch_observers(&routes, &data);

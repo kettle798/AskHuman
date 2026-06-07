@@ -50,6 +50,21 @@ pub fn build_card_private_map() -> Value {
     })
 }
 
+/// 这条卡片回调是否由「提交」按钮触发（供 Router 决定回包类型，无需完整解析）。
+pub fn is_submit(data: &Value) -> bool {
+    parse_card_submit(data).is_some()
+}
+
+/// 「提交」回调的同步成功回包：置灰点击者私有 `submitted=true`，使钉钉端判定提交成功
+/// （否则空回包会被互动卡片判为「请求失败」）。公有终态文案（已提交 / 已在 X 回答）
+/// 仍由会话经 OpenAPI `update_card_private` 异步写入。`submitted` 须与 `build_card_private_map` 一致。
+pub fn submit_ack_success() -> Value {
+    json!({
+        "cardUpdateOptions": { "updatePrivateDataByKey": true },
+        "userPrivateData": { "cardParamMap": { "submitted": "true" } },
+    })
+}
+
 /// 把一条卡片回调 `data` 解析为「提交」结果；非提交 / 非本类回调返回 None。
 pub fn parse_card_submit(data: &Value) -> Option<CardSubmit> {
     let user_id = data
@@ -187,5 +202,35 @@ mod tests {
             "content": "{\"cardPrivateData\":{\"actionIds\":[\"opt_0\"],\"params\":{}}}",
         });
         assert!(parse_card_submit(&data).is_none());
+    }
+
+    #[test]
+    fn is_submit_distinguishes_submit_from_toggle() {
+        let submit = json!({
+            "userId": "u1",
+            "outTrackId": "t1",
+            "content": "{\"cardPrivateData\":{\"actionIds\":[\"submit_action\"],\"params\":{}}}",
+        });
+        let toggle = json!({
+            "userId": "u1",
+            "outTrackId": "t1",
+            "content": "{\"cardPrivateData\":{\"actionIds\":[\"opt_0\"],\"params\":{}}}",
+        });
+        assert!(is_submit(&submit));
+        assert!(!is_submit(&toggle));
+    }
+
+    #[test]
+    fn submit_ack_success_greys_private_submitted() {
+        let v = submit_ack_success();
+        // 必须置灰私有 submitted=true 且开启 updatePrivateDataByKey，否则钉钉端会判「请求失败」。
+        assert_eq!(
+            v["cardUpdateOptions"]["updatePrivateDataByKey"],
+            json!(true)
+        );
+        assert_eq!(
+            v["userPrivateData"]["cardParamMap"]["submitted"],
+            json!("true")
+        );
     }
 }

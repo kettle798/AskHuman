@@ -11,6 +11,7 @@ use std::time::Duration;
 const API_BASE: &str = "https://api.dingtalk.com";
 const OAPI_BASE: &str = "https://oapi.dingtalk.com";
 
+#[derive(Clone)]
 pub struct DingTalkClient {
     client_id: String,
     client_secret: String,
