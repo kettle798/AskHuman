@@ -15,16 +15,16 @@
 
 ## 功能预览
 
+Agent 的提问会同时送达本地 GUI 弹窗与钉钉、飞书、Telegram 等 IM 渠道，无论你在电脑前还是手机上，都能在最顺手的渠道随手回复。
+
 <p align="center">
   <img src="assets/channels.webp" alt="在本地弹窗、钉钉、飞书、Telegram 等多渠道回复 Agent" width="900">
-  <br/>
-  <em>同一个问题，可在本地弹窗或钉钉 / 飞书 / Telegram 等渠道回复</em>
 </p>
+
+每一次提问与回复都会按项目自动留存，随时翻阅历史，回顾当时的消息与你的答案。
 
 <p align="center">
   <img src="assets/history.webp" alt="按项目查看消息与回复历史" width="680">
-  <br/>
-  <em>按项目回看历史消息与当时的回复</em>
 </p>
 
 ## 安装

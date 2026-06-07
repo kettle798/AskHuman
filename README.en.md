@@ -15,16 +15,16 @@ A cross-platform human-in-the-loop tool. When an AI agent is about to end a conv
 
 ## Screenshots
 
+Your agent's questions arrive at the local GUI popup and IM channels like DingTalk, Feishu, and Telegram all at once — whether you're at your desk or on your phone, just reply from whichever is closest at hand.
+
 <p align="center">
   <img src="assets/channels.webp" alt="Reply to your agent from the local popup, DingTalk, Feishu, or Telegram" width="900">
-  <br/>
-  <em>Answer the same question from the local popup or DingTalk / Feishu / Telegram</em>
 </p>
+
+Every question and reply is kept automatically per project, so you can browse the history anytime and revisit past messages and your answers.
 
 <p align="center">
   <img src="assets/history.webp" alt="Browse message and reply history per project" width="680">
-  <br/>
-  <em>Browse past messages and your replies, grouped by project</em>
 </p>
 
 ## Install
