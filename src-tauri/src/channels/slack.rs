@@ -174,19 +174,14 @@ impl MessagingChannel for SlackSession {
         let (Some(client), Some(dm)) = (self.client.as_ref(), self.dm_channel.as_deref()) else {
             return;
         };
-        let header = i18n::tr(lang, "channel.messageFrom").replace("{source}", source);
-        // 正文用 mrkdwn：markdown 模式转换，否则仅转义；头部加粗。
-        let body = if is_markdown {
-            markdown::to_mrkdwn(&message.text)
-        } else {
-            markdown::escape(&message.text)
-        };
-        let full = if message.text.trim().is_empty() {
-            format!("*{}*", markdown::escape(&header))
-        } else {
-            format!("*{}*\n\n{}", markdown::escape(&header), body)
-        };
-        if let Err(e) = client.post_text(dm, &full).await {
+        // Slack 专属：消息头用大号 header + ✉️ 信封前缀（与问题标题同款；messageFrom 为多渠道
+        // 共用文案，故图标仅在此处加，不影响其它渠道）。正文随后作为 section（mrkdwn / 纯文本）。
+        let header = format!(
+            "✉️ {}",
+            i18n::tr(lang, "channel.messageFrom").replace("{source}", source)
+        );
+        let blocks = blockkit::build_message_blocks(&header, &message.text, is_markdown);
+        if let Err(e) = client.post_message(dm, Some(&blocks), &header).await {
             eprintln!(
                 "{}{}",
                 i18n::warn_prefix(lang),

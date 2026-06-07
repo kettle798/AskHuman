@@ -54,7 +54,7 @@ pub fn build_question_card(
 ) -> Value {
     let mut blocks: Vec<Value> = Vec::new();
     if !title.trim().is_empty() {
-        blocks.push(title_section(title));
+        blocks.push(title_block(title));
     }
     if !text.trim().is_empty() {
         blocks.push(body_section(text, is_markdown));
@@ -118,6 +118,16 @@ pub fn build_question_card(
     Value::Array(blocks)
 }
 
+/// 组装「消息」blocks：大号 header（`header` 已含调用方图标前缀，如 ✉️）+ 可选正文 section。
+/// `is_markdown` 决定正文用 mrkdwn 还是 plain_text。
+pub fn build_message_blocks(header: &str, body: &str, is_markdown: bool) -> Value {
+    let mut blocks: Vec<Value> = vec![header_block(header)];
+    if !body.trim().is_empty() {
+        blocks.push(body_section(body, is_markdown));
+    }
+    Value::Array(blocks)
+}
+
 /// 终态卡片入参。
 pub struct Finalized<'a> {
     pub title: &'a str,
@@ -135,7 +145,7 @@ pub struct Finalized<'a> {
 pub fn build_finalized_card(p: &Finalized) -> Value {
     let mut blocks: Vec<Value> = Vec::new();
     if !p.title.trim().is_empty() {
-        blocks.push(title_section(p.title));
+        blocks.push(title_block(p.title));
     }
     if !p.text.trim().is_empty() {
         blocks.push(body_section(p.text, p.is_markdown));
@@ -251,9 +261,22 @@ pub fn parse_submit(payload: &Value, options: &[String]) -> Option<CardSubmit> {
     })
 }
 
-/// 标题 section（加粗 mrkdwn）。
-fn title_section(title: &str) -> Value {
-    mrkdwn_section(&format!("*{}*", markdown::escape(title)))
+/// 大号 `header` 块（更醒目）。`text` 应已含调用方需要的图标前缀（如 ❓ / ✉️）。
+/// `header` 限 plain_text、≤150 字符；超长回退普通加粗 mrkdwn section（避免 Slack 报错）。
+fn header_block(text: &str) -> Value {
+    if text.chars().count() <= 150 {
+        json!({
+            "type": "header",
+            "text": { "type": "plain_text", "text": text, "emoji": true },
+        })
+    } else {
+        mrkdwn_section(&format!("*{}*", markdown::escape(text)))
+    }
+}
+
+/// 题首：大号标题 + ❓ 图标突出「这是一个问题」。
+fn title_block(title: &str) -> Value {
+    header_block(&format!("❓ {}", title))
 }
 
 /// 正文 section：markdown → mrkdwn；纯文本 → plain_text。
@@ -320,6 +343,18 @@ mod tests {
             .any(|b| b["element"]["type"] == "plain_text_input"));
         let actions = bs.iter().find(|b| b["type"] == "actions").unwrap();
         assert_eq!(actions["elements"][0]["action_id"], "submit");
+    }
+
+    #[test]
+    fn title_rendered_as_header_with_question_icon() {
+        let card = build_question_card("继续吗", "正文", &[], false, "L", "N", "p", "S", "n");
+        let header = blocks(&card).iter().find(|b| b["type"] == "header").unwrap();
+        assert_eq!(header["text"]["type"], "plain_text");
+        assert!(header["text"]["text"].as_str().unwrap().starts_with("❓ "));
+        // 超长标题回退为普通加粗 section（不致 Slack 报错）。
+        let long: String = "题".repeat(200);
+        let card2 = build_question_card(&long, "", &[], false, "L", "N", "p", "S", "n");
+        assert!(!blocks(&card2).iter().any(|b| b["type"] == "header"));
     }
 
     #[test]
