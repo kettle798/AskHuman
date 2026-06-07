@@ -49,7 +49,7 @@ pub fn build_question_card(
         input_placeholder,
         submit_label,
     ));
-    assemble_card(title, elements)
+    assemble_card(title, elements, true)
 }
 
 /// 终态卡片入参（复刻钉钉「已提交」态）。
@@ -75,7 +75,7 @@ pub fn build_message_card(title: &str, markdown_body: &str) -> Value {
     if !markdown_body.trim().is_empty() {
         elements.push(body_text(markdown_body, true));
     }
-    assemble_card(title, elements)
+    assemble_card(title, elements, false)
 }
 
 /// 卡片回调的同步「更新卡片」回包体：`{card:{type:"raw",data:<新卡片>}}`。
@@ -101,7 +101,7 @@ pub fn build_finalized_card(p: &Finalized) -> Value {
         p.input_placeholder,
         p.button_label,
     ));
-    assemble_card(p.title, elements)
+    assemble_card(p.title, elements, true)
 }
 
 /// 组装表单容器：每选项一个勾选器 + 输入框 + 提交按钮。
@@ -163,8 +163,39 @@ fn build_form(
     })
 }
 
-/// 组装卡片骨架：schema 2.0 + 可选 header + body.elements。`config.update_multi` 开启以支持后续更新。
-fn assemble_card(title: &str, elements: Vec<Value>) -> Value {
+/// Assemble the card skeleton: schema 2.0 + body.elements. `config.update_multi` is on to allow later updates.
+///
+/// `styled_header=true` (question/finalized cards): mimic DingTalk's "icon container" style — put a single
+/// plain-text component row at the top of the body "question icon (left) + small blue title (right)" plus a
+/// divider, separating it from the body (no native banner, since the banner title font is fixed and large and
+/// renders as a full color strip). `false` (message card): keep the plain native header title.
+fn assemble_card(title: &str, elements: Vec<Value>, styled_header: bool) -> Value {
+    if styled_header && !title.trim().is_empty() {
+        // Style matches the card exported from Feishu's card builder: small (notation) title + filled
+        // question icon (maybe_filled); blue color (the builder has no blue option, user confirmed blue).
+        let header_row = json!({
+            "tag": "div",
+            "text": {
+                "tag": "plain_text",
+                "content": title,
+                "text_size": "notation",
+                "text_align": "left",
+                "text_color": "blue",
+            },
+            "icon": { "tag": "standard_icon", "token": "maybe_filled", "color": "blue" },
+            "margin": "0px 0px 0px 0px",
+        });
+        let mut body = vec![
+            header_row,
+            json!({ "tag": "hr", "margin": "0px 0px 0px 0px" }),
+        ];
+        body.extend(elements);
+        return json!({
+            "schema": "2.0",
+            "config": { "update_multi": true },
+            "body": { "elements": body },
+        });
+    }
     let mut card = json!({
         "schema": "2.0",
         "config": { "update_multi": true },
@@ -250,8 +281,12 @@ mod tests {
             "提交",
         );
         assert_eq!(card["schema"], "2.0");
-        assert_eq!(card["header"]["title"]["content"], "Question 1/2");
+        // Question card: title is now a body-top "question icon + blue title" row + divider (DingTalk-style), no native header.
+        assert!(card.get("header").is_none());
         let elements = card["body"]["elements"].as_array().unwrap();
+        assert_eq!(elements[0]["text"]["content"], "Question 1/2");
+        assert_eq!(elements[0]["icon"]["token"], "maybe_filled");
+        assert_eq!(elements[1]["tag"], "hr");
         // 正文 + 表单容器。
         let form = elements.iter().find(|e| e["tag"] == "form").unwrap();
         let fe = form["elements"].as_array().unwrap();

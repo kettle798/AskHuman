@@ -235,6 +235,17 @@ async fn ask_question(
     let mut selected: Vec<String> = Vec::new();
     let mut user_input = String::new();
 
+    // Question title: when there's no source header, fall back to a fixed title (consistent with
+    // DingTalk/Feishu) and prefix it with the question icon `❓`, separating the question area from the
+    // body (Telegram messages are plain text with no card frame, so this prefix simulates a card title).
+    let title = if header.trim().is_empty() {
+        i18n::tr(lang, "channel.tgTitleFallback").to_string()
+    } else {
+        header.to_string()
+    };
+    let header = format!("\u{2753} {}", title);
+    let header = header.as_str();
+
     // 单卡片：正文 = 题干 + 选项清单（A. xxx，按钮只放字母规避超长选项显示不全）+ 补充提示；
     // inline 键盘 = 字母选项（可多选）+「提交」。
     let content = card_content(question_text, &options);

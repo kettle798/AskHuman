@@ -192,6 +192,8 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "💬 需要补充可直接在这里发文字消息。本卡片发出后、点「提交」前你发送的文字都会一并提交。",
         ),
         "channel.fileSendFailed" => pick(lang, "⚠️ Failed to send file: {name}", "⚠️ 文件发送失败：{name}"),
+        // Telegram question title (fallback when there's no source header), consistent with DingTalk/Feishu.
+        "channel.tgTitleFallback" => pick(lang, "Question", "提问"),
         "channel.ddTitleFallback" => pick(lang, "Question", "提问"),
         "channel.ddHintFree" => pick(
             lang,
