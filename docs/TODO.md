@@ -43,7 +43,8 @@
 - [x] **Phase 3 实时配置（验收 #7）**：弹窗开着时改 `config.json` 主题→浅色 / 语言→`zh` → 整窗（含毛玻璃）实时切浅色 + 界面实时切中文。（**期间修复**：`ConfigChanged` 之前只切前端 CSS、未切原生窗口外观，导致毛玻璃下「网页浅、窗体深」；已补 `apply_theme_to_windows` 同步原生 `set_theme`。语言合法值仅 `auto/en/zh`，`zh-CN` 会被当未知回退系统。）
 - [x] **Phase 3 凭据热重载（惰性失效）**：禁用 Telegram → `daemon.log` 出现 `config reloaded`、`im conns` 即去掉 telegram、下个请求不再发 Telegram；重新启用 → 下个请求恢复。
 - [x] **临时目录清理（A10）**：构造 mtime>24h 的 `temp/askhuman/<id>/` 与一个新目录 → `daemon restart` 触发启动清理 → 过期目录被删、新目录与刚产出的图片目录保留。
-- [x] **生命周期**：`daemon stop` → `status` not running；`daemon start/restart` → running（`im conns: none`，惰性按需建连）；二进制指纹换新（重装后旧 daemon 自动让位、新 daemon 接管）。空闲超时（5 分钟）逻辑在位，未做实时等待验证。
+- [x] **生命周期**：`daemon stop` → `status` not running；`daemon start/restart` → running（`im conns: none`，惰性按需建连）；二进制指纹换新（重装后旧 daemon 自动让位、新 daemon 接管）。
+- [x] **空闲自动回收**：用 `ASKHUMAN_DAEMON_IDLE_SECS` 把超时调短（15s）实测三类——(A) 无请求约 30s（受 30s 自查档限制）自动退出、清理 socket/meta；(B) 弹窗打开期间连接常驻 → `active≥1` → 全程不回收（实测 120s 远超阈值），作答完无活动后约一个自查档即回收；(C) 任意连接（含 `daemon status` 轮询）会重置空闲计时「续命」，停止轮询后下一档回收。检测只看 `daemon.log` + socket 文件存废，避免连接重置计时。
 - [x] **自动识别 userId/open_id（Q6）**：设置窗口点「自动识别」→ 经 daemon `Detect`（无现有连接时临时开连）→ 私聊机器人发验证码 → 钉钉 UserId、飞书 Open ID 均自动回填成功。
 
 ## 后续增强 / 性能优化
