@@ -1,7 +1,7 @@
 {
   "name": "askhuman",
   "version": "0.4.3",
-  "description": "Human-in-the-loop interaction tool. The `AskHuman` CLI pops up a window (or uses Telegram) to collect human input and prints the result to stdout — usable standalone or as a dependency.",
+  "description": "Human-in-the-loop interaction tool. The `AskHuman` CLI pops up a window (or uses Telegram / Slack / DingTalk / Feishu) to collect a human response and return it to the AI — usable standalone or as a dependency.",
   "license": "MIT",
   "author": "Naituw",
   "homepage": "https://github.com/Naituw/AskHuman",
