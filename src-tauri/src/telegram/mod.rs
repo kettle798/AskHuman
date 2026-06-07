@@ -221,7 +221,13 @@ impl TelegramClient {
     }
 
     /// 编辑消息文本（用于卡片终态）。不传 `reply_markup` 即移除按钮。
-    pub async fn edit_message_text(&self, message_id: i64, text: &str, parse_mode: Option<&str>) {
+    /// 返回 `Err` 表示服务端拒绝（如 HTML 解析失败），调用方可据此回退纯文本。
+    pub async fn edit_message_text(
+        &self,
+        message_id: i64,
+        text: &str,
+        parse_mode: Option<&str>,
+    ) -> Result<(), TelegramError> {
         let mut params = serde_json::Map::new();
         params.insert("chat_id".into(), json!(self.chat_id));
         params.insert("message_id".into(), json!(message_id));
@@ -229,7 +235,9 @@ impl TelegramClient {
         if let Some(pm) = parse_mode {
             params.insert("parse_mode".into(), json!(pm));
         }
-        let _ = self.call("editMessageText", Value::Object(params)).await;
+        self.call("editMessageText", Value::Object(params))
+            .await
+            .map(|_| ())
     }
 
     /// 发送测试消息验证配置（`lang` 决定远程消息与返回提示的语言）。

@@ -89,7 +89,7 @@ AskHuman/
         feishu.rs            飞书 Channel（长连接收 + 卡片 JSON 2.0 / 文本回退）
       telegram/
         mod.rs               TelegramClient：reqwest 手写 Bot API + 错误类型
-        markdown.rs          标准 Markdown → Telegram MarkdownV2（保护代码块/转义）
+        markdown.rs          标准 Markdown → Telegram HTML（粗/斜/删/码/块/引/链 + 表格转等宽代码块 + 列表 •；仅转义 < > &，标签天然配对不回退）
         router.rs            TgRouter：单一长轮询(单 offset) 独占 + 按卡片 message_id / 最新活动分发
       dingtalk/
         mod.rs / token.rs / client.rs / stream.rs / card.rs / textfile.rs / docx.rs

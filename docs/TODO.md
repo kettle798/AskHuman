@@ -40,6 +40,10 @@
 ### Telegram ✅
 - 用 `answerCallbackQuery`，机制不同；已人工回归确认：点按钮无报错、卡片正常更新、答案送达，无需改动。
 
+### 消息 / 卡片正文的 Markdown 渲染（飞书、Telegram）✅
+- **飞书**：消息提示无原生 Markdown 文本类型 → `send_message_prompt` 在 `is_markdown` 时改发 **Markdown 卡片**（`card::build_message_card`）。
+- **Telegram**：原 `MarkdownV2` 转义挑剔、缺斜体/删除线/表格/列表，且任一特殊字符不配对会整条回退纯文本。改为 **`parse_mode=HTML`**（`telegram/markdown.rs::to_html`）：仅转义 `< > &`，`<b>/<i>/<s>/<code>/<pre>/<blockquote>/<a>` 标签天然配对；标题统一加粗（HTML 无字号）、表格转等宽代码块、无序列表 `•`、`_` 带词边界判断避免吃 snake_case；卡片活动态/终态同走 HTML（终态解析失败回退纯文本编辑）。已真机预览确认。
+
 ## daemon 架构：待补充的人工实测
 
 > 已通过的真机实测（install 后经新 daemon→GUI Helper 链路）：① 单题弹窗作答（退出 0）；② **并发两请求弹窗不串台**（A→A、B→B）；③ 取消返回 `[Status]` 再问指引（退出 0）；④ `daemon status` 显示 running 且 `im conns: dingtalk, feishu, telegram`（三连接常热单实例）。下列为尚未逐项跑过、建议后续补做的人工测试：

@@ -269,7 +269,7 @@ async fn ask_question(
         {
             // 本端胜出：卡片改「已回复」终态、去键盘。
             let status = i18n::tr(lang, "channel.tgReplied");
-            finalize_card(client, card_message_id, header, &content, &status).await;
+            finalize_card(client, card_message_id, header, &content, &status, is_markdown).await;
             events.clear_active(card_message_id);
             return Some(QuestionAnswer {
                 selected_options: selected,
@@ -289,30 +289,44 @@ async fn ask_question(
 
     // 被抢答：卡片改「已在{赢家}回答」终态、去键盘。
     let status = i18n::tr(lang, "channel.tgAnsweredVia").replace("{source}", &preempt.winner());
-    finalize_card(client, card_message_id, header, &content, &status).await;
+    finalize_card(client, card_message_id, header, &content, &status, is_markdown).await;
     events.clear_active(card_message_id);
     None
 }
 
 /// 把卡片编辑为终态：保留头部 + 内容（题干 + 选项清单），追加状态行，并移除按钮（不传 reply_markup）。
+/// 优先按 HTML 渲染（与活动态一致）；解析失败时回退纯文本，确保终态一定写入。
 async fn finalize_card(
     client: &TelegramClient,
     card_message_id: i64,
     header: &str,
     content: &str,
     status: &str,
+    is_markdown: bool,
 ) {
-    let mut text = String::new();
-    if !header.is_empty() {
-        text.push_str(header);
-        text.push_str("\n\n");
+    let body = if content.trim().is_empty() {
+        status.to_string()
+    } else {
+        format!("{}\n\n{}", content, status)
+    };
+    let html = compose_html(header, &body, is_markdown);
+    if client
+        .edit_message_text(card_message_id, &html, Some("HTML"))
+        .await
+        .is_err()
+    {
+        let mut plain = String::new();
+        if !header.is_empty() {
+            plain.push_str(header);
+            plain.push_str("\n\n");
+        }
+        if !content.trim().is_empty() {
+            plain.push_str(content);
+            plain.push_str("\n\n");
+        }
+        plain.push_str(status);
+        let _ = client.edit_message_text(card_message_id, &plain, None).await;
     }
-    if !content.trim().is_empty() {
-        text.push_str(content);
-        text.push_str("\n\n");
-    }
-    text.push_str(status);
-    client.edit_message_text(card_message_id, &text, None).await;
 }
 
 /// 卡片正文内容：题干 +（选项清单，每行「字母. 选项全文」）。无题干/无选项各自省略。
@@ -359,32 +373,31 @@ async fn send_composed(
         (true, false) => body.to_string(),
         (false, false) => format!("{}\n\n{}", header, body),
     };
-    // markdown 正文交给 markdown::process；非 markdown 正文整体转义；头部始终加粗。
-    let md = if is_markdown {
-        match (header.is_empty(), body.is_empty()) {
-            (true, true) => "…".to_string(),
-            (false, true) => markdown::process(&format!("**{}**", header)),
-            (true, false) => markdown::process(body),
-            (false, false) => markdown::process(&format!("**{}**\n\n{}", header, body)),
-        }
-    } else {
-        match (header.is_empty(), body.is_empty()) {
-            (true, true) => "…".to_string(),
-            (false, true) => format!("*{}*", markdown::escape_all(header)),
-            (true, false) => markdown::escape_all(body),
-            (false, false) => format!(
-                "*{}*\n\n{}",
-                markdown::escape_all(header),
-                markdown::escape_all(body)
-            ),
-        }
-    };
+    // 用 Telegram HTML：头部始终加粗（仅转义）；markdown 正文走 to_html，非 markdown 正文仅转义。
+    let html = compose_html(header, body, is_markdown);
     match client
-        .send_message(&md, Some("MarkdownV2"), inline.clone())
+        .send_message(&html, Some("HTML"), inline.clone())
         .await
     {
         Ok(id) => id,
         Err(_) => client.send_message(&plain, None, inline).await.unwrap_or(0),
+    }
+}
+
+/// 组装「加粗头部 + 正文」为 Telegram HTML。头部为纯文本（仅转义），正文按 `is_markdown` 决定是否解析。
+fn compose_html(header: &str, body: &str, is_markdown: bool) -> String {
+    let body_html = |b: &str| {
+        if is_markdown {
+            markdown::to_html(b)
+        } else {
+            markdown::escape_html(b)
+        }
+    };
+    match (header.is_empty(), body.is_empty()) {
+        (true, true) => "…".to_string(),
+        (false, true) => format!("<b>{}</b>", markdown::escape_html(header)),
+        (true, false) => body_html(body),
+        (false, false) => format!("<b>{}</b>\n\n{}", markdown::escape_html(header), body_html(body)),
     }
 }
 
