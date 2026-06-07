@@ -5,6 +5,7 @@ pub mod coordinator;
 use crate::channels::dingding::DingTalkChannel;
 use crate::channels::feishu::FeishuChannel;
 use crate::channels::popup::PopupChannel;
+use crate::channels::slack::SlackChannel;
 use crate::channels::telegram::TelegramChannel;
 use crate::channels::Channel;
 use crate::cli::{image_writer, output};
@@ -12,6 +13,7 @@ use crate::config::{AppConfig, ThemeMode, WindowEffect};
 use crate::i18n::{self, Lang};
 use crate::dingtalk::client::DingTalkClient;
 use crate::feishu::client::FeishuClient;
+use crate::slack::client::SlackClient;
 use crate::models::{AskRequest, ChannelAction, ChannelResult, QuestionAnswer};
 use crate::telegram::TelegramClient;
 use coordinator::Coordinator;
@@ -158,9 +160,20 @@ pub(crate) fn is_feishu_active(config: &AppConfig) -> bool {
         && FeishuClient::new(fs).is_ok()
 }
 
+/// Slack 是否已配置且可用（构造 client 成功——双 token 齐备——且 user_id 非空即视为可用）。
+pub(crate) fn is_slack_active(config: &AppConfig) -> bool {
+    let sl = &config.channels.slack;
+    sl.enabled
+        && !sl.user_id.trim().is_empty()
+        && SlackClient::new(sl).is_ok()
+}
+
 /// 是否存在任一可用的会话型消息渠道。
 fn has_active_messaging(config: &AppConfig) -> bool {
-    is_telegram_active(config) || is_dingding_active(config) || is_feishu_active(config)
+    is_telegram_active(config)
+        || is_dingding_active(config)
+        || is_feishu_active(config)
+        || is_slack_active(config)
 }
 
 /// 收集全部可用的会话型渠道外层（供 GUI 路径注册并行抢答）。
@@ -174,6 +187,9 @@ fn active_messaging_channels(config: &AppConfig) -> Vec<Arc<dyn Channel>> {
     }
     if is_feishu_active(config) {
         channels.push(Arc::new(FeishuChannel::new(config.channels.feishu.clone())));
+    }
+    if is_slack_active(config) {
+        channels.push(Arc::new(SlackChannel::new(config.channels.slack.clone())));
     }
     channels
 }
@@ -233,7 +249,8 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
     // 并行消息渠道数（用于抢答收尾计算落败端数）+ 共享抢答信号。
     let messaging_count = is_telegram_active(&config) as usize
         + is_dingding_active(&config) as usize
-        + is_feishu_active(&config) as usize;
+        + is_feishu_active(&config) as usize
+        + is_slack_active(&config) as usize;
     let preempt = Arc::new(crate::channels::Preemption::new());
     let coordinator = Coordinator::new_headless(
         request.clone(),
@@ -342,6 +359,40 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
                         "{}{}",
                         i18n::warn_prefix(lang),
                         i18n::tr(lang, "app.feishuInvalid").replace("{e}", &e)
+                    ));
+                    return;
+                }
+                run_conversation(&mut session, &req, preempt, sink).await;
+            }));
+        }
+
+        if is_slack_active(&config) {
+            use crate::channels::slack::SlackSession;
+            use crate::slack::router::SlRouter;
+            let cfg = config.channels.slack.clone();
+            let req = request.clone();
+            let sink = coordinator.clone();
+            let preempt = preempt.clone();
+            handles.push(tokio::spawn(async move {
+                // 单进程：每进程起一个仅挂本会话的 Router（统一走 Router 路径，独占一条 Socket Mode 连接）。
+                let router = match SlRouter::connect(&cfg).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        stderr_redirect::eprintln_real(&format!(
+                            "{}{}",
+                            i18n::warn_prefix(lang),
+                            i18n::tr(lang, "app.slackInvalid").replace("{e}", &e)
+                        ));
+                        return;
+                    }
+                };
+                let events = router.register();
+                let mut session = SlackSession::new(cfg, events);
+                if let Err(e) = session.open().await {
+                    stderr_redirect::eprintln_real(&format!(
+                        "{}{}",
+                        i18n::warn_prefix(lang),
+                        i18n::tr(lang, "app.slackInvalid").replace("{e}", &e)
                     ));
                     return;
                 }
@@ -534,6 +585,9 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::feishu_test,
             crate::commands::feishu_detect_prepare,
             crate::commands::feishu_detect_wait,
+            crate::commands::slack_test,
+            crate::commands::slack_detect_prepare,
+            crate::commands::slack_detect_wait,
             crate::commands::open_history,
             crate::commands::history_init,
             crate::commands::get_history,

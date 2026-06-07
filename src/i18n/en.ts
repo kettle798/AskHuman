@@ -158,6 +158,13 @@ export default {
       feishuBaseUrl: "Service domain",
       feishuBaseUrlPlaceholder:
         "Leave empty for Feishu (open.feishu.cn); use open.larksuite.com for Lark",
+      slackTitle: "Slack",
+      slackBotToken: "Bot Token",
+      slackAppToken: "App-Level Token",
+      slackUserId: "User ID",
+      slackDetectHint:
+        "Use the target Slack account to DM the bot with: {code} (valid for 120s)",
+      slackDetected: "Detected and filled User ID: {userId}",
       moreSoon: "More channels coming soon",
     },
     history: {
@@ -205,6 +212,7 @@ export default {
       dingding: "DingTalk",
       feishu: "Feishu",
       telegram: "Telegram",
+      slack: "Slack",
       unknown: "Unknown",
     },
     time: {

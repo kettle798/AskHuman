@@ -143,11 +143,19 @@ export interface FeishuChannelConfig {
   baseUrl: string;
 }
 
+export interface SlackChannelConfig {
+  enabled: boolean;
+  botToken: string;
+  appToken: string;
+  userId: string;
+}
+
 export interface ChannelsConfig {
   popup: PopupChannelConfig;
   telegram: TelegramChannelConfig;
   dingding: DingTalkChannelConfig;
   feishu: FeishuChannelConfig;
+  slack: SlackChannelConfig;
 }
 
 export interface AppConfig {
@@ -160,6 +168,8 @@ export interface SecretsPresent {
   dingdingSecret: boolean;
   feishuSecret: boolean;
   telegramToken: boolean;
+  slackBotToken: boolean;
+  slackAppToken: boolean;
 }
 
 /** Settings payload: config with secrets blanked + per-secret presence flags. */
@@ -178,6 +188,8 @@ export interface SecretActions {
   dingdingSecret: SecretAction;
   feishuSecret: SecretAction;
   telegramToken: SecretAction;
+  slackBotToken: SecretAction;
+  slackAppToken: SecretAction;
 }
 
 export interface HookStatus {
@@ -226,5 +238,22 @@ export interface FeishuWaitArgs {
   appId: string;
   appSecret: string;
   baseUrl: string;
+  code: string;
+}
+
+export interface SlackTestArgs {
+  botToken: string;
+  appToken: string;
+  userId: string;
+}
+
+export interface SlackDetectArgs {
+  botToken: string;
+  appToken: string;
+}
+
+export interface SlackWaitArgs {
+  botToken: string;
+  appToken: string;
   code: string;
 }

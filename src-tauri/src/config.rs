@@ -13,7 +13,7 @@ struct SecretSpec {
     field: fn(&mut AppConfig) -> &mut String,
 }
 
-const SECRET_SPECS: [SecretSpec; 3] = [
+const SECRET_SPECS: [SecretSpec; 5] = [
     SecretSpec {
         account: secrets::ACCOUNT_DINGTALK_SECRET,
         field: |c| &mut c.channels.dingding.client_secret,
@@ -25,6 +25,14 @@ const SECRET_SPECS: [SecretSpec; 3] = [
     SecretSpec {
         account: secrets::ACCOUNT_TELEGRAM_TOKEN,
         field: |c| &mut c.channels.telegram.bot_token,
+    },
+    SecretSpec {
+        account: secrets::ACCOUNT_SLACK_BOT_TOKEN,
+        field: |c| &mut c.channels.slack.bot_token,
+    },
+    SecretSpec {
+        account: secrets::ACCOUNT_SLACK_APP_TOKEN,
+        field: |c| &mut c.channels.slack.app_token,
     },
 ];
 
@@ -213,6 +221,32 @@ impl Default for FeishuChannelConfig {
     }
 }
 
+/// Slack 渠道配置。
+/// 形态：Slack App + Socket Mode 长连接(WebSocket) + 机器人 + 单聊(DM)。
+/// 鉴权双 token：Bot Token（`xoxb-…`，Web API 发送）+ App-Level Token（`xapp-…`，Socket Mode 建连）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SlackChannelConfig {
+    pub enabled: bool,
+    /// Bot Token（`xoxb-…`）：所有 Web API 调用（chat.* / conversations.* / files.* / auth.test）。
+    pub bot_token: String,
+    /// App-Level Token（`xapp-…`，scope=connections:write）：Socket Mode 建连。
+    pub app_token: String,
+    /// 接收/作答用户的 Slack User ID（`U…`，单聊；发送前经 conversations.open 解析 DM 频道）。
+    pub user_id: String,
+}
+
+impl Default for SlackChannelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bot_token: String::new(),
+            app_token: String::new(),
+            user_id: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ChannelsConfig {
@@ -220,6 +254,7 @@ pub struct ChannelsConfig {
     pub telegram: TelegramChannelConfig,
     pub dingding: DingTalkChannelConfig,
     pub feishu: FeishuChannelConfig,
+    pub slack: SlackChannelConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -403,6 +438,11 @@ mod tests {
     assert!(!c.channels.feishu.enabled);
     assert!(c.channels.feishu.app_id.is_empty());
     assert_eq!(c.channels.feishu.base_url, "https://open.feishu.cn");
+    // Slack 默认未启用、字段为空。
+    assert!(!c.channels.slack.enabled);
+    assert!(c.channels.slack.bot_token.is_empty());
+    assert!(c.channels.slack.app_token.is_empty());
+    assert!(c.channels.slack.user_id.is_empty());
 }
 
     #[test]

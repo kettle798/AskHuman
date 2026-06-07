@@ -4,6 +4,7 @@ pub mod conversation;
 pub mod dingding;
 pub mod feishu;
 pub mod popup;
+pub mod slack;
 pub mod telegram;
 
 use crate::app::coordinator::Coordinator;

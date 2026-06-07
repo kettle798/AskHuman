@@ -31,12 +31,14 @@ mod unix_impl {
     use super::request::{self, RequestEntry, RequestRegistry};
     use crate::channels::dingding::DingTalkChannel;
     use crate::channels::feishu::FeishuChannel;
+    use crate::channels::slack::SlackChannel;
     use crate::channels::telegram::TelegramChannel;
     use crate::channels::Channel;
     use crate::client;
     use crate::config::AppConfig;
     use crate::dingtalk::router::DdRouter;
     use crate::feishu::router::FsRouter;
+    use crate::slack::router::SlRouter;
     use crate::telegram::router::TgRouter;
     use crate::i18n::Lang;
     use crate::ipc::{
@@ -143,6 +145,8 @@ mod unix_impl {
         fs_router: tokio::sync::Mutex<Option<Arc<FsRouter>>>,
         /// Telegram 长轮询 Router（惰性建连、常热复用；单一 offset）。
         tg_router: tokio::sync::Mutex<Option<Arc<TgRouter>>>,
+        /// Slack Socket Mode Router（惰性建连、常热复用；连接死亡后按需重连）。
+        sl_router: tokio::sync::Mutex<Option<Arc<SlRouter>>>,
         /// 最近一次已知配置快照（config watch 据此比对差异，决定哪些 Router 需失效，A12）。
         config: Mutex<AppConfig>,
     }
@@ -183,6 +187,7 @@ mod unix_impl {
             dd_router: tokio::sync::Mutex::new(None),
             fs_router: tokio::sync::Mutex::new(None),
             tg_router: tokio::sync::Mutex::new(None),
+            sl_router: tokio::sync::Mutex::new(None),
             config: Mutex::new(AppConfig::load()),
         });
 
@@ -249,6 +254,7 @@ mod unix_impl {
         *state.dd_router.lock().await = None;
         *state.fs_router.lock().await = None;
         *state.tg_router.lock().await = None;
+        *state.sl_router.lock().await = None;
         cleanup();
         log("stopped");
         0
@@ -608,6 +614,31 @@ mod unix_impl {
         }
     }
 
+    /// 取得（必要时惰性建连）Slack Router；连接已死则重连。失败返回 None。
+    async fn ensure_sl_router(
+        state: &Arc<ServerState>,
+        cfg: &crate::config::SlackChannelConfig,
+    ) -> Option<Arc<SlRouter>> {
+        let mut guard = state.sl_router.lock().await;
+        if let Some(r) = guard.as_ref() {
+            if r.is_alive() {
+                return Some(r.clone());
+            }
+        }
+        match SlRouter::connect(cfg).await {
+            Ok(r) => {
+                log("slack router connected");
+                *guard = Some(r.clone());
+                Some(r)
+            }
+            Err(e) => {
+                log(&format!("slack router connect failed: {}", e));
+                *guard = None;
+                None
+            }
+        }
+    }
+
     /// 按当前配置把可用 IM 渠道挂到请求协调器上（与弹窗并行抢答）。返回是否至少挂上一个。
     /// 失败的渠道经 `Warn` 流给 CLI stderr，并记 daemon.log。
     async fn attach_im_channels(
@@ -692,6 +723,29 @@ mod unix_impl {
             }
         }
 
+        if crate::app::is_slack_active(&config) {
+            let sl = &config.channels.slack;
+            match ensure_sl_router(state, sl).await {
+                Some(router) => {
+                    let ch: Arc<dyn Channel> = Arc::new(SlackChannel::shared(sl.clone(), router));
+                    entry.coordinator.register(ch.clone());
+                    ch.start(&request, sink.clone());
+                    attached = true;
+                }
+                None => {
+                    let _ = ipc::write_msg(w, &ServerMsg::Warn {
+                        text: format!(
+                            "{}{}",
+                            crate::i18n::warn_prefix(lang),
+                            crate::i18n::tr(lang, "channel.slConfigInvalidSkip")
+                                .replace("{e}", "Socket Mode connection failed"),
+                        ),
+                    })
+                    .await;
+                }
+            }
+        }
+
         attached
     }
 
@@ -728,6 +782,16 @@ mod unix_impl {
         {
             v.push("telegram".to_string());
         }
+        if state
+            .sl_router
+            .lock()
+            .await
+            .as_ref()
+            .map(|r| r.is_alive())
+            .unwrap_or(false)
+        {
+            v.push("slack".to_string());
+        }
         v
     }
 
@@ -738,6 +802,7 @@ mod unix_impl {
         let result = match req.kind.as_str() {
             "dingtalk" => detect_dingtalk(state, req, lang).await,
             "feishu" => detect_feishu(state, req, lang).await,
+            "slack" => detect_slack(state, req, lang).await,
             other => Err(format!("unknown detect kind: {}", other)),
         };
         let msg = match result {
@@ -874,6 +939,69 @@ mod unix_impl {
         }
     }
 
+    /// Slack 识别：优先观察现有同 app_token 的活动连接（零冲突），否则临时开连。
+    /// app_key = App Token（Socket 复用键），app_secret = Bot Token（建连校验齐全）。
+    async fn detect_slack(
+        state: &Arc<ServerState>,
+        req: &DetectRequest,
+        lang: Lang,
+    ) -> Result<String, String> {
+        let code = req.code.trim().to_string();
+        if code.is_empty() {
+            return Err(crate::i18n::tr(lang, "cmd.detectCodeInvalid").to_string());
+        }
+        let existing = {
+            let guard = state.sl_router.lock().await;
+            match guard.as_ref() {
+                Some(r) if r.is_alive() && r.app_token() == req.app_key.trim() => {
+                    Some(r.observe_message())
+                }
+                _ => None,
+            }
+        };
+        if let Some(mut rx) = existing {
+            return wait_sl_code(&mut rx, &code, lang).await;
+        }
+        let cfg = crate::config::SlackChannelConfig {
+            enabled: true,
+            bot_token: req.app_secret.trim().to_string(),
+            app_token: req.app_key.trim().to_string(),
+            user_id: String::new(),
+        };
+        let router = SlRouter::connect(&cfg).await?;
+        let mut rx = router.observe_message();
+        let out = wait_sl_code(&mut rx, &code, lang).await;
+        drop(rx);
+        drop(router);
+        out
+    }
+
+    /// 等 Slack 单聊文本内容等于识别码的消息，返回发送者 user id；120s 超时。
+    async fn wait_sl_code(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+        code: &str,
+        lang: Lang,
+    ) -> Result<String, String> {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(crate::i18n::tr(lang, "cmd.detectTimeout").to_string());
+            }
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Some(event)) => {
+                    let user = event.get("user").and_then(|v| v.as_str()).unwrap_or("");
+                    let text = event.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    if !user.is_empty() && text.trim() == code {
+                        return Ok(user.to_string());
+                    }
+                }
+                Ok(None) => return Err(crate::i18n::tr(lang, "cmd.streamDisconnected").to_string()),
+                Err(_) => return Err(crate::i18n::tr(lang, "cmd.detectTimeout").to_string()),
+            }
+        }
+    }
+
     /// 从飞书 im.message.receive_v1 的 event 取 (发送者 open_id, 文本)。非文本消息返回 None。
     fn fs_text_and_sender(event: &serde_json::Value) -> Option<(String, String)> {
         let open_id = event
@@ -981,6 +1109,13 @@ mod unix_impl {
             || old.channels.telegram.api_base_url != new.channels.telegram.api_base_url;
         if tg_changed {
             *state.tg_router.lock().await = None;
+        }
+
+        let sl_changed = !crate::app::is_slack_active(new)
+            || old.channels.slack.bot_token != new.channels.slack.bot_token
+            || old.channels.slack.app_token != new.channels.slack.app_token;
+        if sl_changed {
+            *state.sl_router.lock().await = None;
         }
     }
 

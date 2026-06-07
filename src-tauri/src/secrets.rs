@@ -18,6 +18,9 @@ const SERVICE: &str = "com.naituw.humaninloop";
 pub const ACCOUNT_DINGTALK_SECRET: &str = "channels.dingding.clientSecret";
 pub const ACCOUNT_FEISHU_SECRET: &str = "channels.feishu.appSecret";
 pub const ACCOUNT_TELEGRAM_TOKEN: &str = "channels.telegram.botToken";
+/// Slack Bot Token (`xoxb-…`, Web API) and App-Level Token (`xapp-…`, Socket Mode).
+pub const ACCOUNT_SLACK_BOT_TOKEN: &str = "channels.slack.botToken";
+pub const ACCOUNT_SLACK_APP_TOKEN: &str = "channels.slack.appToken";
 
 /// The secret store could not be reached (e.g. no Secret Service on a headless Linux box).
 /// Callers treat this as "use the plaintext config fallback".

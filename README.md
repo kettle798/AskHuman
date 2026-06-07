@@ -10,14 +10,14 @@
 
 - 单一可执行文件 `AskHuman`，允许 Agent 通过 CLI 方式调用提问
 - 基于 **Tauri 2（Rust + Vue 3）**，支持 **macOS / Windows / Linux**
-- 多通信渠道：本地弹窗 + Telegram + 钉钉 + 飞书，可独立开关、多开并行「抢答」
+- 多通信渠道：本地弹窗 + Telegram + 钉钉 + 飞书 + Slack，可独立开关、多开并行「抢答」
 
 ## 功能预览
 
-Agent 的提问会同时送达本地 GUI 弹窗与钉钉、飞书、Telegram，并提供关键上下文、附件及预选项，无论你是否在电脑前，都能随时收到通知并回复。
+Agent 的提问会同时送达本地 GUI 弹窗与钉钉、飞书、Slack、Telegram，并提供关键上下文、附件及预选项，无论你是否在电脑前，都能随时收到通知并回复。
 
 <p align="center">
-  <img src="assets/channels.webp" alt="在本地弹窗、钉钉、飞书、Telegram 等多渠道回复 Agent" width="900">
+  <img src="assets/channels.webp" alt="在本地弹窗、钉钉、飞书、Slack、Telegram 等多渠道回复 Agent" width="900">
 </p>
 
 工具会自动记录最近的 Agent 提问及人类回答历史，在回答新问题时，可以随时参考。（若不需要历史记录，可以在设置中关闭）
@@ -85,7 +85,7 @@ if (isAvailable()) {
 
 ## 配置
 
-配置存于 `~/.askhuman/config.json`，由设置界面读写。通用配置与环境变量见[配置文档](docs/wiki/configuration.md)；各通信渠道接入见 [Telegram](docs/wiki/telegram-setup.md) · [钉钉](docs/wiki/dingtalk-setup.md) · [飞书 / Lark](docs/wiki/feishu-setup.md)。
+配置存于 `~/.askhuman/config.json`，由设置界面读写。通用配置与环境变量见[配置文档](docs/wiki/configuration.md)；各通信渠道接入见 [Telegram](docs/wiki/telegram-setup.md) · [钉钉](docs/wiki/dingtalk-setup.md) · [飞书 / Lark](docs/wiki/feishu-setup.md) · [Slack](docs/wiki/slack-setup.md)。
 
 ## 开发
 

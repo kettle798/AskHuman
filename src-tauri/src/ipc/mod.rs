@@ -59,7 +59,7 @@ pub struct StatusInfo {
     pub uptime_secs: u64,
     pub socket: String,
     pub active_requests: usize,
-    /// 当前常热的 IM 长连接（"dingtalk" / "feishu" / "telegram"），按已建连且存活计入。
+    /// 当前常热的 IM 长连接（"dingtalk" / "feishu" / "telegram" / "slack"），按已建连且存活计入。
     #[serde(default)]
     pub im_connections: Vec<String>,
 }
@@ -91,13 +91,13 @@ pub struct TaskRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetectRequest {
-    /// 渠道类型："dingtalk" | "feishu"。
+    /// 渠道类型："dingtalk" | "feishu" | "slack"。
     pub kind: String,
-    /// 钉钉 client_id / 飞书 app_id（也是「是否复用现有连接」的匹配键）。
+    /// 钉钉 client_id / 飞书 app_id / Slack App Token（也是「是否复用现有连接」的匹配键）。
     pub app_key: String,
-    /// 钉钉 client_secret / 飞书 app_secret。
+    /// 钉钉 client_secret / 飞书 app_secret / Slack Bot Token。
     pub app_secret: String,
-    /// 飞书自定义 base_url（钉钉忽略，可传空）。
+    /// 飞书自定义 base_url（钉钉/Slack 忽略，可传空）。
     pub base_url: String,
     /// 用户需私聊发送的识别码。
     pub code: String,

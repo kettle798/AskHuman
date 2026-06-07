@@ -10,14 +10,14 @@ A cross-platform human-in-the-loop tool. When an AI agent is about to end a conv
 
 - A single executable `AskHuman` that lets agents ask questions through the CLI
 - Built on **Tauri 2 (Rust + Vue 3)**, supports **macOS / Windows / Linux**
-- Multiple channels: local popup + Telegram + DingTalk + Feishu, independently toggleable and racing in parallel when several are on
+- Multiple channels: local popup + Telegram + DingTalk + Feishu + Slack, independently toggleable and racing in parallel when several are on
 
 ## Screenshots
 
-Your agent's questions arrive at the local GUI popup and DingTalk, Feishu, and Telegram all at once, along with the key context, attachments, and preset options — so whether or not you're at your desk, you get notified and can reply anytime.
+Your agent's questions arrive at the local GUI popup and DingTalk, Feishu, Slack, and Telegram all at once, along with the key context, attachments, and preset options — so whether or not you're at your desk, you get notified and can reply anytime.
 
 <p align="center">
-  <img src="assets/channels.webp" alt="Reply to your agent from the local popup, DingTalk, Feishu, or Telegram" width="900">
+  <img src="assets/channels.webp" alt="Reply to your agent from the local popup, DingTalk, Feishu, Slack, or Telegram" width="900">
 </p>
 
 The tool automatically records the recent history of agent questions and human answers, so you can refer back to it anytime while answering new questions. (If you don't need history, you can turn it off in the settings.)
@@ -85,7 +85,7 @@ if (isAvailable()) {
 
 ## Configuration
 
-Configuration is stored at `~/.askhuman/config.json` and managed by the settings UI. For general config and environment variables, see the [configuration guide](docs/wiki/configuration.en.md); for channel onboarding, see [Telegram](docs/wiki/telegram-setup.en.md) · [DingTalk](docs/wiki/dingtalk-setup.en.md) · [Feishu / Lark](docs/wiki/feishu-setup.en.md).
+Configuration is stored at `~/.askhuman/config.json` and managed by the settings UI. For general config and environment variables, see the [configuration guide](docs/wiki/configuration.en.md); for channel onboarding, see [Telegram](docs/wiki/telegram-setup.en.md) · [DingTalk](docs/wiki/dingtalk-setup.en.md) · [Feishu / Lark](docs/wiki/feishu-setup.en.md) · [Slack](docs/wiki/slack-setup.en.md).
 
 ## Development
 

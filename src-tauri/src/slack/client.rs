@@ -1,0 +1,249 @@
+//! Slack 单聊机器人 Web API 客户端（reqwest）。
+//!
+//! 鉴权：Web API 统一用 Bot Token（`xoxb-…`，Bearer）；Socket Mode 建连用 App Token（见 `ws`）。
+//! 发消息用 `chat.postMessage`（Block Kit）；DM 频道由 `conversations.open` 解析。
+//! 文件上传走新版三步流程（`files.getUploadURLExternal` + `files.completeUploadExternal`）。
+
+use super::SlackError;
+use crate::config::SlackChannelConfig;
+use serde_json::{json, Value};
+use std::time::Duration;
+
+/// Slack Web API 根地址（固定）。
+const API_BASE: &str = "https://slack.com/api";
+
+#[derive(Clone)]
+pub struct SlackClient {
+    bot_token: String,
+    app_token: String,
+    user_id: String,
+    http: reqwest::Client,
+}
+
+impl SlackClient {
+    /// 构造客户端：校验 Bot/App Token（user_id 允许为空，自动识别流程不需要）。
+    pub fn new(config: &SlackChannelConfig) -> Result<Self, SlackError> {
+        let bot_token = config.bot_token.trim().to_string();
+        let app_token = config.app_token.trim().to_string();
+        if bot_token.is_empty() {
+            return Err(SlackError::EmptyConfig("Bot Token".into()));
+        }
+        if app_token.is_empty() {
+            return Err(SlackError::EmptyConfig("App Token".into()));
+        }
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|e| SlackError::Network(e.to_string()))?;
+        Ok(Self {
+            bot_token,
+            app_token,
+            user_id: config.user_id.trim().to_string(),
+            http,
+        })
+    }
+
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    pub fn bot_token(&self) -> &str {
+        &self.bot_token
+    }
+
+    pub fn app_token(&self) -> &str {
+        &self.app_token
+    }
+
+    pub fn user_id(&self) -> &str {
+        &self.user_id
+    }
+
+    /// 通用 JSON 调用：Bot Token Bearer + `ok==true` 判定成功，失败取 `error`。
+    async fn call(&self, method: &str, body: Value) -> Result<Value, SlackError> {
+        let resp = self
+            .http
+            .post(format!("{}/{}", API_BASE, method))
+            .bearer_auth(&self.bot_token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| SlackError::Network(e.to_string()))?;
+        let v: Value = resp.json().await.unwrap_or(Value::Null);
+        if v.get("ok").and_then(|o| o.as_bool()) == Some(true) {
+            Ok(v)
+        } else {
+            let msg = v
+                .get("error")
+                .and_then(|m| m.as_str())
+                .unwrap_or("request failed")
+                .to_string();
+            Err(SlackError::Api(msg))
+        }
+    }
+
+    /// 校验 Bot Token（`auth.test`）。供「测试连接」用。
+    pub async fn auth_test(&self) -> Result<(), SlackError> {
+        self.call("auth.test", json!({})).await.map(|_| ())
+    }
+
+    /// 解析与配置 userId 的 DM 频道 id（`conversations.open`）。
+    pub async fn open_dm(&self) -> Result<String, SlackError> {
+        if self.user_id.is_empty() {
+            return Err(SlackError::EmptyConfig("User ID".into()));
+        }
+        let v = self
+            .call("conversations.open", json!({ "users": self.user_id }))
+            .await?;
+        v.get("channel")
+            .and_then(|c| c.get("id"))
+            .and_then(|id| id.as_str())
+            .map(|s| s.to_string())
+            .ok_or(SlackError::BadResponse)
+    }
+
+    /// 发送一条消息，返回消息 `ts`（卡片后续 update 收尾用）。
+    /// `blocks` 为 Block Kit 数组（None 则纯文本）；`text` 为通知回退文本。
+    pub async fn post_message(
+        &self,
+        channel: &str,
+        blocks: Option<&Value>,
+        text: &str,
+    ) -> Result<String, SlackError> {
+        let mut body = json!({ "channel": channel, "text": text });
+        if let Some(b) = blocks {
+            body["blocks"] = b.clone();
+        }
+        let v = self.call("chat.postMessage", body).await?;
+        Ok(v.get("ts").and_then(|t| t.as_str()).unwrap_or("").to_string())
+    }
+
+    /// 纯文本消息（mrkdwn）。
+    pub async fn post_text(&self, channel: &str, text: &str) -> Result<String, SlackError> {
+        self.post_message(channel, None, text).await
+    }
+
+    /// 更新已发送的消息（收尾置静态终态 / 抢答收尾）。
+    pub async fn update_message(
+        &self,
+        channel: &str,
+        ts: &str,
+        blocks: Option<&Value>,
+        text: &str,
+    ) -> Result<(), SlackError> {
+        let mut body = json!({ "channel": channel, "ts": ts, "text": text });
+        if let Some(b) = blocks {
+            body["blocks"] = b.clone();
+        }
+        self.call("chat.update", body).await.map(|_| ())
+    }
+
+    // ===== 文件上传（AI→人，新版三步流程）=====
+
+    /// 上传一个文件并分享进 DM 频道。图片/文件统一走此流程。
+    pub async fn upload_file(
+        &self,
+        channel: &str,
+        path: &str,
+        name: &str,
+    ) -> Result<(), SlackError> {
+        let bytes = std::fs::read(path)
+            .map_err(|e| SlackError::Network(format!("failed to read file: {}", e)))?;
+        let length = bytes.len();
+
+        // 1. 取上传地址 + file_id（form 编码）。
+        let v = self
+            .http
+            .post(format!("{}/files.getUploadURLExternal", API_BASE))
+            .bearer_auth(&self.bot_token)
+            .form(&[("filename", name), ("length", &length.to_string())])
+            .send()
+            .await
+            .map_err(|e| SlackError::Network(e.to_string()))?
+            .json::<Value>()
+            .await
+            .map_err(|_| SlackError::BadResponse)?;
+        if v.get("ok").and_then(|o| o.as_bool()) != Some(true) {
+            let msg = v
+                .get("error")
+                .and_then(|m| m.as_str())
+                .unwrap_or("getUploadURLExternal failed")
+                .to_string();
+            return Err(SlackError::Api(msg));
+        }
+        let upload_url = v
+            .get("upload_url")
+            .and_then(|u| u.as_str())
+            .ok_or(SlackError::BadResponse)?
+            .to_string();
+        let file_id = v
+            .get("file_id")
+            .and_then(|u| u.as_str())
+            .ok_or(SlackError::BadResponse)?
+            .to_string();
+
+        // 2. PUT/POST 字节到 upload_url（multipart `file` 字段）。
+        let part = reqwest::multipart::Part::bytes(bytes).file_name(name.to_string());
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let status = self
+            .http
+            .post(&upload_url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| SlackError::Network(e.to_string()))?
+            .status();
+        if !status.is_success() {
+            return Err(SlackError::Api(format!("file upload failed: HTTP {}", status)));
+        }
+
+        // 3. 完成上传并分享进 DM 频道。
+        self.call(
+            "files.completeUploadExternal",
+            json!({
+                "files": [ { "id": file_id, "title": name } ],
+                "channel_id": channel,
+            }),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    // ===== 文件下载（人→AI）=====
+
+    /// 下载用户在 DM 里发的图片/文件（`url_private_download`），返回本地临时文件路径。
+    /// `ext` 为期望扩展名（取自 filetype/mimetype）。
+    pub async fn download_file_to(&self, url: &str, ext: &str) -> Result<String, SlackError> {
+        let resp = self
+            .http
+            .get(url)
+            .bearer_auth(&self.bot_token)
+            .send()
+            .await
+            .map_err(|e| SlackError::Network(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(SlackError::Api(format!(
+                "file download failed: HTTP {}",
+                resp.status()
+            )));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| SlackError::Network(e.to_string()))?;
+
+        let dir = std::env::temp_dir().join("askhuman-slack");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| SlackError::Network(format!("failed to create temp dir: {}", e)))?;
+        let ext = ext.trim_start_matches('.');
+        let name = if ext.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            format!("{}.{}", uuid::Uuid::new_v4(), ext)
+        };
+        let dest = dir.join(name);
+        std::fs::write(&dest, &bytes)
+            .map_err(|e| SlackError::Network(format!("failed to write temp file: {}", e)))?;
+        Ok(dest.to_string_lossy().to_string())
+    }
+}

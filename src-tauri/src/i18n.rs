@@ -159,6 +159,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "app.telegramInvalid" => pick(lang, "invalid Telegram config: {e}", "Telegram 配置无效: {e}"),
         "app.dingtalkInvalid" => pick(lang, "invalid DingTalk config: {e}", "钉钉配置无效: {e}"),
         "app.feishuInvalid" => pick(lang, "invalid Feishu config: {e}", "飞书配置无效: {e}"),
+        "app.slackInvalid" => pick(lang, "invalid Slack config: {e}", "Slack 配置无效: {e}"),
         "app.sessionEndedNoResult" => pick(
             lang,
             "messaging session ended without a result",
@@ -188,6 +189,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "channel.sourceTelegram" => pick(lang, "Telegram", "Telegram"),
         "channel.sourceDingTalk" => pick(lang, "DingTalk", "钉钉"),
         "channel.sourceFeishu" => pick(lang, "Feishu", "飞书"),
+        "channel.sourceSlack" => pick(lang, "Slack", "Slack"),
         // Cancel source: the caller (CLI/terminal cancelled the request).
         "channel.sourceCaller" => pick(lang, "Caller", "调用方"),
         "channel.tgReplied" => pick(lang, "✅ Replied", "✅ 已回复"),
@@ -263,6 +265,29 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "channel.fsCardDeliverFailed" => pick(lang, "failed to deliver Feishu card, falling back to text: {e}", "飞书互动卡片投放失败，回退纯文本: {e}"),
         "channel.fsImageDownloadFailed" => pick(lang, "failed to download Feishu image: {e}", "飞书图片下载失败: {e}"),
         "channel.fsFileDownloadFailed" => pick(lang, "failed to download Feishu file: {e}", "飞书文件下载失败: {e}"),
+
+        // —— Slack 渠道：发给用户的文案 + 本地诊断 ——
+        // 静态终态卡片状态行（无 emoji 前缀，与飞书/钉钉一致）。
+        "channel.slSubmitted" => pick(lang, "Submitted", "已提交"),
+        "channel.slAnsweredVia" => pick(lang, "Answered via {source}", "已在{source}回答"),
+        "channel.slCancelled" => pick(lang, "Cancelled", "已取消"),
+        "channel.slCancelledBy" => pick(lang, "Cancelled by {source}", "已被{source}取消"),
+        "channel.slTitleFallback" => pick(lang, "Question", "提问"),
+        // 卡片表单标签 / 占位 / 按钮。
+        "channel.slOptionsLabel" => pick(lang, "Options", "选项"),
+        "channel.slInputLabel" => pick(lang, "Note", "补充说明"),
+        "channel.slInputPlaceholder" => pick(lang, "Add a note (optional)", "补充说明（可选）"),
+        "channel.slSubmitButton" => pick(lang, "Submit", "提交"),
+        "channel.slConfigInvalidSkip" => pick(
+            lang,
+            "invalid Slack config, skipping this channel: {e}",
+            "Slack 配置无效，已跳过该 Channel: {e}",
+        ),
+        "channel.slMessageSendFailed" => pick(lang, "failed to send Slack Message: {e}", "Slack Message 发送失败: {e}"),
+        "channel.slFileSendFailedLog" => pick(lang, "failed to send Slack file: {path}: {e}", "Slack 文件发送失败: {path}: {e}"),
+        "channel.slQuestionSendFailed" => pick(lang, "failed to send Slack question: {e}", "Slack 提问发送失败: {e}"),
+        "channel.slCardDeliverFailed" => pick(lang, "failed to deliver Slack card, falling back to text: {e}", "Slack 互动卡片投放失败，回退纯文本: {e}"),
+        "channel.slFileDownloadFailed" => pick(lang, "failed to download Slack file: {e}", "Slack 文件下载失败: {e}"),
 
         // —— 设置页「弹出测试窗口」示例内容 ——
         "test.message" => pick(
@@ -351,6 +376,23 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "请先填写 AppId 和 AppSecret",
         ),
 
+        // —— Slack 测试连接 / userId 自动识别（commands.slack_test / slack_detect_*）——
+        "cmd.slTestRemote" => pick(
+            lang,
+            "✅ AskHuman Slack connection test succeeded",
+            "✅ AskHuman Slack 连接测试成功",
+        ),
+        "cmd.slTestSent" => pick(
+            lang,
+            "A test message was sent to your direct message — please check Slack",
+            "已向你的单聊发送一条测试消息，请在 Slack 查收",
+        ),
+        "cmd.fillSlackTokens" => pick(
+            lang,
+            "Please fill in Bot Token and App Token first",
+            "请先填写 Bot Token 和 App Token",
+        ),
+
         // —— 错误类型校验文案（Telegram/钉钉/飞书 Error::localized）——
         "err.tgEmptyToken" => pick(lang, "Bot Token must not be empty", "Bot Token 不能为空"),
         "err.tgEmptyChatId" => pick(lang, "Chat ID must not be empty", "Chat ID 不能为空"),
@@ -361,6 +403,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         ),
         "err.ddEmptyConfig" => pick(lang, "{field} must not be empty", "{field} 不能为空"),
         "err.fsEmptyConfig" => pick(lang, "{field} must not be empty", "{field} 不能为空"),
+        "err.slEmptyConfig" => pick(lang, "{field} must not be empty", "{field} 不能为空"),
 
         _ => key,
     }

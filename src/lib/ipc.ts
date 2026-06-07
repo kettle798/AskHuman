@@ -15,6 +15,9 @@ import type {
   ProjectInfo,
   SecretActions,
   SettingsPayload,
+  SlackDetectArgs,
+  SlackTestArgs,
+  SlackWaitArgs,
   TelegramTestArgs,
   ThemeMode,
   WindowEffect,
@@ -120,3 +123,12 @@ export const feishuDetectPrepare = (args: FeishuDetectArgs) =>
 
 export const feishuDetectWait = (args: FeishuWaitArgs) =>
   invoke<string>("feishu_detect_wait", { args });
+
+export const slackTest = (args: SlackTestArgs) =>
+  invoke<string>("slack_test", { args });
+
+export const slackDetectPrepare = (args: SlackDetectArgs) =>
+  invoke<string>("slack_detect_prepare", { args });
+
+export const slackDetectWait = (args: SlackWaitArgs) =>
+  invoke<string>("slack_detect_wait", { args });

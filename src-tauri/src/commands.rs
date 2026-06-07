@@ -297,6 +297,8 @@ pub struct SecretsPresent {
     dingding_secret: bool,
     feishu_secret: bool,
     telegram_token: bool,
+    slack_bot_token: bool,
+    slack_app_token: bool,
 }
 
 /// Settings payload: the config with secrets blanked, plus per-secret presence flags.
@@ -327,6 +329,8 @@ pub struct SecretActions {
     dingding_secret: SecretAction,
     feishu_secret: SecretAction,
     telegram_token: SecretAction,
+    slack_bot_token: SecretAction,
+    slack_app_token: SecretAction,
 }
 
 #[tauri::command]
@@ -337,11 +341,15 @@ pub fn get_settings() -> SettingsPayload {
         dingding_secret: !config.channels.dingding.client_secret.is_empty(),
         feishu_secret: !config.channels.feishu.app_secret.is_empty(),
         telegram_token: !config.channels.telegram.bot_token.is_empty(),
+        slack_bot_token: !config.channels.slack.bot_token.is_empty(),
+        slack_app_token: !config.channels.slack.app_token.is_empty(),
     };
     // Never let resolved secrets reach the UI; the page shows a fixed-length placeholder instead.
     config.channels.dingding.client_secret.clear();
     config.channels.feishu.app_secret.clear();
     config.channels.telegram.bot_token.clear();
+    config.channels.slack.bot_token.clear();
+    config.channels.slack.app_token.clear();
     SettingsPayload {
         config,
         secrets_present,
@@ -371,6 +379,16 @@ pub fn save_settings(
         &mut config.channels.telegram.bot_token,
         crate::secrets::ACCOUNT_TELEGRAM_TOKEN,
         secret_actions.telegram_token,
+    );
+    apply_secret_action(
+        &mut config.channels.slack.bot_token,
+        crate::secrets::ACCOUNT_SLACK_BOT_TOKEN,
+        secret_actions.slack_bot_token,
+    );
+    apply_secret_action(
+        &mut config.channels.slack.app_token,
+        crate::secrets::ACCOUNT_SLACK_APP_TOKEN,
+        secret_actions.slack_app_token,
     );
     config.save().map_err(|e| e.to_string())?;
     // 广播 general 配置，令同进程内已打开的弹窗实时生效（如语音语言/快捷键）。
@@ -880,6 +898,146 @@ fn feishu_text_and_sender(event: &serde_json::Value) -> Option<(String, String)>
     let content: serde_json::Value = serde_json::from_str(content_str).ok()?;
     let text = content.get("text").and_then(|v| v.as_str())?.to_string();
     Some((open_id, text))
+}
+
+// ===== Slack 测试连接 / userId 自动识别 =====
+
+use crate::config::SlackChannelConfig;
+use crate::slack::client::SlackClient;
+use crate::slack::ws::{self as slack_ws, SlackWs, WsEvent as SlackWsEvent};
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlackTestArgs {
+    bot_token: String,
+    app_token: String,
+    user_id: String,
+}
+
+/// 测试连接：校验 Bot Token（auth.test + 向 userId 发测试 DM）+ 校验 App Token（apps.connections.open）。
+#[tauri::command]
+pub async fn slack_test(args: SlackTestArgs) -> Result<String, String> {
+    let lang = crate::i18n::Lang::current();
+    if args.user_id.trim().is_empty() {
+        return Err(crate::i18n::tr(lang, "cmd.fillUserId").to_string());
+    }
+    let bot_token = fallback_secret(&args.bot_token, |c| c.channels.slack.bot_token.clone());
+    let app_token = fallback_secret(&args.app_token, |c| c.channels.slack.app_token.clone());
+    let cfg = SlackChannelConfig {
+        enabled: true,
+        bot_token,
+        app_token,
+        user_id: args.user_id,
+    };
+    let client = SlackClient::new(&cfg).map_err(|e| e.localized(lang))?;
+    // Bot Token：auth.test + 解析 DM + 发测试消息。
+    client.auth_test().await.map_err(|e| e.localized(lang))?;
+    let dm = client.open_dm().await.map_err(|e| e.localized(lang))?;
+    client
+        .post_text(&dm, crate::i18n::tr(lang, "cmd.slTestRemote"))
+        .await
+        .map_err(|e| e.localized(lang))?;
+    // App Token：能拿到 wss 即通过（不保持长连）。
+    slack_ws::open_socket_url(client.http(), client.app_token())
+        .await
+        .map_err(|e| e.localized(lang))?;
+    Ok(crate::i18n::tr(lang, "cmd.slTestSent").to_string())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlackDetectArgs {
+    bot_token: String,
+    app_token: String,
+}
+
+/// 自动识别准备：校验双 token（App Token 能开 Socket Mode）后返回供用户私聊发送的 4 位识别码。
+#[tauri::command]
+pub async fn slack_detect_prepare(args: SlackDetectArgs) -> Result<String, String> {
+    let lang = crate::i18n::Lang::current();
+    let bot_token = fallback_secret(&args.bot_token, |c| c.channels.slack.bot_token.clone());
+    let app_token = fallback_secret(&args.app_token, |c| c.channels.slack.app_token.clone());
+    if bot_token.trim().is_empty() || app_token.trim().is_empty() {
+        return Err(crate::i18n::tr(lang, "cmd.fillSlackTokens").to_string());
+    }
+    let http = reqwest::Client::new();
+    slack_ws::open_socket_url(&http, app_token.trim())
+        .await
+        .map_err(|e| e.localized(lang))?;
+    Ok(gen_detect_code())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlackWaitArgs {
+    bot_token: String,
+    app_token: String,
+    code: String,
+}
+
+/// 自动识别等待：开 Socket Mode，等到 DM 文本内容等于识别码的消息，返回发送者 user id。120 秒超时报错。
+#[tauri::command]
+pub async fn slack_detect_wait(args: SlackWaitArgs) -> Result<String, String> {
+    use std::time::Duration;
+    let lang = crate::i18n::Lang::current();
+    let bot_token = fallback_secret(&args.bot_token, |c| c.channels.slack.bot_token.clone());
+    let app_token = fallback_secret(&args.app_token, |c| c.channels.slack.app_token.clone());
+    if bot_token.trim().is_empty() || app_token.trim().is_empty() {
+        return Err(crate::i18n::tr(lang, "cmd.fillSlackTokens").to_string());
+    }
+    let code = args.code.trim().to_string();
+    if code.is_empty() {
+        return Err(crate::i18n::tr(lang, "cmd.detectCodeInvalid").to_string());
+    }
+
+    // Q6：经 Daemon 长连接识别（见钉钉/飞书同段说明）。app_key=App Token（Socket 复用键），
+    // app_secret=Bot Token（建连时校验齐全）。
+    #[cfg(unix)]
+    {
+        let req = crate::ipc::DetectRequest {
+            kind: "slack".to_string(),
+            app_key: app_token.trim().to_string(),
+            app_secret: bot_token.trim().to_string(),
+            base_url: String::new(),
+            code: code.clone(),
+            lang: lang.code().to_string(),
+        };
+        if let Some(result) = crate::client::request_detect(req).await {
+            return result;
+        }
+    }
+
+    let http = reqwest::Client::new();
+    let mut ws = SlackWs::connect(http, app_token.trim())
+        .await
+        .map_err(|e| e.localized(lang))?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(crate::i18n::tr(lang, "cmd.detectTimeout").to_string());
+        }
+        match tokio::time::timeout(remaining, ws.recv()).await {
+            Ok(Some(SlackWsEvent::Message(event))) => {
+                if let Some((user, text)) = slack_text_and_sender(&event) {
+                    if text.trim() == code {
+                        return Ok(user);
+                    }
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(crate::i18n::tr(lang, "cmd.streamDisconnected").to_string()),
+            Err(_) => return Err(crate::i18n::tr(lang, "cmd.detectTimeout").to_string()),
+        }
+    }
+}
+
+/// 从 Slack message 事件取 (发送者 user id, 文本内容)。无文本返回 None。
+fn slack_text_and_sender(event: &serde_json::Value) -> Option<(String, String)> {
+    let user = event.get("user").and_then(|v| v.as_str())?.to_string();
+    let text = event.get("text").and_then(|v| v.as_str())?.to_string();
+    Some((user, text))
 }
 
 /// 生成 4 位识别码（瞬时配对用，无需强随机）。

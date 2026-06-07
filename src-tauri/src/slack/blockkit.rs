@@ -1,0 +1,413 @@
+//! Slack Block Kit：组装消息内表单提问卡片（复选框 + 多行输入框 + 提交按钮）+ 解析提交回调。
+//!
+//! 设计（见 `docs/plans/slack-channel.md`）：
+//! - 提问卡片为一组 blocks：标题 section + 正文 section + `input`(checkboxes) + `input`(plain_text_input)
+//!   + `actions`(提交按钮)。Slack 消息内 `input` 块支持复选框与多行文本输入。
+//! - 用户点「提交」→ 一次 `block_actions` 回调，`payload.state.values` 汇总整条消息所有 input 取值。
+//! - 选项 ↔ value 映射 `opt_{i}`，便于回调里还原勾选了哪些选项（规避超长/重复选项文案）。
+//! - 复选框单元素最多 10 项，超出则拆分为多个 `input` 块（提交时各块 state.values 合并）。
+//! - 终态为**静态** blocks（无交互控件，回显已选项与补充文字 + 状态行），由 `chat.update` 置入。
+
+use super::markdown;
+use serde_json::{json, Value};
+
+/// 选项 value 前缀（`opt_0` / `opt_1` ...，全局连续下标）。
+const OPT_VALUE_PREFIX: &str = "opt_";
+/// 文本输入框 action_id。
+const INPUT_ACTION: &str = "user_input";
+/// 提交按钮 action_id。
+const SUBMIT_ACTION: &str = "submit";
+/// 复选框单元素选项上限（Slack 限制）。
+const CHECKBOXES_MAX: usize = 10;
+/// section 文本安全上限（Slack 约 3000）。
+const SECTION_MAX: usize = 2900;
+
+/// 一次卡片「提交」回调的解析结果。
+pub struct CardSubmit {
+    pub user_id: String,
+    /// 卡片所在消息 ts（`container.message_ts`），用于匹配当前题卡片。
+    pub message_ts: String,
+    /// 卡片所在频道 id。
+    pub channel_id: String,
+    /// 勾选的预定义选项（选项文本，已按下标还原）。
+    pub selected_options: Vec<String>,
+    /// 补充文字输入（空则 None）。
+    pub user_input: Option<String>,
+}
+
+/// 组装提问卡片（blocks 数组）。
+/// `title` 题首（空则省略）；`text` 正文（空则省略）；`options` 预定义选项（空则无复选框）；
+/// `is_markdown` 决定正文用 mrkdwn 还是 plain_text；其余为各处文案。
+#[allow(clippy::too_many_arguments)]
+pub fn build_question_card(
+    title: &str,
+    text: &str,
+    options: &[String],
+    is_markdown: bool,
+    options_label: &str,
+    input_label: &str,
+    input_placeholder: &str,
+    submit_label: &str,
+) -> Value {
+    let mut blocks: Vec<Value> = Vec::new();
+    if !title.trim().is_empty() {
+        blocks.push(title_section(title));
+    }
+    if !text.trim().is_empty() {
+        blocks.push(body_section(text, is_markdown));
+    }
+
+    // 复选框：按 10 个一组拆成多个 input 块。
+    if !options.is_empty() {
+        for (k, chunk) in options.chunks(CHECKBOXES_MAX).enumerate() {
+            let base = k * CHECKBOXES_MAX;
+            let opts: Vec<Value> = chunk
+                .iter()
+                .enumerate()
+                .map(|(j, opt)| {
+                    json!({
+                        "text": { "type": "plain_text", "text": opt, "emoji": true },
+                        "value": format!("{}{}", OPT_VALUE_PREFIX, base + j),
+                    })
+                })
+                .collect();
+            blocks.push(json!({
+                "type": "input",
+                "block_id": format!("opts_{}", k),
+                "optional": true,
+                "label": { "type": "plain_text", "text": options_label, "emoji": true },
+                "element": {
+                    "type": "checkboxes",
+                    "action_id": format!("options_{}", k),
+                    "options": opts,
+                },
+            }));
+        }
+    }
+
+    // 多行文本输入框（不 dispatch_action，仅在提交时随 state.values 一并回传）。
+    blocks.push(json!({
+        "type": "input",
+        "block_id": "userinput",
+        "optional": true,
+        "label": { "type": "plain_text", "text": input_label, "emoji": true },
+        "element": {
+            "type": "plain_text_input",
+            "action_id": INPUT_ACTION,
+            "multiline": true,
+            "placeholder": { "type": "plain_text", "text": input_placeholder, "emoji": true },
+        },
+    }));
+
+    // 提交按钮。
+    blocks.push(json!({
+        "type": "actions",
+        "block_id": "actions",
+        "elements": [ {
+            "type": "button",
+            "action_id": SUBMIT_ACTION,
+            "text": { "type": "plain_text", "text": submit_label, "emoji": true },
+            "style": "primary",
+            "value": "submit",
+        } ],
+    }));
+
+    Value::Array(blocks)
+}
+
+/// 终态卡片入参。
+pub struct Finalized<'a> {
+    pub title: &'a str,
+    pub text: &'a str,
+    pub is_markdown: bool,
+    /// 用户已选选项（被抢答收尾时为空）。
+    pub selected: &'a [String],
+    /// 补充文字回显（无则 None）。
+    pub user_input: Option<&'a str>,
+    /// 状态行文案（「已提交」/「已在 X 回答」/「已取消」等）。
+    pub status: &'a str,
+}
+
+/// 组装静态终态卡片（无交互控件）：标题 + 正文 + 已选项（✓）+ 补充文字（💬）+ 状态行（context）。
+pub fn build_finalized_card(p: &Finalized) -> Value {
+    let mut blocks: Vec<Value> = Vec::new();
+    if !p.title.trim().is_empty() {
+        blocks.push(title_section(p.title));
+    }
+    if !p.text.trim().is_empty() {
+        blocks.push(body_section(p.text, p.is_markdown));
+    }
+    if !p.selected.is_empty() {
+        let lines: Vec<String> = p
+            .selected
+            .iter()
+            .map(|o| format!("✓ {}", markdown::escape(o)))
+            .collect();
+        blocks.push(mrkdwn_section(&lines.join("\n")));
+    }
+    if let Some(note) = p.user_input.filter(|s| !s.trim().is_empty()) {
+        blocks.push(mrkdwn_section(&format!("💬 {}", markdown::escape(note))));
+    }
+    if !p.status.trim().is_empty() {
+        blocks.push(json!({
+            "type": "context",
+            "elements": [ { "type": "mrkdwn", "text": markdown::escape(p.status) } ],
+        }));
+    }
+    Value::Array(blocks)
+}
+
+/// 把一次 `block_actions` 回调解析为「提交」结果；非提交按钮 / 缺字段返回 None。
+/// `options` 用于把 `opt_{i}` 还原为选项文本。
+pub fn parse_submit(payload: &Value, options: &[String]) -> Option<CardSubmit> {
+    // 必须是「提交」按钮触发。
+    let is_submit = payload
+        .get("actions")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .any(|a| a.get("action_id").and_then(|v| v.as_str()) == Some(SUBMIT_ACTION))
+        })
+        .unwrap_or(false);
+    if !is_submit {
+        return None;
+    }
+
+    let user_id = payload
+        .get("user")
+        .and_then(|u| u.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let message_ts = payload
+        .get("container")
+        .and_then(|c| c.get("message_ts"))
+        .and_then(|v| v.as_str())
+        .or_else(|| payload.get("message").and_then(|m| m.get("ts")).and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let channel_id = payload
+        .get("channel")
+        .and_then(|c| c.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // 遍历 state.values 汇总各 input 取值（复选框 selected_options + 文本输入 value）。
+    let mut chosen = vec![false; options.len()];
+    let mut user_input: Option<String> = None;
+    if let Some(values) = payload
+        .get("state")
+        .and_then(|s| s.get("values"))
+        .and_then(|v| v.as_object())
+    {
+        for actions in values.values() {
+            let Some(actions) = actions.as_object() else {
+                continue;
+            };
+            for (action_id, el) in actions {
+                if let Some(sel) = el.get("selected_options").and_then(|s| s.as_array()) {
+                    for o in sel {
+                        if let Some(val) = o.get("value").and_then(|v| v.as_str()) {
+                            if let Some(idx) = val.strip_prefix(OPT_VALUE_PREFIX) {
+                                if let Ok(i) = idx.parse::<usize>() {
+                                    if i < chosen.len() {
+                                        chosen[i] = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let is_text = action_id == INPUT_ACTION
+                    || el.get("type").and_then(|t| t.as_str()) == Some("plain_text_input");
+                if is_text {
+                    if let Some(txt) = el.get("value").and_then(|v| v.as_str()) {
+                        let t = txt.trim();
+                        if !t.is_empty() {
+                            user_input = Some(t.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let selected_options = options
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| chosen[*i])
+        .map(|(_, o)| o.clone())
+        .collect();
+
+    Some(CardSubmit {
+        user_id,
+        message_ts,
+        channel_id,
+        selected_options,
+        user_input,
+    })
+}
+
+/// 标题 section（加粗 mrkdwn）。
+fn title_section(title: &str) -> Value {
+    mrkdwn_section(&format!("*{}*", markdown::escape(title)))
+}
+
+/// 正文 section：markdown → mrkdwn；纯文本 → plain_text。
+fn body_section(text: &str, is_markdown: bool) -> Value {
+    if is_markdown {
+        mrkdwn_section(&markdown::to_mrkdwn(text))
+    } else {
+        json!({
+            "type": "section",
+            "text": { "type": "plain_text", "text": truncate(text), "emoji": true },
+        })
+    }
+}
+
+fn mrkdwn_section(text: &str) -> Value {
+    json!({
+        "type": "section",
+        "text": { "type": "mrkdwn", "text": truncate(text) },
+    })
+}
+
+/// 截断到 section 安全上限（按字符）。
+fn truncate(s: &str) -> String {
+    if s.chars().count() <= SECTION_MAX {
+        return s.to_string();
+    }
+    s.chars().take(SECTION_MAX).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blocks(v: &Value) -> &Vec<Value> {
+        v.as_array().unwrap()
+    }
+
+    #[test]
+    fn build_card_has_form_and_options() {
+        let card = build_question_card(
+            "Question 1/2",
+            "要继续吗？",
+            &["继续".into(), "停止".into()],
+            true,
+            "Options",
+            "Note",
+            "Add a note",
+            "Submit",
+        );
+        let bs = blocks(&card);
+        // 标题 + 正文 + 1 个复选框 input + 文本 input + actions。
+        assert!(bs.iter().any(|b| b["type"] == "section"));
+        let checkboxes = bs
+            .iter()
+            .find(|b| b["element"]["type"] == "checkboxes")
+            .unwrap();
+        let opts = checkboxes["element"]["options"].as_array().unwrap();
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0]["value"], "opt_0");
+        assert_eq!(opts[1]["value"], "opt_1");
+        assert!(bs
+            .iter()
+            .any(|b| b["element"]["type"] == "plain_text_input"));
+        let actions = bs.iter().find(|b| b["type"] == "actions").unwrap();
+        assert_eq!(actions["elements"][0]["action_id"], "submit");
+    }
+
+    #[test]
+    fn options_split_into_chunks_of_ten() {
+        let options: Vec<String> = (0..23).map(|i| format!("o{}", i)).collect();
+        let card = build_question_card("t", "x", &options, false, "Options", "Note", "ph", "Submit");
+        let bs = blocks(&card);
+        let checkbox_blocks: Vec<&Value> = bs
+            .iter()
+            .filter(|b| b["element"]["type"] == "checkboxes")
+            .collect();
+        assert_eq!(checkbox_blocks.len(), 3); // 10 + 10 + 3
+        // 第三块第一项的全局下标应为 20。
+        assert_eq!(checkbox_blocks[2]["element"]["options"][0]["value"], "opt_20");
+    }
+
+    #[test]
+    fn build_card_without_options_omits_checkboxes() {
+        let card = build_question_card("", "随便说点什么", &[], false, "Options", "Note", "ph", "Submit");
+        let bs = blocks(&card);
+        assert!(!bs.iter().any(|b| b["element"]["type"] == "checkboxes"));
+        assert!(bs.iter().any(|b| b["element"]["type"] == "plain_text_input"));
+    }
+
+    #[test]
+    fn parse_submit_maps_checked_options_and_input() {
+        let payload = json!({
+            "type": "block_actions",
+            "user": { "id": "U1" },
+            "channel": { "id": "D1" },
+            "container": { "message_ts": "111.222" },
+            "actions": [ { "action_id": "submit" } ],
+            "state": { "values": {
+                "opts_0": { "options_0": {
+                    "type": "checkboxes",
+                    "selected_options": [ { "value": "opt_0" }, { "value": "opt_2" } ]
+                } },
+                "userinput": { "user_input": { "type": "plain_text_input", "value": "  hi  " } }
+            } }
+        });
+        let opts = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let s = parse_submit(&payload, &opts).unwrap();
+        assert_eq!(s.user_id, "U1");
+        assert_eq!(s.channel_id, "D1");
+        assert_eq!(s.message_ts, "111.222");
+        assert_eq!(s.selected_options, vec!["A".to_string(), "C".to_string()]);
+        assert_eq!(s.user_input.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn parse_submit_empty_input_is_none() {
+        let payload = json!({
+            "type": "block_actions",
+            "user": { "id": "U1" },
+            "container": { "message_ts": "1.2" },
+            "actions": [ { "action_id": "submit" } ],
+            "state": { "values": {
+                "userinput": { "user_input": { "type": "plain_text_input", "value": "" } }
+            } }
+        });
+        let s = parse_submit(&payload, &[]).unwrap();
+        assert!(s.user_input.is_none());
+        assert!(s.selected_options.is_empty());
+    }
+
+    #[test]
+    fn parse_non_submit_returns_none() {
+        let payload = json!({
+            "type": "block_actions",
+            "user": { "id": "U1" },
+            "actions": [ { "action_id": "options_0" } ],
+            "state": { "values": {} }
+        });
+        assert!(parse_submit(&payload, &[]).is_none());
+    }
+
+    #[test]
+    fn finalized_card_is_static_with_selection() {
+        let card = build_finalized_card(&Finalized {
+            title: "Question 1/2",
+            text: "要继续吗？",
+            is_markdown: true,
+            selected: &["停止".to_string()],
+            user_input: Some("再想想"),
+            status: "已提交",
+        });
+        let bs = blocks(&card);
+        // 无任何交互控件。
+        assert!(!bs.iter().any(|b| b["type"] == "actions" || b["type"] == "input"));
+        // 含勾选回显 + 补充文字 + 状态 context。
+        assert!(bs.iter().any(|b| b["text"]["text"].as_str().unwrap_or("").contains("✓ 停止")));
+        assert!(bs.iter().any(|b| b["text"]["text"].as_str().unwrap_or("").contains("💬 再想想")));
+        assert!(bs.iter().any(|b| b["type"] == "context"));
+    }
+}

@@ -36,6 +36,7 @@ mod paths;
 mod project;
 mod prompts;
 mod secrets;
+mod slack;
 mod telegram;
 
 fn main() {

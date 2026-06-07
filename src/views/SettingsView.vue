@@ -21,6 +21,9 @@ import {
   openTestPopup,
   saveSettings,
   setTheme,
+  slackDetectPrepare,
+  slackDetectWait,
+  slackTest,
   telegramTest,
   trimHistory,
 } from "../lib/ipc";
@@ -62,8 +65,16 @@ const secretsPresent = ref<SecretsPresent>({
   dingdingSecret: false,
   feishuSecret: false,
   telegramToken: false,
+  slackBotToken: false,
+  slackAppToken: false,
 });
-const secretCleared = ref({ dingding: false, feishu: false, telegram: false });
+const secretCleared = ref({
+  dingding: false,
+  feishu: false,
+  telegram: false,
+  slackBot: false,
+  slackApp: false,
+});
 const SECRET_PLACEHOLDER = "••••••••";
 
 // tab 按钮同时是窗口拖拽区：用屏幕坐标区分「点击切换」与「拖动移窗」。
@@ -105,6 +116,12 @@ const feishuDetectCode = ref<string | null>(null);
 const feishuMessage = ref<string | null>(null);
 const feishuError = ref(false);
 
+const slackTesting = ref(false);
+const slackDetecting = ref(false);
+const slackDetectCode = ref<string | null>(null);
+const slackMessage = ref<string | null>(null);
+const slackError = ref(false);
+
 function clamp(v: number, min: number, max: number) {
   return Math.min(max, Math.max(min, v));
 }
@@ -132,6 +149,14 @@ async function persist() {
       c.telegram.botToken,
       secretCleared.value.telegram
     ),
+    slackBotToken: secretActionFor(
+      c.slack.botToken,
+      secretCleared.value.slackBot
+    ),
+    slackAppToken: secretActionFor(
+      c.slack.appToken,
+      secretCleared.value.slackApp
+    ),
   };
   await saveSettings(config.value, actions);
   // Reflect the saved state: a set secret becomes a "Saved" placeholder, a cleared one becomes
@@ -139,12 +164,16 @@ async function persist() {
   finalizeSecret(actions.dingdingSecret, "dingdingSecret", "dingding");
   finalizeSecret(actions.feishuSecret, "feishuSecret", "feishu");
   finalizeSecret(actions.telegramToken, "telegramToken", "telegram");
+  finalizeSecret(actions.slackBotToken, "slackBotToken", "slackBot");
+  finalizeSecret(actions.slackAppToken, "slackAppToken", "slackApp");
 }
+
+type ClearedKey = "dingding" | "feishu" | "telegram" | "slackBot" | "slackApp";
 
 function finalizeSecret(
   action: SecretAction,
   presentKey: keyof SecretsPresent,
-  clearedKey: "dingding" | "feishu" | "telegram"
+  clearedKey: ClearedKey
 ) {
   if (!config.value) return;
   if (action.kind === "set") secretsPresent.value[presentKey] = true;
@@ -153,6 +182,8 @@ function finalizeSecret(
     const c = config.value.channels;
     if (clearedKey === "dingding") c.dingding.clientSecret = "";
     else if (clearedKey === "feishu") c.feishu.appSecret = "";
+    else if (clearedKey === "slackBot") c.slack.botToken = "";
+    else if (clearedKey === "slackApp") c.slack.appToken = "";
     else c.telegram.botToken = "";
   }
   secretCleared.value[clearedKey] = false;
@@ -160,11 +191,13 @@ function finalizeSecret(
 
 // "Clear" button: drop the saved secret (deletes the keychain entry on save) and re-persist so the
 // daemon reloads with the secret gone.
-function clearSecret(channel: "dingding" | "feishu" | "telegram") {
+function clearSecret(channel: ClearedKey) {
   if (!config.value) return;
   const c = config.value.channels;
   if (channel === "dingding") c.dingding.clientSecret = "";
   else if (channel === "feishu") c.feishu.appSecret = "";
+  else if (channel === "slackBot") c.slack.botToken = "";
+  else if (channel === "slackApp") c.slack.appToken = "";
   else c.telegram.botToken = "";
   secretCleared.value[channel] = true;
   persist();
@@ -491,6 +524,57 @@ async function runFeishuDetect() {
   } finally {
     feishuDetecting.value = false;
     feishuDetectCode.value = null;
+  }
+}
+
+async function runSlackTest() {
+  if (!config.value) return;
+  slackTesting.value = true;
+  slackMessage.value = null;
+  const sl = config.value.channels.slack;
+  try {
+    slackMessage.value = await slackTest({
+      botToken: sl.botToken,
+      appToken: sl.appToken,
+      userId: sl.userId,
+    });
+    slackError.value = false;
+  } catch (e) {
+    slackMessage.value = String(e);
+    slackError.value = true;
+  } finally {
+    slackTesting.value = false;
+  }
+}
+
+// 自动识别：先校验并取识别码 → 展示提示 → 等用户私聊发送该码 → 回填 userId。
+async function runSlackDetect() {
+  if (!config.value) return;
+  const sl = config.value.channels.slack;
+  slackDetecting.value = true;
+  slackMessage.value = null;
+  slackDetectCode.value = null;
+  try {
+    const code = await slackDetectPrepare({
+      botToken: sl.botToken,
+      appToken: sl.appToken,
+    });
+    slackDetectCode.value = code;
+    const userId = await slackDetectWait({
+      botToken: sl.botToken,
+      appToken: sl.appToken,
+      code,
+    });
+    sl.userId = userId;
+    await persist();
+    slackError.value = false;
+    slackMessage.value = t("settings.channels.slackDetected", { userId });
+  } catch (e) {
+    slackMessage.value = String(e);
+    slackError.value = true;
+  } finally {
+    slackDetecting.value = false;
+    slackDetectCode.value = null;
   }
 }
 
@@ -1253,6 +1337,124 @@ onMounted(async () => {
               :class="feishuError ? 'err' : 'ok'"
             >
               {{ feishuMessage }}
+            </p>
+          </template>
+        </div>
+
+        <div class="card">
+          <div class="row">
+            <p class="card-title">{{ t("settings.channels.slackTitle") }}</p>
+            <span class="spacer"></span>
+            <label class="switch">
+              <input
+                type="checkbox"
+                v-model="config.channels.slack.enabled"
+                @change="persist"
+              />
+              <span class="track"></span>
+            </label>
+          </div>
+
+          <template v-if="config.channels.slack.enabled">
+            <hr class="divider" />
+            <div class="field">
+              <label>{{ t("settings.channels.slackBotToken") }}</label>
+              <div class="row">
+                <input
+                  class="input"
+                  style="flex: 1"
+                  type="password"
+                  :placeholder="
+                    secretsPresent.slackBotToken ? SECRET_PLACEHOLDER : 'xoxb-…'
+                  "
+                  v-model="config.channels.slack.botToken"
+                  @change="persist"
+                />
+                <button
+                  v-if="secretsPresent.slackBotToken"
+                  class="btn"
+                  type="button"
+                  @click="clearSecret('slackBot')"
+                >
+                  {{ t("settings.channels.clearSecret") }}
+                </button>
+              </div>
+            </div>
+            <div class="field">
+              <label>{{ t("settings.channels.slackAppToken") }}</label>
+              <div class="row">
+                <input
+                  class="input"
+                  style="flex: 1"
+                  type="password"
+                  :placeholder="
+                    secretsPresent.slackAppToken ? SECRET_PLACEHOLDER : 'xapp-…'
+                  "
+                  v-model="config.channels.slack.appToken"
+                  @change="persist"
+                />
+                <button
+                  v-if="secretsPresent.slackAppToken"
+                  class="btn"
+                  type="button"
+                  @click="clearSecret('slackApp')"
+                >
+                  {{ t("settings.channels.clearSecret") }}
+                </button>
+              </div>
+            </div>
+            <div class="field">
+              <label>{{ t("settings.channels.slackUserId") }}</label>
+              <div class="row">
+                <input
+                  class="input"
+                  style="flex: 1"
+                  v-model="config.channels.slack.userId"
+                  @change="persist"
+                />
+                <button
+                  class="btn"
+                  type="button"
+                  :disabled="slackDetecting"
+                  @click="runSlackDetect"
+                >
+                  {{
+                    slackDetecting
+                      ? t("settings.channels.detecting")
+                      : t("settings.channels.autoDetect")
+                  }}
+                </button>
+              </div>
+            </div>
+            <i18n-t
+              v-if="slackDetectCode"
+              keypath="settings.channels.slackDetectHint"
+              tag="p"
+              class="result ok"
+            >
+              <template #code><b>{{ slackDetectCode }}</b></template>
+            </i18n-t>
+            <div class="row">
+              <button
+                class="btn"
+                type="button"
+                :disabled="slackTesting"
+                @click="runSlackTest"
+              >
+                {{
+                  slackTesting
+                    ? t("settings.channels.testing")
+                    : t("settings.channels.testConnection")
+                }}
+              </button>
+              <span class="spacer"></span>
+            </div>
+            <p
+              v-if="slackMessage"
+              class="result"
+              :class="slackError ? 'err' : 'ok'"
+            >
+              {{ slackMessage }}
             </p>
           </template>
         </div>
