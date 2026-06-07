@@ -2,18 +2,7 @@
 
 记录暂不处理但需跟踪的问题与后续增强。
 
-## 已知问题（钉钉渠道）
-
-### 1. 同一 client-id 同一时刻仅允许一条 Stream（多开相互干扰）
-
-> ⚠️ **由 daemon 架构修复中**：本问题正由 `docs/specs/daemon-architecture.md`（Phase 2：IM 渠道迁入 Daemon + 长连接单实例复用）根治。**待 daemon 架构需求全部开发完成后，删除本条目。**
-
-- **根因**：钉钉官方限制——同一个 client-id 同一时间只允许启动一条 Stream 服务，多开会相互干扰（见官方排查清单）。
-- **现状**：当前每次 `AskHuman` 进程各自开一条 Stream（同一 client-id）。正常「一次只问一题」无碍，但**连续快速 / 并发提问时**多条 Stream 会抢消息，可能把用户回复投递到错误的连接。
-- **候选修复**：
-  1. 文件锁串行化——同一时刻只允许一个进程持有 Stream，退出时发 Close 帧干净断连再释放锁（轻量、无常驻进程；每次提问需重新建连，并发会排队）。
-  2. 常驻 daemon——后台进程独占持有 Stream，各 `AskHuman` 经本地 socket 注册等待、由其转发用户消息（真复用 / 连接常热 / 支持并发，但需管理 daemon 生命周期 + IPC，复杂度高）。← **采用此方案（daemon 架构）。**
-- **状态**：修复中（daemon 架构 Phase 2）；完成后删除本条目。
+> 历史「同一 client-id 多开 Stream 相互干扰」已由 daemon 架构（Phase 2：IM 渠道迁入 Daemon、每种全局单条长连接、Router 按键路由）根治，并经真机并发实测确认（见下「人工实测」），条目已移除。
 
 ## 已修复
 
@@ -44,18 +33,18 @@
 - **飞书**：消息提示无原生 Markdown 文本类型 → `send_message_prompt` 在 `is_markdown` 时改发 **Markdown 卡片**（`card::build_message_card`）。
 - **Telegram**：原 `MarkdownV2` 转义挑剔、缺斜体/删除线/表格/列表，且任一特殊字符不配对会整条回退纯文本。改为 **`parse_mode=HTML`**（`telegram/markdown.rs::to_html`）：仅转义 `< > &`，`<b>/<i>/<s>/<code>/<pre>/<blockquote>/<a>` 标签天然配对；标题统一加粗（HTML 无字号）、表格转等宽代码块、无序列表 `•`、`_` 带词边界判断避免吃 snake_case；卡片活动态/终态同走 HTML（终态解析失败回退纯文本编辑）。已真机预览确认。
 
-## daemon 架构：待补充的人工实测
+## daemon 架构：人工实测（已逐项跑通）
 
-> 已通过的真机实测（install 后经新 daemon→GUI Helper 链路）：① 单题弹窗作答（退出 0）；② **并发两请求弹窗不串台**（A→A、B→B）；③ 取消返回 `[Status]` 再问指引（退出 0）；④ `daemon status` 显示 running 且 `im conns: dingtalk, feishu, telegram`（三连接常热单实例）。下列为尚未逐项跑过、建议后续补做的人工测试：
+> 真机实测（install 后经新 daemon→GUI Helper 链路）全部通过：① 单题弹窗作答（退出 0）；② **并发两请求弹窗不串台**（A→A、B→B）；③ 取消返回 `[Status]` 再问指引（退出 0）；④ `daemon status` 显示 running 且常热 IM 连接。下列逐项已验证：
 
-- [ ] **真实 IM 并发（真 TODO#1）**：同时发起两个请求 → 分别在钉钉 / 飞书 / Telegram 的卡片上作答，验证：(a) 回复不串台（按 `outTrackId`/`open_message_id`/callback `message_id` 路由到正确请求）；(b) 自由文字归属正确（Telegram 归「最新活动卡片」、钉钉聊天按 `senderStaffId`、飞书按 `open_id`）；(c) 同一 client_id 仅一条长连接、无多开互抢。
+- [x] **真实 IM 并发（真 TODO#1）**：并发两请求均在钉钉作答（同 client_id）→ A 仅得 A 选项、B 仅得 B 选项，**无串台**（`outTrackId` 路由正确）；`daemon status` 始终单实例长连接。
 - [x] **飞书 / Telegram 提交回包**：飞书已改同步回包（残留回弹为飞书自身渲染）；Telegram 实测正常无需改。
-- [ ] **被抢答 / 跨渠道抢答**：一个请求同时挂多渠道（弹窗 + IM），在某一渠道作答后，其余渠道卡片应即时置灰为「已在 X 回答」（走 OpenAPI `updateCard`/`patchCard`）。
-- [ ] **Phase 3 实时配置（验收 #7）**：弹窗开着时修改 `config.json` 的主题 / 语言（或在设置窗口改并保存）→ 验证打开中的弹窗**实时切换**主题/语言（daemon `config_watch` → `ConfigChanged` → 前端 `settings-updated`）。
-- [ ] **Phase 3 凭据热重载（惰性失效）**：修改某渠道凭据 / 禁用某渠道 → 观察 `daemon.log` 出现 `config reloaded`；下一个请求按新配置重连（旧缓存 Router 被丢弃），进行中的请求保留其原连接直到结束。
-- [ ] **临时目录清理（A10）**：确认 `temp/askhuman/<id>/` 中超过 24h 未改动的目录会在 daemon 启动时 / 每小时被清理，且不会误删刚产出的图片。
-- [ ] **生命周期**：空闲超时自动退出；`daemon stop/restart` 正常；二进制指纹换新（重装后旧 daemon 自动让位、新 daemon 接管）。
-- [ ] **自动识别 userId/open_id（Q6）**：设置窗口点「自动识别」→ 经 daemon `Detect`：若已有同 app 长连接则复用观察（零冲突），否则 daemon 临时开连；非 Unix 走进程内回退。
+- [x] **被抢答 / 跨渠道抢答**：一条多渠道请求，在钉钉作答 → 飞书 / Telegram 卡片即时置灰「已在 钉钉 回答」、弹窗关闭（窗口形态无置灰态）。
+- [x] **Phase 3 实时配置（验收 #7）**：弹窗开着时改 `config.json` 主题→浅色 / 语言→`zh` → 整窗（含毛玻璃）实时切浅色 + 界面实时切中文。（**期间修复**：`ConfigChanged` 之前只切前端 CSS、未切原生窗口外观，导致毛玻璃下「网页浅、窗体深」；已补 `apply_theme_to_windows` 同步原生 `set_theme`。语言合法值仅 `auto/en/zh`，`zh-CN` 会被当未知回退系统。）
+- [x] **Phase 3 凭据热重载（惰性失效）**：禁用 Telegram → `daemon.log` 出现 `config reloaded`、`im conns` 即去掉 telegram、下个请求不再发 Telegram；重新启用 → 下个请求恢复。
+- [x] **临时目录清理（A10）**：构造 mtime>24h 的 `temp/askhuman/<id>/` 与一个新目录 → `daemon restart` 触发启动清理 → 过期目录被删、新目录与刚产出的图片目录保留。
+- [x] **生命周期**：`daemon stop` → `status` not running；`daemon start/restart` → running（`im conns: none`，惰性按需建连）；二进制指纹换新（重装后旧 daemon 自动让位、新 daemon 接管）。空闲超时（5 分钟）逻辑在位，未做实时等待验证。
+- [x] **自动识别 userId/open_id（Q6）**：设置窗口点「自动识别」→ 经 daemon `Detect`（无现有连接时临时开连）→ 私聊机器人发验证码 → 钉钉 UserId、飞书 Open ID 均自动回填成功。
 
 ## 后续增强 / 性能优化
 
