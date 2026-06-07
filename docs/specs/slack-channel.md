@@ -109,3 +109,5 @@ AskHuman "请看看这个改动？" -f ./diff.patch -q "要继续吗？" -o "继
 ## 7. 反馈意见
 
 （review 中产生的调整意见追加于此，标注日期。）
+
+- **2026-06-07（真机联调）**：发现安装文档遗漏「启用 App Home 私聊」这一必备步骤。Slack 自 2021 起默认禁止用户主动 DM 机器人（opt-in），不开则 DM 输入框置灰、提示「Sending messages to this app has been turned off」，导致自动识别的 4 位码与作答期回传图片/文件被挡。需在 App 配置 **Features → App Home → Show Tabs** 打开 **Messages Tab** 并勾选 **Allow users to send Slash commands and messages from the messages tab**，保存后刷新/重装。仅文档修订（`docs/wiki/slack-setup.md` 与 `.en.md` 新增「启用 App Home 私聊」一节 + 故障排查行），不涉及代码逻辑变更。

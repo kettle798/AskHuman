@@ -43,7 +43,16 @@ This guide explains how to create and configure a Slack App so AskHuman's "Slack
    > Under Socket Mode no Request URL is needed either; the `block_actions` interaction from tapping the card's "Submit" button is delivered over the long connection.
 2. Save.
 
-## 6. Fill in AskHuman
+## 6. Enable App Home messaging (required)
+
+Since 2021 Slack **disables users from messaging a bot by default** (it's now opt-in). Skip this and, in the DM with the bot, you'll see "Sending messages to this app has been turned off" with a greyed-out input box — which blocks the "Auto-detect" 4-digit code and any images / files you try to send back while answering.
+
+1. In the sidebar, **Features → App Home** → find **Show Tabs**.
+2. Turn on the **Messages Tab** toggle.
+3. Check **Allow users to send Slash commands and messages from the messages tab**.
+4. Save, then refresh your Slack client (reinstall the app if needed); the DM input box will then work.
+
+## 7. Fill in AskHuman
 
 Open AskHuman settings → "Channels" → "Slack", enable the toggle, then fill in:
 
@@ -57,7 +66,7 @@ Then click "Test connection": it validates the Bot Token (`auth.test` plus sendi
 
 > If you can't find the User ID, use "Auto-detect". Manually: in Slack, open the target user's profile → More (···) → Copy member ID.
 
-## 7. Interaction & fallback behavior
+## 8. Interaction & fallback behavior
 
 - Questions are sent per-question as a **Block Kit in-message form**: checkboxes (multi-select predefined options) + a multiline input (free text) + a "Submit" button. Tapping "Submit" completes the question (the interaction comes over Socket Mode; the transport acks each frame on receipt to satisfy Slack's 3-second requirement, handled automatically).
 - On submit / when preempted, the card is replaced via `chat.update` with a **static terminal state**: the question is kept, selected options (✓) and the note (💬) are echoed back, and a status line is added ("Submitted" / "Answered via X" / "Cancelled"), with all controls removed.
@@ -65,13 +74,14 @@ Then click "Test connection": it validates the Bot Token (`auth.test` plus sendi
 - If the card fails to deliver, it automatically **falls back** to "plain text + numbered options": reply with option numbers (comma-separated for multiple, e.g. `1,3`), type free text, or send images / files.
 - With multiple channels enabled, the whole conversation is a single race: whichever side finishes answering all questions first wins, and the others finalize automatically (the Slack card updates to an "Answered via X" terminal state).
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Likely cause |
 | --- | --- |
+| DM input box is greyed out / "Sending messages to this app has been turned off" | The App Home Messages Tab isn't enabled for user messaging (see step 6); refresh or reinstall the app afterwards |
 | Test connection reports `invalid_auth` / `not_authed` | Wrong Bot Token, or you changed scopes without re-installing to the workspace |
 | Test connection reports an App Token error | Wrong App-Level Token, or it lacks the `connections:write` scope |
-| No incoming user messages / auto-detect keeps waiting | The `message.im` event isn't subscribed, or Socket Mode isn't enabled; reinstall the app after changes |
+| No incoming user messages / auto-detect keeps waiting | The `message.im` event isn't subscribed, or Socket Mode isn't enabled, or App Home messaging (step 6) isn't enabled; reinstall the app after changes |
 | Tapping the card's "Submit" does nothing | The **Interactivity** toggle is off |
 | File send / download permission errors | Missing `files:write` / `files:read` scope (effective after reinstall) |
 | Sending reports `channel_not_found` | `im:write` not granted, so the DM channel can't be opened |

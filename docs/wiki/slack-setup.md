@@ -43,7 +43,16 @@
    > Socket Mode 下同样无需填写 Request URL；用户点卡片「提交」按钮产生的 `block_actions` 交互经长连接回传。
 2. 保存。
 
-## 六、在 AskHuman 中填写
+## 六、启用 App Home 私聊（必做）
+
+Slack 自 2021 年起默认**禁止用户主动给机器人发私聊**（改为按需开启）。不开这一步，你在与机器人的 DM 里会看到「Sending messages to this app has been turned off」、输入框置灰发不出消息——「自动识别」的 4 位码、作答期间回传图片 / 文件都会被挡住。
+
+1. 左侧 **Features → App Home** → 找到 **Show Tabs**。
+2. 打开 **Messages Tab** 开关。
+3. 勾选其下的 **Allow users to send Slash commands and messages from the messages tab**。
+4. 保存，回 Slack 客户端刷新（必要时重新安装应用）；之后 DM 输入框即可正常发送。
+
+## 七、在 AskHuman 中填写
 
 打开 AskHuman 设置页 → 「通信渠道」→「Slack」，开启开关后填写：
 
@@ -57,7 +66,7 @@
 
 > 找不到 User ID 时，建议直接用「自动识别」。手动获取方式：在 Slack 中点开目标用户头像 → 资料 → 更多（···）→ Copy member ID。
 
-## 七、交互与回退行为
+## 八、交互与回退行为
 
 - 提问以 **Block Kit 消息内表单**逐题发送：消息内放复选框（多选预定义选项）+ 多行输入框（补充文字）+「提交」按钮，点「提交」完成该题（交互经 Socket Mode 回传；底层收帧即应答，满足 Slack 3 秒确认要求，已自动处理）。
 - 提交 / 被抢答收尾时，卡片用 `chat.update` 替换为**静态终态**：保留题目，回显已选项（✓）与补充文字（💬），并加一行状态（「已提交」/「已在 X 回答」/「已取消」），移除所有控件。
@@ -65,13 +74,14 @@
 - 若卡片投放失败，会自动**回退**为「纯文本 + 编号选项」：回复编号（多选用逗号，如 `1,3`）/ 直接输入文字 / 发送图片 / 文件均可作答。
 - 多渠道同启时以「整个会话」为粒度**抢答**：哪端先答完全部题即采用该端结果，其余自动收尾（Slack 卡片会被更新成「已在 X 回答」终态）。
 
-## 八、常见问题
+## 九、常见问题
 
 | 现象 | 可能原因 |
 | --- | --- |
+| DM 输入框置灰 / 提示「Sending messages to this app has been turned off」 | 未启用 App Home 的 Messages Tab 私聊（见第六步），改后刷新或重装应用 |
 | 测试连接报 `invalid_auth` / `not_authed` | Bot Token 错误，或改了 scope 后未重新 Install to Workspace |
 | 测试连接报 App Token 相关错误 | App-Level Token 错误，或未给它勾选 `connections:write` scope |
-| 收不到用户消息 / 自动识别一直等待 | 未订阅 `message.im` 事件，或未开启 Socket Mode；改动后需重新安装应用 |
+| 收不到用户消息 / 自动识别一直等待 | 未订阅 `message.im` 事件，或未开启 Socket Mode，或未启用 App Home 私聊（第六步）；改动后需重新安装应用 |
 | 点卡片「提交」无反应 | 未开启 **Interactivity** 开关 |
 | 发送 / 下载文件报权限错误 | 缺少 `files:write` / `files:read` scope（重新安装后生效） |
 | 发消息报 `channel_not_found` | `im:write` 未授予，无法打开 DM 频道 |
