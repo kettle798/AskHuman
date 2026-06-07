@@ -208,15 +208,21 @@ impl AppConfig {
     }
 
     /// 原子写入指定路径（临时文件 + rename）。
+    /// The config holds channel secrets (DingTalk/Feishu AppSecret, Telegram bot token), so the
+    /// file is restricted to owner-only (0600) and its directory to 0700 on Unix.
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
+            harden_dir(dir);
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         let tmp = path.with_extension(format!("json.tmp-{}", uuid::Uuid::new_v4()));
         std::fs::write(&tmp, json.as_bytes())?;
+        // Restrict the temp file before rename so the published file is never briefly world-readable.
+        harden_file(&tmp);
         std::fs::rename(&tmp, path)?;
+        harden_file(path);
         Ok(())
     }
 
@@ -225,10 +231,17 @@ impl AppConfig {
     pub fn load() -> Self {
         let primary = paths::config_file();
         if primary.exists() {
+            // Self-heal: tighten perms of a pre-existing file that may have been written with a
+            // looser umask (e.g. 0644) before this hardening was added.
+            harden_file(&primary);
+            if let Some(dir) = primary.parent() {
+                harden_dir(dir);
+            }
             return Self::load_from(&primary);
         }
         let legacy = paths::legacy_config_file();
         if legacy.exists() {
+            harden_file(&legacy);
             return Self::load_from(&legacy);
         }
         Self::default()
@@ -239,6 +252,24 @@ impl AppConfig {
         self.save_to(&paths::config_file())
     }
 }
+
+/// Restrict a file to owner read/write (0600) on Unix; no-op elsewhere. Best-effort (ignores errors).
+#[cfg(unix)]
+fn harden_file(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+#[cfg(not(unix))]
+fn harden_file(_path: &Path) {}
+
+/// Restrict a directory to owner-only (0700) on Unix; no-op elsewhere. Best-effort (ignores errors).
+#[cfg(unix)]
+fn harden_dir(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+}
+#[cfg(not(unix))]
+fn harden_dir(_path: &Path) {}
 
 #[cfg(test)]
 mod tests {
@@ -320,5 +351,16 @@ mod tests {
         assert_eq!(loaded.general.theme, ThemeMode::Dark);
         assert!(loaded.channels.telegram.enabled);
         assert_eq!(loaded.channels.telegram.chat_id, "12345");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        AppConfig::default().save_to(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "config file must be owner read/write only");
     }
 }

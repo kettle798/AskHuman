@@ -821,6 +821,7 @@ onMounted(async () => {
               <label>{{ t("settings.channels.botToken") }}</label>
               <input
                 class="input"
+                type="password"
                 v-model="config.channels.telegram.botToken"
                 @change="persist"
               />
