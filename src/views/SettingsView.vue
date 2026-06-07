@@ -200,7 +200,7 @@ async function changeAnimation(anim: PopupAnimation) {
 const historyTotal = ref(0);
 const overLimit = computed(() => {
   const limit = config.value?.general.historyLimit ?? 0;
-  return limit > 0 && historyTotal.value > limit;
+  return historyTotal.value > limit;
 });
 
 // 改保留条数：仅持久化；裁剪发生在下次 AskHuman 或点击「立即清理」。

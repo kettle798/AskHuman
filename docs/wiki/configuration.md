@@ -30,7 +30,7 @@
     "windowEffect": "glass",    // glass | blur
     "speechLanguage": "auto",   // BCP-47，如 zh-CN / en-US
     "speechShortcut": "cmd+d",  // 空串表示关闭
-    "historyLimit": 200         // 回复历史全局保留条数；0 = 停止新增但保留旧记录
+    "historyLimit": 200         // 回复历史全局保留条数；0 = 停止新增并清理已有记录
   },
   "channels": {
     "popup":    { "enabled": true, "width": 560, "height": 620, "rememberSize": true },
@@ -47,7 +47,7 @@
 
 - 打开方式：`AskHuman --history`（默认仅当前项目），或在弹窗右上角点「历史」按钮。加 `--all` 查看全部项目。窗口内也可用顶部下拉切换项目。
 - 项目识别：从命令运行目录向上找首个 `.git` 仓库根；没有 `.git` 则用当前目录。
-- 保留条数：由 `general.historyLimit` 控制（默认 200）。设为 `0` 会停止新增记录，但已有记录仍可查看。在设置页调小到低于现有条数时会出现提示，可点「立即清理」按新上限裁剪。
+- 保留条数：由 `general.historyLimit` 控制（默认 200）。设为 `0` 会停止新增记录，并清理已有记录（与正常上限一样，在下次调用 `AskHuman` 或点「立即清理」时裁剪）。当现有条数超过上限（含设为 0）时，设置页会出现提示，可点「立即清理」立即按上限裁剪。
 - 清空：历史窗口右上角「清空」可清「当前项目」或「全部项目」。
 
 ## 环境变量

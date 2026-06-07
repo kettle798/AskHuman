@@ -450,6 +450,18 @@
   width: 100%;
   box-sizing: border-box;
 }
+/* 数字输入（如历史条数）：固定窄宽、右对齐，去掉浏览器自带的上下步进按钮，避免撑宽行挤压 label */
+.input.num {
+  width: 84px;
+  flex: 0 0 auto;
+  text-align: right;
+}
+.input.num::-webkit-outer-spin-button,
+.input.num::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+}
 
 /* 状态徽标 */
 .badge {

@@ -30,7 +30,7 @@ Shape overview:
     "windowEffect": "glass",    // glass | blur
     "speechLanguage": "auto",   // BCP-47, e.g. zh-CN / en-US
     "speechShortcut": "cmd+d",  // empty string disables it
-    "historyLimit": 200         // global reply-history retention; 0 = stop recording but keep old entries
+    "historyLimit": 200         // global reply-history retention; 0 = stop recording and clear old entries
   },
   "channels": {
     "popup":    { "enabled": true, "width": 560, "height": 620, "rememberSize": true },
@@ -47,7 +47,7 @@ Every reply (a "send" completed in the popup or any IM channel, plus a cancel yo
 
 - Open it with `AskHuman --history` (current project only by default), or click the "History" button in the popup's top-right. Add `--all` to view every project; the window also has a top dropdown to switch projects.
 - Project identification: walk up from the command's working directory to the first `.git` repository root; if there's no `.git`, the working directory is used.
-- Retention: controlled by `general.historyLimit` (default 200). Setting it to `0` stops recording new entries, but existing entries remain viewable. Lowering it below the existing count in settings shows a notice with a "Clean up now" button to trim to the new limit.
+- Retention: controlled by `general.historyLimit` (default 200). Setting it to `0` stops recording new entries and clears existing ones (trimmed on the next `AskHuman` call or via "Clean up now", just like a positive limit). Whenever the existing count exceeds the limit (including `0`), settings shows a notice with a "Clean up now" button to trim to the limit immediately.
 - Clear: the "Clear" menu in the history window can clear the "current project" or "all projects".
 
 ## Environment variables

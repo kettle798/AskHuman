@@ -82,12 +82,10 @@ pub fn now_ms() -> i64 {
 
 // ===== Public API (locks + default file path) =====
 
-/// Append one entry then trim to the most recent `limit`. No-op when `limit == 0` (recording off:
-/// existing entries are preserved, never truncated to zero here). Best-effort: errors are ignored.
+/// Append one entry (only when `limit > 0`) then trim to the most recent `limit`. When `limit == 0`
+/// no new entry is recorded, but existing entries are still trimmed to the limit (i.e. cleared) on
+/// the same schedule as a positive limit. Best-effort: errors are ignored.
 pub fn record(entry: HistoryEntry, limit: u32) {
-    if limit == 0 {
-        return;
-    }
     let _guard = lock();
     record_at(&paths::history_file(), entry, limit);
 }
@@ -107,8 +105,8 @@ pub fn count() -> usize {
     read_all_at(&paths::history_file()).len()
 }
 
-/// Trim to the most recent `limit` entries. `limit == 0` keeps all (no truncation). Returns the
-/// remaining entry count.
+/// Trim to the most recent `limit` entries (`limit == 0` clears all). Returns the remaining entry
+/// count.
 pub fn trim(limit: u32) -> usize {
     let _guard = lock();
     trim_at(&paths::history_file(), limit)
@@ -123,11 +121,15 @@ pub fn clear(scope: ClearScope) {
 // ===== Core logic (path-parameterized, lock-free; unit-testable) =====
 
 fn record_at(path: &Path, entry: HistoryEntry, limit: u32) {
-    if limit == 0 {
+    let mut entries = read_all_at(path);
+    // limit == 0 stops recording new entries, but existing ones are still trimmed to the limit
+    // (i.e. cleared) on the same schedule as a positive limit. Skip touching disk when there is
+    // nothing to add and nothing to clear.
+    if limit > 0 {
+        entries.push(entry);
+    } else if entries.is_empty() {
         return;
     }
-    let mut entries = read_all_at(path);
-    entries.push(entry);
     trim_vec(&mut entries, limit as usize);
     let _ = write_all_at(path, &entries);
 }
@@ -167,9 +169,6 @@ fn projects_at(path: &Path) -> Vec<ProjectInfo> {
 
 fn trim_at(path: &Path, limit: u32) -> usize {
     let mut entries = read_all_at(path);
-    if limit == 0 {
-        return entries.len();
-    }
     trim_vec(&mut entries, limit as usize);
     let _ = write_all_at(path, &entries);
     entries.len()
@@ -188,9 +187,10 @@ fn clear_at(path: &Path, scope: ClearScope) {
     }
 }
 
-/// Keep only the most recent `limit` entries (entries are in append order: oldest first).
+/// Keep only the most recent `limit` entries (entries are in append order: oldest first);
+/// `limit == 0` drops them all.
 fn trim_vec(entries: &mut Vec<HistoryEntry>, limit: usize) {
-    if limit > 0 && entries.len() > limit {
+    if entries.len() > limit {
         let drop = entries.len() - limit;
         entries.drain(0..drop);
     }
@@ -326,6 +326,18 @@ mod tests {
     }
 
     #[test]
+    fn limit_zero_clears_existing_but_adds_nothing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        record_at(&path, entry("a", "/p", 1), 200);
+        record_at(&path, entry("b", "/p", 2), 200);
+        assert_eq!(read_all_at(&path).len(), 2);
+        // limit 0: the new entry is not added, and existing entries are trimmed to 0 (cleared).
+        record_at(&path, entry("c", "/p", 3), 0);
+        assert_eq!(read_all_at(&path).len(), 0);
+    }
+
+    #[test]
     fn filter_by_project() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("history.jsonl");
@@ -361,15 +373,17 @@ mod tests {
     }
 
     #[test]
-    fn trim_zero_keeps_all() {
+    fn trim_zero_clears_all() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("history.jsonl");
         for i in 0..4 {
             record_at(&path, entry(&format!("e{i}"), "/p", i), 200);
         }
-        assert_eq!(trim_at(&path, 0), 4);
-        assert_eq!(read_all_at(&path).len(), 4);
+        // Trimming to a positive limit keeps the most recent N.
         assert_eq!(trim_at(&path, 2), 2);
         assert_eq!(read_all_at(&path).len(), 2);
+        // Trimming to 0 clears everything.
+        assert_eq!(trim_at(&path, 0), 0);
+        assert_eq!(read_all_at(&path).len(), 0);
     }
 }

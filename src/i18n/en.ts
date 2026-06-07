@@ -164,7 +164,7 @@ export default {
       title: "Reply history",
       limit: "Entries to keep",
       limitHint:
-        "Maximum number of replies kept across all projects. 0 stops recording new replies (existing ones are kept).",
+        "Maximum number of replies kept across all projects. 0 stops recording new replies and clears existing ones.",
       overLimit:
         "There are more entries than this; they'll be trimmed on the next AskHuman call.",
       cleanNow: "Clean up now",
