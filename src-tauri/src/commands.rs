@@ -249,7 +249,9 @@ pub fn history_init(state: State<AppState>) -> HistoryInit {
 /// 从弹窗导航栏打开独立历史窗口（同进程内创建，默认当前项目）。
 #[tauri::command]
 pub fn open_history(app: AppHandle) -> Result<(), String> {
-    crate::app::create_history_window(&app, &AppConfig::load(), false).map_err(|e| e.to_string())
+    // History window only needs general (theme); skip keychain via load_without_secrets().
+    crate::app::create_history_window(&app, &AppConfig::load_without_secrets(), false)
+        .map_err(|e| e.to_string())
 }
 
 /// 读取历史记录：`all` 为 true 时返回全部项目，否则按 `project`（缺省空串）过滤；按时间倒序。
@@ -466,7 +468,9 @@ pub fn set_theme(app: AppHandle, theme: String) {
 /// 从弹窗导航栏切换主题：写入配置并实时应用到所有窗口。
 #[tauri::command]
 pub fn update_theme(app: AppHandle, theme: String) -> Result<(), String> {
-    let mut cfg = AppConfig::load();
+    // Only the theme changes; load without resolving secrets so save() neither reads nor rewrites
+    // the keychain (blank secret fields are left as-is by save()).
+    let mut cfg = AppConfig::load_without_secrets();
     cfg.general.theme = match theme.as_str() {
         "light" => ThemeMode::Light,
         "dark" => ThemeMode::Dark,
@@ -495,7 +499,10 @@ pub(crate) fn apply_theme_to_windows(app: &AppHandle, theme: &str) {
 /// 从弹窗导航栏打开设置窗口（同进程内创建，不影响弹窗等待）。
 #[tauri::command]
 pub fn open_settings(app: AppHandle) -> Result<(), String> {
-    crate::app::create_settings_window(&app, &AppConfig::load()).map_err(|e| e.to_string())
+    // Settings window only needs general (theme) to build; the page fetches secret presence via
+    // get_settings() separately. Skip keychain here.
+    crate::app::create_settings_window(&app, &AppConfig::load_without_secrets())
+        .map_err(|e| e.to_string())
 }
 
 /// 实时切换弹窗背景效果（玻璃/模糊）到所有已打开窗口（仅 macOS 26+ 真正切换）。

@@ -30,8 +30,10 @@ impl Lang {
     }
 
     /// 读取已保存配置解析当前界面语言。
+    /// 仅需 `general.language`，故用 `load_without_secrets()`：语言探测绝不应触发钥匙串读取
+    /// （否则 `--version`/`--help` 等无关命令也会读钥匙串，甚至在签名不匹配时弹密码框）。
     pub fn current() -> Lang {
-        Lang::resolve(&AppConfig::load().general.language)
+        Lang::resolve(&AppConfig::load_without_secrets().general.language)
     }
 
     /// 解析后的语言码（"en" / "zh"）。供 CLI 上送 Daemon（A11：使 `auto` 跟随调用方）。

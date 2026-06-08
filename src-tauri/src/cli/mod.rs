@@ -37,8 +37,10 @@ pub fn dispatch() {
             println!("{}", help::agent_help_text(lang));
             exit(0);
         }
+        // 设置/历史窗口只需 general(主题)；密钥的「已保存」判定由前端 `get_settings` 单独读取。
+        // 故用 load_without_secrets()，避免打开这两个窗口时无谓读钥匙串。
         "--settings" => {
-            crate::app::run_settings(crate::config::AppConfig::load());
+            crate::app::run_settings(crate::config::AppConfig::load_without_secrets());
         }
         // 独立历史窗口：默认当前项目（向上找 .git 根、回退 cwd）；`--all` 默认展示全部项目。
         "--history" => {
@@ -46,7 +48,7 @@ pub fn dispatch() {
             crate::app::run_history(
                 crate::project::detect(),
                 all,
-                crate::config::AppConfig::load(),
+                crate::config::AppConfig::load_without_secrets(),
             );
         }
         // 隐藏的 GUI Helper 角色：由 Daemon spawn（`--popup --endpoint <sock> --token <tok>`）。

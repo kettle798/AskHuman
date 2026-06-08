@@ -509,7 +509,9 @@ pub fn run_gui_helper(_endpoint: String, token: String) -> ! {
     let request_id = show.request_id.clone();
     let state = AppState {
         request: show.request,
-        config: AppConfig::load(),
+        // The popup helper never connects to IM (the daemon does); it only needs general/theme/
+        // popup-size config. Skip keychain via load_without_secrets().
+        config: AppConfig::load_without_secrets(),
         source: show.source,
         project: show.project,
     };
@@ -748,11 +750,13 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                     }
                 }
                 View::Settings => {
-                    let config = AppConfig::load();
+                    // Window build only needs general (theme); get_settings() reads secrets later.
+                    let config = AppConfig::load_without_secrets();
                     create_settings_window(app, &config)?;
                 }
                 View::History { all } => {
-                    let config = AppConfig::load();
+                    // History window only needs general (theme); skip keychain.
+                    let config = AppConfig::load_without_secrets();
                     create_history_window(app, &config, all)?;
                 }
             }
@@ -1156,7 +1160,9 @@ fn persist_popup_size(window: &tauri::Window) {
         return;
     }
     if let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) {
-        let mut cfg = AppConfig::load();
+        // Only the popup size changes; load without secrets so save() neither reads nor rewrites
+        // the keychain (blank secret fields are left as-is by save()).
+        let mut cfg = AppConfig::load_without_secrets();
         cfg.channels.popup.width = size.width as f64 / scale;
         cfg.channels.popup.height = size.height as f64 / scale;
         let _ = cfg.save();

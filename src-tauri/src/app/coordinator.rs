@@ -289,7 +289,8 @@ impl Coordinator {
         result: &ChannelResult,
         image_paths: &[Vec<String>],
     ) {
-        let limit = crate::config::AppConfig::load().general.history_limit;
+        // 仅需 history_limit（general）；用 load_without_secrets() 避免每条回答落历史都读钥匙串。
+        let limit = crate::config::AppConfig::load_without_secrets().general.history_limit;
         if limit == 0 {
             return;
         }

@@ -325,6 +325,31 @@ impl AppConfig {
         cfg
     }
 
+    /// Like `load()` but skips OS-keychain secret resolution/migration entirely.
+    ///
+    /// Use this from paths that only need non-secret config (UI language, theme, window size,
+    /// history limit). They get the on-disk values — in keychain mode the secret fields stay blank,
+    /// which is fine since these callers never read them — without ever touching the keychain. This
+    /// avoids needless keychain reads on functionally-unrelated commands (e.g. `--version`) and, on
+    /// macOS, the password prompt an untrusted/ad-hoc-signed binary would otherwise trigger.
+    /// Permissions are still hardened (self-heal), matching `load()`.
+    pub fn load_without_secrets() -> Self {
+        let primary = paths::config_file();
+        if primary.exists() {
+            harden_file(&primary);
+            if let Some(dir) = primary.parent() {
+                harden_dir(dir);
+            }
+            return Self::load_from(&primary);
+        }
+        let legacy = paths::legacy_config_file();
+        if legacy.exists() {
+            harden_file(&legacy);
+            return Self::load_from(&legacy);
+        }
+        Self::default()
+    }
+
     /// 写入默认位置。Secrets are stripped into the keychain and blanked on disk (plaintext
     /// fallback only when the keychain is unavailable).
     pub fn save(&self) -> std::io::Result<()> {
