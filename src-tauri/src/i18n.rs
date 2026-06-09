@@ -339,6 +339,9 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "cmd.testPopupFailed" => pick(lang, "Failed to launch the test popup: {e}", "启动测试弹窗失败: {e}"),
         "cmd.hookInstalled" => pick(lang, "Cursor Hook installed", "已安装 Cursor Hook"),
         "cmd.hookRemoved" => pick(lang, "Cursor Hook removed", "已移除 Cursor Hook"),
+        "cmd.ruleInstalled" => pick(lang, "Rule written", "已写入规则文件"),
+        "cmd.ruleRemoved" => pick(lang, "Rule removed", "已从规则文件移除"),
+        "cmd.unknownAgent" => pick(lang, "Unknown agent", "未知的 Agent"),
 
         // —— Telegram 测试连接（commands.telegram_test / test_connection）——
         "cmd.tgTestRemote" => pick(

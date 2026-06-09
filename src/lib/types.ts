@@ -198,6 +198,14 @@ export interface HookStatus {
   supported: boolean;
 }
 
+export type AgentId = "cursor" | "claude" | "codex";
+
+export interface RuleStatus {
+  installed: boolean;
+  path: string;
+  supported: boolean;
+}
+
 export interface TelegramTestArgs {
   botToken: string;
   chatId: string;

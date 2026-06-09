@@ -7,10 +7,12 @@ import type {
   FeishuDetectArgs,
   FeishuTestArgs,
   FeishuWaitArgs,
+  AgentId,
   HistoryEntry,
   HistoryInit,
   HookStatus,
   PopupInit,
+  RuleStatus,
   PopupSubmission,
   ProjectInfo,
   SecretActions,
@@ -102,6 +104,21 @@ export const cursorHookInstall = () => invoke<string>("cursor_hook_install");
 export const cursorHookUninstall = () => invoke<string>("cursor_hook_uninstall");
 
 export const cursorHookReveal = () => invoke<void>("cursor_hook_reveal");
+
+export const agentRuleStatus = (agent: AgentId) =>
+  invoke<RuleStatus>("agent_rule_status", { agent });
+
+export const agentRuleInstall = (agent: AgentId) =>
+  invoke<string>("agent_rule_install", { agent });
+
+export const agentRuleUninstall = (agent: AgentId) =>
+  invoke<string>("agent_rule_uninstall", { agent });
+
+export const agentRuleReveal = (agent: AgentId) =>
+  invoke<void>("agent_rule_reveal", { agent });
+
+export const agentRuleOpen = (agent: AgentId) =>
+  invoke<void>("agent_rule_open", { agent });
 
 export const telegramTest = (args: TelegramTestArgs) =>
   invoke<string>("telegram_test", { args });

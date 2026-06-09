@@ -588,6 +588,61 @@ pub fn cursor_hook_reveal() {
     cursor_hook::reveal();
 }
 
+// ===== Agent 全局规则（Cursor / Claude Code / Codex） =====
+
+use crate::integrations::agent_rules::{self, AgentTarget};
+
+/// Rules 安装状态（驱动设置页 Agent 分组的徽标与按钮）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleStatus {
+    installed: bool,
+    /// 展示用文件路径（home 折叠为 ~）。
+    path: String,
+    supported: bool,
+}
+
+fn parse_agent(agent: &str) -> Result<AgentTarget, String> {
+    AgentTarget::parse(agent)
+        .ok_or_else(|| crate::i18n::tr(crate::i18n::Lang::current(), "cmd.unknownAgent").to_string())
+}
+
+#[tauri::command]
+pub fn agent_rule_status(agent: String) -> Result<RuleStatus, String> {
+    let a = parse_agent(&agent)?;
+    Ok(RuleStatus {
+        installed: agent_rules::is_installed(a),
+        path: agent_rules::display_path(a),
+        supported: agent_rules::supported(a),
+    })
+}
+
+#[tauri::command]
+pub fn agent_rule_install(agent: String) -> Result<String, String> {
+    let a = parse_agent(&agent)?;
+    agent_rules::install(a).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn agent_rule_uninstall(agent: String) -> Result<String, String> {
+    let a = parse_agent(&agent)?;
+    agent_rules::uninstall(a).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn agent_rule_reveal(agent: String) -> Result<(), String> {
+    let a = parse_agent(&agent)?;
+    agent_rules::reveal(a);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn agent_rule_open(agent: String) -> Result<(), String> {
+    let a = parse_agent(&agent)?;
+    agent_rules::open(a);
+    Ok(())
+}
+
 // ===== Telegram 测试连接 =====
 
 #[derive(Deserialize)]

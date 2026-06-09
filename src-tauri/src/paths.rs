@@ -61,3 +61,33 @@ pub fn cursor_hook_script() -> PathBuf {
 pub fn legacy_cursor_hook_script() -> PathBuf {
     cursor_dir().join("hooks").join("humaninloop-timeout.sh")
 }
+
+/// Cursor 全局规则目录 `~/.cursor/rules`（用户级，跨项目，文件为 `*.mdc`）。
+pub fn cursor_rules_dir() -> PathBuf {
+    cursor_dir().join("rules")
+}
+
+/// 本应用独占的 Cursor 全局规则文件 `~/.cursor/rules/askhuman.mdc`。
+pub fn cursor_rule_file() -> PathBuf {
+    cursor_rules_dir().join("askhuman.mdc")
+}
+
+/// Claude Code 配置目录 `~/.claude`。
+pub fn claude_dir() -> PathBuf {
+    home().join(".claude")
+}
+
+/// Claude Code 全局 memory 文件 `~/.claude/CLAUDE.md`（用户级，跨项目）。
+pub fn claude_md() -> PathBuf {
+    claude_dir().join("CLAUDE.md")
+}
+
+/// Codex 配置目录 `~/.codex`。
+pub fn codex_dir() -> PathBuf {
+    home().join(".codex")
+}
+
+/// Codex 全局指令文件 `~/.codex/AGENTS.md`（用户级，跨项目）。
+pub fn codex_agents_md() -> PathBuf {
+    codex_dir().join("AGENTS.md")
+}

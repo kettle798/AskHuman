@@ -4,6 +4,11 @@ import { useI18n } from "vue-i18n";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { applyLanguage } from "../i18n";
 import {
+  agentRuleInstall,
+  agentRuleOpen,
+  agentRuleReveal,
+  agentRuleStatus,
+  agentRuleUninstall,
   applyWindowEffect,
   cursorHookInstall,
   cursorHookReveal,
@@ -38,9 +43,11 @@ import {
 } from "../lib/shortcut";
 import { isGlassSupported } from "tauri-plugin-liquid-glass-api";
 import type {
+  AgentId,
   AppConfig,
   HookStatus,
   PopupAnimation,
+  RuleStatus,
   SecretAction,
   SecretActions,
   SecretsPresent,
@@ -99,6 +106,70 @@ const hook = ref<HookStatus>({
 });
 const hookMessage = ref<string | null>(null);
 const hookError = ref(false);
+
+// 三个 Agent 的全局 Rules 安装状态 + 操作反馈。
+const AGENTS: { id: AgentId; title: string; hasHook: boolean }[] = [
+  { id: "cursor", title: "Cursor", hasHook: true },
+  { id: "claude", title: "Claude Code", hasHook: false },
+  { id: "codex", title: "Codex", hasHook: false },
+];
+const emptyRule = (): RuleStatus => ({
+  installed: false,
+  path: "",
+  supported: true,
+});
+const rules = ref<Record<AgentId, RuleStatus>>({
+  cursor: emptyRule(),
+  claude: emptyRule(),
+  codex: emptyRule(),
+});
+const ruleBusy = ref<Record<AgentId, boolean>>({
+  cursor: false,
+  claude: false,
+  codex: false,
+});
+const ruleMessage = ref<Record<AgentId, string | null>>({
+  cursor: null,
+  claude: null,
+  codex: null,
+});
+const ruleError = ref<Record<AgentId, boolean>>({
+  cursor: false,
+  claude: false,
+  codex: false,
+});
+
+async function refreshRule(agent: AgentId) {
+  rules.value[agent] = await agentRuleStatus(agent);
+}
+
+async function installRule(agent: AgentId) {
+  ruleBusy.value[agent] = true;
+  try {
+    ruleMessage.value[agent] = await agentRuleInstall(agent);
+    ruleError.value[agent] = false;
+  } catch (e) {
+    ruleMessage.value[agent] = String(e);
+    ruleError.value[agent] = true;
+  } finally {
+    ruleBusy.value[agent] = false;
+    await refreshRule(agent);
+  }
+}
+
+async function uninstallRule(agent: AgentId) {
+  ruleBusy.value[agent] = true;
+  try {
+    ruleMessage.value[agent] = await agentRuleUninstall(agent);
+    ruleError.value[agent] = false;
+  } catch (e) {
+    ruleMessage.value[agent] = String(e);
+    ruleError.value[agent] = true;
+  } finally {
+    ruleBusy.value[agent] = false;
+    await refreshRule(agent);
+  }
+}
 
 const telegramTesting = ref(false);
 const telegramMessage = ref<string | null>(null);
@@ -593,6 +664,7 @@ onMounted(async () => {
   prompt.value = await getPrompt();
   historyTotal.value = await historyCount();
   await refreshHook();
+  await Promise.all(AGENTS.map((a) => refreshRule(a.id)));
   if (isMac) {
     try {
       glassSupported.value = await isGlassSupported();
@@ -850,7 +922,7 @@ onMounted(async () => {
         </div>
       </template>
 
-      <!-- 集成 -->
+      <!-- Agent -->
       <template v-else-if="activeTab === 'integration'">
         <div class="card">
           <div class="row">
@@ -870,56 +942,119 @@ onMounted(async () => {
           <pre class="code-area">{{ prompt }}</pre>
         </div>
 
-        <div class="card">
-          <div class="row">
-            <p class="card-title">{{ t("settings.integration.hookTitle") }}</p>
-            <span class="spacer"></span>
+        <div v-for="a in AGENTS" :key="a.id" class="card agent-card">
+          <p class="card-title">{{ a.title }}</p>
+
+          <!-- Rules -->
+          <div class="row agent-row">
+            <span class="label">{{ t("settings.integration.rulesLabel") }}</span>
             <span class="badge">
-              <span class="dot" :class="hook.installed ? 'on' : 'off'"></span>
+              <span
+                class="dot"
+                :class="rules[a.id].installed ? 'on' : 'off'"
+              ></span>
               {{
-                hook.installed
+                rules[a.id].installed
                   ? t("settings.integration.installed")
                   : t("settings.integration.notInstalled")
               }}
             </span>
-          </div>
-          <p class="card-desc">
-            {{ t("settings.integration.hookDesc") }}
-          </p>
-          <div class="row">
-            <button
-              v-if="hook.installed"
-              class="btn"
-              type="button"
-              :disabled="!hook.supported"
-              @click="uninstallHook"
-            >
-              {{ t("settings.integration.uninstall") }}
-            </button>
+            <span class="spacer"></span>
+            <template v-if="rules[a.id].installed">
+              <button
+                class="btn"
+                type="button"
+                :disabled="ruleBusy[a.id]"
+                @click="uninstallRule(a.id)"
+              >
+                {{ t("settings.integration.uninstall") }}
+              </button>
+              <button class="btn" type="button" @click="agentRuleOpen(a.id)">
+                {{ t("settings.integration.openFile") }}
+              </button>
+              <button class="btn" type="button" @click="agentRuleReveal(a.id)">
+                {{ t("settings.integration.reveal") }}
+              </button>
+            </template>
             <button
               v-else
               class="btn"
               type="button"
-              :disabled="!hook.supported"
-              @click="installHook"
+              :disabled="ruleBusy[a.id]"
+              @click="installRule(a.id)"
             >
-              {{ t("settings.integration.install") }}
+              {{ t("settings.integration.installRule") }}
             </button>
-            <button
-              class="btn"
-              type="button"
-              :disabled="!hook.hooksJsonExists"
-              @click="cursorHookReveal"
-            >
-              {{ t("settings.integration.openHooks") }}
-            </button>
-            <span class="spacer"></span>
           </div>
-          <p v-if="!hook.supported" class="result err">
+          <p v-if="rules[a.id].path" class="agent-path">{{ rules[a.id].path }}</p>
+          <p v-if="a.id === 'cursor'" class="card-desc agent-hint">
+            {{ t("settings.integration.cursorRulesHint") }}
+          </p>
+          <p
+            v-if="ruleMessage[a.id]"
+            class="result"
+            :class="ruleError[a.id] ? 'err' : 'ok'"
+          >
+            {{ ruleMessage[a.id] }}
+          </p>
+
+          <hr class="divider" />
+
+          <!-- Hook -->
+          <div class="row agent-row">
+            <span class="label">{{ t("settings.integration.hookLabel") }}</span>
+            <template v-if="a.hasHook">
+              <span class="badge">
+                <span class="dot" :class="hook.installed ? 'on' : 'off'"></span>
+                {{
+                  hook.installed
+                    ? t("settings.integration.installed")
+                    : t("settings.integration.notInstalled")
+                }}
+              </span>
+              <span class="spacer"></span>
+              <button
+                v-if="hook.installed"
+                class="btn"
+                type="button"
+                :disabled="!hook.supported"
+                @click="uninstallHook"
+              >
+                {{ t("settings.integration.uninstall") }}
+              </button>
+              <button
+                v-else
+                class="btn"
+                type="button"
+                :disabled="!hook.supported"
+                @click="installHook"
+              >
+                {{ t("settings.integration.install") }}
+              </button>
+              <button
+                class="btn"
+                type="button"
+                :disabled="!hook.hooksJsonExists"
+                @click="cursorHookReveal"
+              >
+                {{ t("settings.integration.openHooks") }}
+              </button>
+            </template>
+            <template v-else>
+              <span class="spacer"></span>
+              <span class="badge muted">{{
+                t("settings.integration.comingSoon")
+              }}</span>
+            </template>
+          </div>
+          <p v-if="a.hasHook" class="card-desc agent-hint">
+            {{ t("settings.integration.hookShort") }}
+          </p>
+          <p v-if="a.hasHook && !hook.supported" class="result err">
             {{ t("settings.integration.windowsUnsupported") }}
           </p>
           <p
-            v-else-if="hookMessage"
+            v-else-if="a.hasHook && hookMessage"
             class="result"
             :class="hookError ? 'err' : 'ok'"
           >
@@ -1482,6 +1617,35 @@ onMounted(async () => {
   overflow-y: auto;
   padding: var(--space-4);
 }
+/* Agent 分组卡：压缩留白，避免页面过高 */
+.agent-card {
+  padding-top: var(--space-3);
+  padding-bottom: var(--space-3);
+}
+.agent-card .card-title {
+  margin-bottom: var(--space-2);
+}
+.agent-card .agent-row {
+  min-height: 28px;
+}
+.agent-card .divider {
+  margin: var(--space-2) 0;
+}
+/* 文件路径：等宽小字，可断行 */
+.agent-path {
+  margin: 4px 0 0;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+  word-break: break-all;
+}
+.agent-hint {
+  margin-top: 4px;
+}
+.badge.muted {
+  opacity: 0.55;
+}
+
 /* 快捷键录制按钮：等宽、最小宽度，录制态用强调色描边 */
 .shortcut-rec {
   min-width: 76px;

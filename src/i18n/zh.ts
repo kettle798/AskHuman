@@ -72,7 +72,7 @@ export default {
   settings: {
     tabs: {
       general: "通用",
-      integration: "集成",
+      integration: "Agents",
       channel: "通信渠道",
     },
     appearance: {
@@ -106,7 +106,17 @@ export default {
       promptTitle: "参考提示词",
       copy: "复制",
       copied: "已复制",
-      promptDesc: "把以下提示词加入你的 AI 助手，引导它通过 AskHuman 与你交互。",
+      promptDesc:
+        "复制下面的提示词，添加到你对应 Agent 的 Rules 中，引导它通过 AskHuman 与你交互。",
+      rulesLabel: "Rules",
+      hookLabel: "Hook",
+      reveal: "定位",
+      openFile: "打开",
+      comingSoon: "即将支持",
+      installRule: "安装规则",
+      hookShort: "检测到调用 AskHuman 时自动把超时延长到 24 小时，避免长时间等待被取消。",
+      cursorRulesHint:
+        "需项目位于用户主目录（~）之下才会全局生效；其它位置请在 Cursor 设置 → Rules 手动配置。",
       hookTitle: "Cursor Hook",
       installed: "已安装",
       notInstalled: "未安装",

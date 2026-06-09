@@ -73,7 +73,7 @@ export default {
   settings: {
     tabs: {
       general: "General",
-      integration: "Integration",
+      integration: "Agents",
       channel: "Channels",
     },
     appearance: {
@@ -108,7 +108,17 @@ export default {
       copy: "Copy",
       copied: "Copied",
       promptDesc:
-        "Add the following prompt to your AI assistant to guide it to interact with you via AskHuman.",
+        "Copy the prompt below and add it to your agent's rules to guide it to interact with you via AskHuman.",
+      rulesLabel: "Rules",
+      hookLabel: "Hook",
+      reveal: "Locate",
+      openFile: "Open",
+      comingSoon: "Coming soon",
+      installRule: "Install Rule",
+      hookShort:
+        "Auto-extends the timeout to 24h when an AskHuman call is detected, so long waits aren't cancelled.",
+      cursorRulesHint:
+        "Applies globally only when your project lives under your home directory (~). For other locations, configure it manually in Cursor Settings → Rules.",
       hookTitle: "Cursor Hook",
       installed: "Installed",
       notInstalled: "Not installed",
