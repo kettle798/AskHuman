@@ -299,7 +299,7 @@ mod tests {
             true,
             "补充说明（可选）",
             "提交",
-            "👍推荐 ",
+            "【👍推荐】 ",
         );
         assert_eq!(card["schema"], "2.0");
         // Question card: title is now a body-top "question icon + blue title" row + divider (DingTalk-style), no native header.
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn recommended_option_gets_display_prefix_but_keeps_plain_value() {
         let opts = vec![OptionItem::new("继续", true), OptionItem::new("停止", false)];
-        let card = build_question_card("T", "Q", &opts, true, "ph", "提交", "👍推荐 ");
+        let card = build_question_card("T", "Q", &opts, true, "ph", "提交", "【👍推荐】 ");
         let form = card["body"]["elements"]
             .as_array()
             .unwrap()
@@ -332,7 +332,7 @@ mod tests {
         let fe = form["elements"].as_array().unwrap();
         let checkers: Vec<&Value> = fe.iter().filter(|e| e["tag"] == "checker").collect();
         // 显示文本带前缀，普通选项不带。
-        assert_eq!(checkers[0]["text"]["content"], "👍推荐 继续");
+        assert_eq!(checkers[0]["text"]["content"], "【👍推荐】 继续");
         assert_eq!(checkers[1]["text"]["content"], "停止");
         // 提交按下标还原，回传原文。
         let event = json!({
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn build_card_without_options_omits_checkers() {
-        let card = build_question_card("", "随便说点什么", &[], false, "请输入", "提交", "👍推荐 ");
+        let card = build_question_card("", "随便说点什么", &[], false, "请输入", "提交", "【👍推荐】 ");
         assert!(card.get("header").is_none());
         let form = card["body"]["elements"]
             .as_array()
@@ -379,7 +379,7 @@ mod tests {
             user_input: Some("再想想"),
             input_placeholder: "补充说明（可选）",
             button_label: "已提交",
-            recommended_prefix: "👍推荐 ",
+            recommended_prefix: "【👍推荐】 ",
         });
         let form = card["body"]["elements"]
             .as_array()
@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(checkers[0]["disabled"], true);
         assert_eq!(checkers[1]["checked"], true);
         assert_eq!(checkers[1]["disabled"], true);
-        assert_eq!(checkers[1]["text"]["content"], "👍推荐 停止");
+        assert_eq!(checkers[1]["text"]["content"], "【👍推荐】 停止");
         // 输入框：禁用 + 回显补充文字。
         let input = fe.iter().find(|e| e["tag"] == "input").unwrap();
         assert_eq!(input["disabled"], true);

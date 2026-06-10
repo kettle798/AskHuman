@@ -23,7 +23,7 @@ pub struct QuestionCtx<'a> {
     pub lang: Lang,
 }
 
-/// 选项的【显示文本】：推荐选项加本地化「👍推荐 」前缀，普通选项即原文。
+/// 选项的【显示文本】：推荐选项加本地化「【👍推荐】 」前缀，普通选项即原文。
 /// 仅用于各渠道展示；提交值（`selected_options`）必须用 `opt.text` 原文。
 pub fn display_text(opt: &OptionItem, lang: Lang) -> String {
     if opt.recommended {

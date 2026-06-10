@@ -338,7 +338,7 @@ mod tests {
             "Note",
             "Add a note",
             "Submit",
-            "👍推荐 ",
+            "【👍推荐】 ",
             "n1",
         );
         let bs = blocks(&card);
@@ -363,13 +363,13 @@ mod tests {
     fn recommended_option_gets_display_prefix_but_keeps_index_value() {
         let opts = vec![OptionItem::new("继续", true), OptionItem::new("停止", false)];
         let card =
-            build_question_card("t", "x", &opts, false, "L", "N", "p", "S", "👍推荐 ", "n");
+            build_question_card("t", "x", &opts, false, "L", "N", "p", "S", "【👍推荐】 ", "n");
         let checkboxes = blocks(&card)
             .iter()
             .find(|b| b["element"]["type"] == "checkboxes")
             .unwrap();
         let items = checkboxes["element"]["options"].as_array().unwrap();
-        assert_eq!(items[0]["text"]["text"], "👍推荐 继续");
+        assert_eq!(items[0]["text"]["text"], "【👍推荐】 继续");
         assert_eq!(items[0]["value"], "opt_0");
         assert_eq!(items[1]["text"]["text"], "停止");
     }

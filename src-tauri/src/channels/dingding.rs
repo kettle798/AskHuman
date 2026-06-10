@@ -758,7 +758,7 @@ mod tests {
     #[test]
     fn restore_selected_maps_display_back_to_text() {
         let options = vec![OptionItem::new("继续", true), OptionItem::new("停止", false)];
-        let selected = vec!["👍推荐 继续".to_string(), "停止".to_string()];
+        let selected = vec!["【👍推荐】 继续".to_string(), "停止".to_string()];
         assert_eq!(
             restore_selected(selected, &options, Lang::Zh),
             vec!["继续".to_string(), "停止".to_string()]
