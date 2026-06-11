@@ -28,4 +28,45 @@ Write code comments in English.
 
 ## Commit messages
 
-Write git commit messages in English.
+Follow **Conventional Commits**. Release notes shown to end users are generated
+automatically from these messages (git-cliff, see `docs/specs/self-update.md`), so
+**write them carefully** — a sloppy `feat`/`fix` subject becomes a sloppy user-facing
+changelog line.
+
+**Format**: `<type>(<scope>): <subject>` (scope optional).
+
+**Subject**: English, imperative mood, lowercase after the colon, no trailing period,
+ideally ≤72 chars. E.g. `feat(update): add in-app self-update via daemon drain`.
+
+**Types** — only these reach the user-visible release notes:
+
+- `feat` → ✨ Features
+- `fix` → 🐞 Fixes
+- `perf` → 💎 Performance
+- `security` → 🔒 Security
+- `revert` → ⏪ Revert
+
+These are **excluded** from release notes (use them for non-user-facing work):
+`docs`, `style`, `refactor`, `test`, `ci`, `build`, `chore`.
+
+**Scope**: optional but encouraged; lowercase area name
+(`channels`, `daemon`, `popup`, `cli`, `settings`, `slack`, `feishu`, `dingtalk`,
+`telegram`, `hooks`, `config`, `i18n`, `update`, …); multiple joined by comma
+(e.g. `popup,cli`). The scope is rendered as a **bold prefix** in release notes, so
+a clear scope pays off.
+
+**Breaking changes**: mark with `type!:` (e.g. `feat!: …`) or a `BREAKING CHANGE: <desc>`
+footer. These are listed first under a dedicated **⚠ Breaking Changes** group.
+
+**Body** (optional): motivation / context / trade-offs, separated by a blank line.
+The body is NOT included in release notes (only the subject is).
+
+**Per-commit override of release-note text** (footer trailers):
+
+- `Release-Note: <text>` — use `<text>` instead of the subject in the release notes.
+- `Release-Note: skip` — exclude this commit from the release notes even if it is a
+  `feat`/`fix`/etc.
+
+What reaches the release notes is decided by the `type` (plus the trailers above). For a
+fully custom changelog of a given version, provide `docs/release-notes/v<version>.md`
+(it overrides git-cliff for that release).
