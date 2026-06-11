@@ -22,6 +22,9 @@ import {
   stopSpeech,
   flushSpeech,
   speechAvailable,
+  popupUpdateState,
+  updateApply,
+  updateGetNotes,
 } from "../lib/ipc";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import { formatShortcut, matchShortcut } from "../lib/shortcut";
@@ -41,6 +44,45 @@ const { t } = useI18n();
 
 const request = ref<AskRequest | null>(null);
 const loadError = ref<string | null>(null);
+
+// ===== 版本自更新（弹窗入口 / 浮层 / 待生效横条） =====
+const updateAvailable = ref(false);
+const updatePending = ref(false);
+const updateLatest = ref("");
+const updatePopoverOpen = ref(false);
+const updating = ref(false);
+const updateStarted = ref(false);
+const updateError = ref("");
+const updateNotesHtml = ref("");
+
+async function toggleUpdatePopover() {
+  updatePopoverOpen.value = !updatePopoverOpen.value;
+  if (updatePopoverOpen.value && !updateNotesHtml.value) {
+    try {
+      const notes = await updateGetNotes(false);
+      updateNotesHtml.value = notes.trim() ? renderMarkdown(notes) : "";
+    } catch {
+      updateNotesHtml.value = "";
+    }
+  }
+}
+
+async function applyUpdateFromPopup() {
+  if (updating.value || updateStarted.value) return;
+  updating.value = true;
+  updateError.value = "";
+  try {
+    await updateApply();
+    updateStarted.value = true;
+  } catch (e) {
+    const s = String(e);
+    updateError.value = /rate-limited|\b403\b|\b429\b/i.test(s)
+      ? t("popup.update.rateLimited")
+      : `${t("popup.update.failed")}: ${s}`;
+  } finally {
+    updating.value = false;
+  }
+}
 
 // 当前展示的问题索引（0 始）。
 const current = ref(0);
@@ -188,6 +230,7 @@ let unlistenIndex: UnlistenFn | null = null;
 let unlistenFocus: UnlistenFn | null = null;
 let unlistenDrop: UnlistenFn | null = null;
 let unlistenSettings: UnlistenFn | null = null;
+let unlistenUpdate: UnlistenFn | null = null;
 
 function setAttRef(el: Element | null, i: number) {
   if (el) attRefs.value[i] = el as HTMLElement;
@@ -879,6 +922,24 @@ onMounted(async () => {
     speechSupported.value = false;
   }
   if (speechSupported.value) await setupSpeechListeners();
+  // 版本自更新：先拉初值（规避事件早于监听），再监听 daemon 经 GUI Helper 转发的实时变更。
+  try {
+    const u = await popupUpdateState();
+    updateAvailable.value = u.available;
+    updatePending.value = u.pending;
+    updateLatest.value = u.latestVersion;
+  } catch {
+    /* 单进程回退 / 无 daemon：忽略 */
+  }
+  unlistenUpdate = await listen<{
+    available: boolean;
+    latestVersion: string;
+    pending: boolean;
+  }>("update-state", (e) => {
+    updateAvailable.value = e.payload.available;
+    updatePending.value = e.payload.pending;
+    updateLatest.value = e.payload.latestVersion;
+  });
   try {
     const init = await popupInit();
     applyTheme(init.theme);
@@ -913,6 +974,7 @@ onBeforeUnmount(() => {
   unlistenFocus?.();
   unlistenDrop?.();
   unlistenSettings?.();
+  unlistenUpdate?.();
   stopListening();
   unlistenSpeech.forEach((fn) => fn());
   unlistenSpeech = [];
@@ -941,6 +1003,55 @@ onBeforeUnmount(() => {
         <span class="brand-title">{{ headerTitle }}</span>
       </span>
       <span class="nav-actions">
+        <div v-if="updateAvailable" class="update-wrap">
+          <button
+            class="nav-btn update-btn"
+            type="button"
+            :title="t('popup.nav.update')"
+            @click.stop="toggleUpdatePopover"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3v12" />
+              <path d="M7 10l5 5 5-5" />
+              <path d="M5 21h14" />
+            </svg>
+            <span class="update-dot"></span>
+          </button>
+          <div v-if="updatePopoverOpen" class="update-popover" @click.stop>
+            <p class="up-title">
+              {{ t("popup.update.title", { version: updateLatest }) }}
+            </p>
+            <div
+              v-if="updateNotesHtml"
+              class="up-notes markdown-body"
+              v-html="updateNotesHtml"
+              @click="onContentClick"
+            ></div>
+            <p v-else class="up-notes muted">{{ t("popup.update.noNotes") }}</p>
+            <p class="up-hint">
+              {{
+                updateStarted
+                  ? t("popup.update.startedHint")
+                  : t("popup.update.applyHint")
+              }}
+            </p>
+            <p v-if="updateError" class="up-error">{{ updateError }}</p>
+            <div class="up-actions">
+              <button
+                class="btn btn-primary"
+                type="button"
+                :disabled="updating || updateStarted"
+                @click="applyUpdateFromPopup"
+              >
+                {{
+                  updating
+                    ? t("popup.update.updating")
+                    : t("popup.update.button")
+                }}
+              </button>
+            </div>
+          </div>
+        </div>
         <button
           class="nav-btn"
           :class="{ active: pinned }"
@@ -996,6 +1107,14 @@ onBeforeUnmount(() => {
         </button>
       </span>
     </header>
+    <div
+      v-if="updatePopoverOpen"
+      class="update-backdrop"
+      @click="updatePopoverOpen = false"
+    ></div>
+    <div v-if="updatePending" class="update-pending-banner">
+      {{ t("popup.update.pendingBanner") }}
+    </div>
     <div class="content" @scroll="onScroll">
       <!-- 共享 Message 区（描述 + 附件），仅在有内容时展示，顶部常驻 -->
       <template v-if="showDescription">
@@ -1370,6 +1489,90 @@ onBeforeUnmount(() => {
 .nav-btn svg {
   width: 16px;
   height: 16px;
+}
+/* 版本自更新：入口按钮 + 圆点 + 浮层 + 待生效横条 */
+.update-wrap {
+  position: relative;
+  display: inline-flex;
+  pointer-events: auto;
+  /* 与右侧「置顶」按钮拉开一点距离 */
+  margin-right: 4px;
+}
+.update-btn {
+  position: relative;
+  color: var(--accent-orange);
+}
+.update-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #30d158;
+  box-shadow: 0 0 0 2px var(--bg-base, rgba(0, 0, 0, 0.25));
+}
+.update-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+.update-popover {
+  position: absolute;
+  top: 34px;
+  right: 0;
+  z-index: 50;
+  width: 280px;
+  max-height: 360px;
+  overflow-y: auto;
+  /* 用不透明的 --bg：弹窗窗体是毛玻璃，--bg-elevated 仅 3%~6% alpha 会透出底下文字 */
+  background: var(--bg);
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.2));
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
+  padding: 12px;
+  text-align: left;
+}
+.up-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 8px;
+}
+.up-notes {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  max-height: 180px;
+  overflow-y: auto;
+  margin: 0 0 8px;
+}
+.up-notes.muted {
+  opacity: 0.7;
+}
+.up-hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin: 0 0 8px;
+}
+.up-error {
+  font-size: 11px;
+  color: #ff453a;
+  white-space: pre-wrap;
+  margin: 0 0 8px;
+}
+.up-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.update-pending-banner {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  padding: 8px var(--space-4);
+  text-align: center;
 }
 .popup-status {
   align-items: center;

@@ -214,6 +214,21 @@ export interface ClaudeHookStatus {
 
 export type AgentId = "cursor" | "claude" | "codex";
 
+export interface UpdateInfo {
+  available: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  releaseNotes: string;
+  sourceUrl: string;
+  isNpm: boolean;
+}
+
+export interface PushedUpdateState {
+  available: boolean;
+  latestVersion: string;
+  pending: boolean;
+}
+
 export interface RuleStatus {
   installed: boolean;
   outdated: boolean;

@@ -609,6 +609,14 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::history_count,
             crate::commands::trim_history,
             crate::commands::clear_history,
+            crate::commands::get_app_version,
+            crate::commands::update_check,
+            crate::commands::update_get_notes,
+            crate::commands::update_get_version_notes,
+            crate::commands::update_apply,
+            crate::commands::update_dismiss,
+            crate::commands::restart_settings,
+            crate::commands::popup_update_state,
         ])
         .on_window_event(|window, event| {
             match window.label() {
@@ -727,6 +735,22 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                                                 );
                                             }
                                             let _ = app_handle.emit("settings-updated", general);
+                                        }
+                                        // 版本自更新态（D→GUI）：缓存进程内 + emit 给弹窗前端
+                                        // （弹窗挂载先 pull `popup_update_state` 取初值，再靠此事件实时更新）。
+                                        Ok(Some(crate::ipc::ServerMsg::UpdateState {
+                                            available,
+                                            latest_version,
+                                            pending,
+                                        })) => {
+                                            use tauri::Emitter;
+                                            let payload = crate::commands::PushedUpdateState {
+                                                available,
+                                                latest_version,
+                                                pending,
+                                            };
+                                            crate::commands::set_pushed_update(payload.clone());
+                                            let _ = app_handle.emit("update-state", payload);
                                         }
                                         Ok(Some(_)) => {}
                                         Ok(None) | Err(_) => {

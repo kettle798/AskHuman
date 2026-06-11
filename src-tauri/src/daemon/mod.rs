@@ -157,6 +157,89 @@ mod unix_impl {
         sl_router: tokio::sync::Mutex<Option<Arc<SlRouter>>>,
         /// 最近一次已知配置快照（config watch 据此比对差异，决定哪些 Router 需失效，A12）。
         config: Mutex<AppConfig>,
+        /// 版本自更新快照（后台检查 / 指纹监听维护，握手与广播据此告知弹窗）。
+        update: Mutex<UpdateSnapshot>,
+    }
+
+    /// Daemon 维护的「自更新」当前态（广播给弹窗用）。
+    #[derive(Clone, Default)]
+    struct UpdateSnapshot {
+        /// 远端有更新且未被忽略。
+        available: bool,
+        /// 最新正式版版本号。
+        latest_version: String,
+        /// 新二进制已落盘、待 drain 换新生效。
+        pending: bool,
+    }
+
+    /// 启动时从 `update.json` 还原快照：available 据本地版本重算；
+    /// pending 一律清零——刚启动的 daemon 运行的就是盘上二进制，不存在「更新的二进制在等生效」，
+    /// 若残留 pending（上次换新前由旧 daemon 落盘）会让弹窗错误地常驻「待生效」横条。
+    fn init_update_snapshot() -> UpdateSnapshot {
+        let st = crate::update::state::load();
+        let available = !st.latest_version.is_empty()
+            && crate::update::compare_versions(&st.latest_version, &crate::update::current_version())
+                > 0
+            && !st.dismissed_versions.iter().any(|v| v == &st.latest_version);
+        if st.pending {
+            crate::update::state::set_pending(false);
+        }
+        UpdateSnapshot {
+            available,
+            latest_version: st.latest_version,
+            pending: false,
+        }
+    }
+
+    /// 由当前快照构造广播消息。
+    fn update_state_msg(state: &ServerState) -> ServerMsg {
+        let u = state.update.lock().unwrap().clone();
+        ServerMsg::UpdateState {
+            available: u.available,
+            latest_version: u.latest_version,
+            pending: u.pending,
+        }
+    }
+
+    /// 后台检查一次更新：查远端 → 落 `update.json` → 更新快照 → 有变化则广播。失败静默。
+    async fn check_for_update(state: &Arc<ServerState>) {
+        match crate::update::check().await {
+            Ok(info) => {
+                crate::update::state::record_check(&info.latest_version, &info.release_notes);
+                let dismissed = crate::update::state::is_dismissed(&info.latest_version);
+                let available = info.available && !dismissed;
+                let changed = {
+                    let mut u = state.update.lock().unwrap();
+                    let changed = u.available != available || u.latest_version != info.latest_version;
+                    u.available = available;
+                    u.latest_version = info.latest_version.clone();
+                    changed
+                };
+                if changed {
+                    state.registry.broadcast_to_guis(update_state_msg(state));
+                }
+            }
+            Err(e) => log(&format!("update check failed: {}", e)),
+        }
+    }
+
+    /// 检测盘上二进制是否已被换新（应用内更新或外部 npm 更新）。变化则标记 pending + 广播。
+    fn check_pending_update(state: &Arc<ServerState>) {
+        let now_fp = lifecycle::current_fingerprint();
+        if now_fp == state.startup_fp {
+            return;
+        }
+        let changed = {
+            let mut u = state.update.lock().unwrap();
+            let was = u.pending;
+            u.pending = true;
+            !was
+        };
+        if changed {
+            crate::update::state::set_pending(true);
+            log("binary on disk changed; marking update pending");
+            state.registry.broadcast_to_guis(update_state_msg(state));
+        }
     }
 
     async fn serve(_lock: LockGuard) -> i32 {
@@ -198,6 +281,7 @@ mod unix_impl {
             tg_router: tokio::sync::Mutex::new(None),
             sl_router: tokio::sync::Mutex::new(None),
             config: Mutex::new(AppConfig::load()),
+            update: Mutex::new(init_update_snapshot()),
         });
 
         // 空闲退出检查。
@@ -237,6 +321,29 @@ mod unix_impl {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
             }
         });
+
+        // 版本自更新：后台定期检查远端最新版（启动稍延迟一次，之后每 24h），有变化广播给弹窗。
+        {
+            let state = state.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                loop {
+                    check_for_update(&state).await;
+                    tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
+                }
+            });
+        }
+
+        // 版本自更新：周期监听盘上二进制指纹（应用内更新 / 外部 npm 更新）→ 标记待生效并广播。
+        {
+            let state = state.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    check_pending_update(&state);
+                }
+            });
+        }
 
         loop {
             tokio::select! {
@@ -553,6 +660,18 @@ mod unix_impl {
 
         // 下发题目。
         let _ = gui_tx.send(request::show_msg(&entry));
+
+        // 握手即带上当前自更新态（有更新 / 待生效），使弹窗一打开就知道，无需等下次广播。
+        {
+            let u = state.update.lock().unwrap();
+            if u.available || u.pending {
+                let _ = gui_tx.send(ServerMsg::UpdateState {
+                    available: u.available,
+                    latest_version: u.latest_version.clone(),
+                    pending: u.pending,
+                });
+            }
+        }
 
         // 读 GUI 答复 / 收到取消通知。
         loop {

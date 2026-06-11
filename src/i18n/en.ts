@@ -22,6 +22,22 @@ export default {
       theme: "Toggle theme",
       settings: "Settings",
       history: "History",
+      update: "Update available",
+    },
+    update: {
+      title: "New version {version} available",
+      button: "Update",
+      updating: "Updating…",
+      applyHint:
+        "The update takes effect after you finish answering — it won't interrupt you.",
+      startedHint: "Update started; it applies once you finish answering.",
+      pendingBanner:
+        "A new version will take effect once all popups are answered — please reply soon.",
+      failed: "Update failed",
+      rateLimited:
+        "GitHub requests are rate-limited (shared IP quota exhausted). Try again later or download manually.",
+      npmHint: "Run in your terminal: {cmd}",
+      noNotes: "No release notes.",
     },
     question: {
       single: "Question",
@@ -188,6 +204,33 @@ export default {
       overLimit:
         "There are more entries than this; they'll be trimmed on the next AskHuman call.",
       cleanNow: "Clean up now",
+    },
+    about: {
+      title: "About",
+      currentVersion: "Current version",
+      latestVersion: "Latest version",
+      check: "Check for updates",
+      checking: "Checking…",
+      upToDate: "You're up to date",
+      updateAvailable: "New version {version} available",
+      update: "Update",
+      updating: "Updating…",
+      applyAfterAnswer: "The update takes effect after you finish answering.",
+      updatedRestartHint: "Updated — takes effect on the next prompt.",
+      restartSettings: "Restart settings",
+      viewAllReleases: "View all releases",
+      releaseNotes: "Release notes",
+      noNotes: "No release notes.",
+      checkFailed: "Failed to check for updates",
+      updateFailed: "Update failed",
+      npmHint: "Run in your terminal: {cmd}",
+      viewCurrentNotes: "View this version's release notes",
+      hideCurrentNotes: "Hide this version's release notes",
+      currentNotesTitle: "This version's release notes",
+      notesLoading: "Loading…",
+      notesFailed: "Failed to load release notes",
+      rateLimited:
+        "GitHub requests are rate-limited (often a shared network/proxy IP exhausting the quota). Try again later, or click \u201cView all releases\u201d to download manually. Set the GITHUB_TOKEN environment variable to raise the limit.",
     },
   },
   history: {

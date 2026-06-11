@@ -1,0 +1,337 @@
+//! DirectUpdater：直装二进制（install.sh / 手动下载）的更新器。
+//!
+//! 检查：GitHub Releases `/releases/latest`。
+//! 应用：下载平台资产（`AskHuman-<目标三元组>-v<版本>.{tar.gz,zip}`）→ 解压 →
+//! 找可执行文件 → (macOS) 校验 Developer ID/TeamID → 备份当前 `.bak` → 原子替换
+//! `current_exe`。**不 restart**：盘上一变，daemon drain 在答完后换新。
+//!
+//! 移植自参考实现 `humanInLoop-rust/src/rust/ui/updater.rs`，去掉其 `app.restart()`。
+
+use super::{
+    github_api_url, http_client, target_triple, DownloadProgress, ProgressCb, RemoteLatest, Updater,
+};
+use anyhow::{anyhow, Context, Result};
+use serde_json::Value;
+
+pub struct DirectUpdater;
+
+impl DirectUpdater {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait::async_trait]
+impl Updater for DirectUpdater {
+    async fn check_latest(&self) -> Result<RemoteLatest> {
+        let release = fetch_latest_release().await?;
+        let version = super::normalize_version(release["tag_name"].as_str().unwrap_or(""));
+        if version.is_empty() {
+            return Err(anyhow!("无法解析最新版本号"));
+        }
+        let notes = release["body"].as_str().unwrap_or("").to_string();
+        // 优先平台资产直链；找不到回退到 release 页面（apply 时据此判定需手动下载）。
+        let source_url = asset_url_for_current(&release)
+            .or_else(|| release["html_url"].as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        Ok(RemoteLatest {
+            version,
+            notes,
+            source_url,
+        })
+    }
+
+    async fn apply(&self, progress: Option<ProgressCb>) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = progress;
+            return Err(anyhow!(
+                "auto-update is not supported on this platform yet; please download the latest release manually"
+            ));
+        }
+        #[cfg(unix)]
+        {
+            apply_unix(progress).await
+        }
+    }
+}
+
+/// 拉取 `/releases/latest` 的 JSON（用带 token 的 GitHub API 客户端）。
+async fn fetch_latest_release() -> Result<Value> {
+    let resp = super::github_client()
+        .get(github_api_url("releases/latest"))
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .context("GitHub API 请求失败")?;
+    if !resp.status().is_success() {
+        return Err(super::github_status_error(resp.status()));
+    }
+    resp.json::<Value>().await.context("解析 release JSON 失败")
+}
+
+/// 在 release.assets 里找当前平台的资产下载直链（按目标三元组匹配）。
+fn asset_url_for_current(release: &Value) -> Option<String> {
+    let triple = target_triple()?;
+    asset_url_for_triple(release, triple)
+}
+
+/// 纯函数：按目标三元组在 assets 数组里找 `browser_download_url`（便于单测）。
+fn asset_url_for_triple(release: &Value, triple: &str) -> Option<String> {
+    let assets = release.get("assets")?.as_array()?;
+    for a in assets {
+        let name = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if name.contains(triple) {
+            if let Some(url) = a.get("browser_download_url").and_then(|v| v.as_str()) {
+                return Some(url.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+async fn apply_unix(progress: Option<ProgressCb>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // 取新鲜的资产直链（避免用陈旧的 check 结果）。
+    let release = fetch_latest_release().await?;
+    let url = asset_url_for_current(&release)
+        .ok_or_else(|| anyhow!("未找到当前平台的发布资产，请手动下载"))?;
+    if url.contains("/releases/tag/") || !url.contains("://") {
+        return Err(anyhow!("未找到平台预编译资产，请手动下载最新版本"));
+    }
+
+    let work = std::env::temp_dir().join(format!("askhuman_update_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&work).context("创建临时目录失败")?;
+    // 收尾清理临时目录（best-effort）。
+    let _guard = scopeguard(work.clone());
+
+    // 下载资产到临时文件（带进度回调）。
+    let file_name = url.rsplit('/').next().unwrap_or("askhuman_update").to_string();
+    let archive = work.join(&file_name);
+    download_with_progress(&url, &archive, progress).await?;
+
+    // 解压（shell out tar/unzip；mac/Linux 自带）。
+    let extract = work.join("extract");
+    std::fs::create_dir_all(&extract).context("创建解压目录失败")?;
+    extract_archive(&archive, &extract)?;
+
+    // 找解压出的可执行文件 AskHuman。
+    let new_exe = find_executable(&extract)
+        .ok_or_else(|| anyhow!("压缩包中未找到 AskHuman 可执行文件"))?;
+
+    // macOS：替换前校验签名 + TeamID（完整性 + 钥匙串信任连续）。
+    #[cfg(target_os = "macos")]
+    verify_macos_signature(&new_exe)?;
+
+    let current = std::env::current_exe().context("无法获取当前可执行文件路径")?;
+
+    // 备份当前二进制为 <exe>.<版本>.bak（同名冲突追加序号）。
+    if let Some(bak) = backup_path(&current) {
+        let _ = std::fs::copy(&current, &bak);
+    }
+
+    // 原子替换：先复制到目标同目录临时文件、chmod 0755，再 rename 覆盖。
+    let dir = current.parent().ok_or_else(|| anyhow!("无法定位安装目录"))?;
+    let staged = dir.join(format!(".AskHuman.new-{}", uuid::Uuid::new_v4()));
+    std::fs::copy(&new_exe, &staged).context("暂存新二进制失败")?;
+    let mut perms = std::fs::metadata(&staged)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&staged, perms).context("设置可执行权限失败")?;
+    std::fs::rename(&staged, &current).context("替换二进制失败")?;
+
+    Ok(())
+}
+
+/// 流式下载到文件，按内容长度回调进度。
+#[cfg(unix)]
+async fn download_with_progress(
+    url: &str,
+    dest: &std::path::Path,
+    progress: Option<ProgressCb>,
+) -> Result<()> {
+    use std::io::Write;
+    let mut resp = http_client()
+        .get(url)
+        .send()
+        .await
+        .context("下载请求失败")?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("下载失败：HTTP {}", resp.status()));
+    }
+    let total = resp.content_length();
+    let mut file = std::fs::File::create(dest).context("创建下载文件失败")?;
+    let mut downloaded: u64 = 0;
+    while let Some(chunk) = resp.chunk().await.context("下载数据失败")? {
+        file.write_all(&chunk).context("写入下载文件失败")?;
+        downloaded += chunk.len() as u64;
+        if let Some(cb) = &progress {
+            let percentage = match total {
+                Some(t) if t > 0 => (downloaded as f64 / t as f64) * 100.0,
+                _ => 0.0,
+            };
+            cb(DownloadProgress {
+                downloaded,
+                total,
+                percentage,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// 解压 tar.gz / zip（shell out；mac/Linux 自带 tar / unzip）。
+#[cfg(unix)]
+fn extract_archive(archive: &std::path::Path, dest: &std::path::Path) -> Result<()> {
+    use std::process::Command;
+    let name = archive
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let out = if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        Command::new("tar")
+            .args([
+                "-xzf",
+                &archive.to_string_lossy(),
+                "-C",
+                &dest.to_string_lossy(),
+            ])
+            .output()
+            .context("执行 tar 失败")?
+    } else if name.ends_with(".zip") {
+        Command::new("unzip")
+            .args([
+                "-o",
+                &archive.to_string_lossy(),
+                "-d",
+                &dest.to_string_lossy(),
+            ])
+            .output()
+            .context("执行 unzip 失败")?
+    } else {
+        return Err(anyhow!("不支持的压缩格式：{name}"));
+    };
+    if !out.status.success() {
+        return Err(anyhow!(
+            "解压失败：{}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(())
+}
+
+/// 递归查找名为 `AskHuman` 的可执行文件。
+#[cfg(unix)]
+fn find_executable(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = std::fs::read_dir(&d).ok()?;
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().and_then(|n| n.to_str()) == Some("AskHuman") {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// macOS：校验下载二进制的签名有效性与 TeamID。
+#[cfg(target_os = "macos")]
+fn verify_macos_signature(path: &std::path::Path) -> Result<()> {
+    use std::process::Command;
+    let verify = Command::new("codesign")
+        .args(["--verify", "--strict", &path.to_string_lossy()])
+        .output()
+        .context("执行 codesign --verify 失败")?;
+    if !verify.status.success() {
+        return Err(anyhow!(
+            "签名校验失败：{}",
+            String::from_utf8_lossy(&verify.stderr)
+        ));
+    }
+    let info = Command::new("codesign")
+        .args(["-dvv", &path.to_string_lossy()])
+        .output()
+        .context("执行 codesign -dvv 失败")?;
+    // codesign 把信息打到 stderr。
+    let text = String::from_utf8_lossy(&info.stderr);
+    if !text.contains(&format!("TeamIdentifier={}", super::EXPECTED_TEAM_ID)) {
+        return Err(anyhow!(
+            "签名 TeamIdentifier 不符（期望 {}）",
+            super::EXPECTED_TEAM_ID
+        ));
+    }
+    Ok(())
+}
+
+/// 生成备份路径 `<exe>.<版本>.bak`（同名冲突追加序号）。
+#[cfg(unix)]
+fn backup_path(current: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dir = current.parent()?;
+    let stem = current.file_name()?.to_str()?;
+    let ver = super::current_version();
+    let mut p = dir.join(format!("{stem}.{ver}.bak"));
+    let mut i = 1;
+    while p.exists() {
+        p = dir.join(format!("{stem}.{ver}.bak.{i}"));
+        i += 1;
+        if i > 100 {
+            return None;
+        }
+    }
+    Some(p)
+}
+
+/// 极简「作用域退出时删目录」守卫（避免引入 scopeguard crate）。
+#[cfg(unix)]
+fn scopeguard(dir: std::path::PathBuf) -> impl Drop {
+    struct CleanupGuard(std::path::PathBuf);
+    impl Drop for CleanupGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    CleanupGuard(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn asset_match_by_triple() {
+        let release = json!({
+            "assets": [
+                { "name": "AskHuman-x86_64-unknown-linux-gnu-v0.6.0.tar.gz",
+                  "browser_download_url": "https://example.com/linux.tar.gz" },
+                { "name": "AskHuman-aarch64-apple-darwin-v0.6.0.tar.gz",
+                  "browser_download_url": "https://example.com/mac-arm.tar.gz" },
+                { "name": "AskHuman-x86_64-pc-windows-msvc-v0.6.0.zip",
+                  "browser_download_url": "https://example.com/win.zip" }
+            ]
+        });
+        assert_eq!(
+            asset_url_for_triple(&release, "aarch64-apple-darwin").as_deref(),
+            Some("https://example.com/mac-arm.tar.gz")
+        );
+        assert_eq!(
+            asset_url_for_triple(&release, "x86_64-unknown-linux-gnu").as_deref(),
+            Some("https://example.com/linux.tar.gz")
+        );
+        assert_eq!(asset_url_for_triple(&release, "riscv64-unknown-linux-gnu"), None);
+    }
+
+    #[test]
+    fn asset_match_handles_missing_assets() {
+        assert_eq!(asset_url_for_triple(&json!({}), "aarch64-apple-darwin"), None);
+        assert_eq!(
+            asset_url_for_triple(&json!({"assets": []}), "aarch64-apple-darwin"),
+            None
+        );
+    }
+}

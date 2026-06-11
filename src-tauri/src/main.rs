@@ -38,6 +38,7 @@ mod prompts;
 mod secrets;
 mod slack;
 mod telegram;
+mod update;
 
 fn main() {
     cli::dispatch();

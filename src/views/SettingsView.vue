@@ -27,10 +27,13 @@ import {
   feishuDetectPrepare,
   feishuDetectWait,
   feishuTest,
+  getAppVersion,
   getPrompt,
   getSettings,
   historyCount,
+  openPath,
   openTestPopup,
+  restartSettings,
   saveSettings,
   setTheme,
   slackDetectPrepare,
@@ -38,8 +41,13 @@ import {
   slackTest,
   telegramTest,
   trimHistory,
+  updateApply,
+  updateCheck,
+  updateGetNotes,
+  updateGetVersionNotes,
 } from "../lib/ipc";
 import { applyTheme } from "../lib/theme";
+import { renderMarkdown } from "../lib/markdown";
 import {
   eventToSpec,
   formatShortcut,
@@ -61,6 +69,7 @@ import type {
   SecretsPresent,
   ThemeMode,
   UiLanguage,
+  UpdateInfo,
   WindowEffect,
 } from "../lib/types";
 
@@ -828,7 +837,131 @@ onMounted(async () => {
       glassSupported.value = false;
     }
   }
+  // 关于区：取本地版本，并静默检查一次（best-effort，失败不打扰）。
+  try {
+    appVersion.value = await getAppVersion();
+  } catch {
+    appVersion.value = "";
+  }
+  void checkUpdate(false);
 });
+
+// ===== 关于 / 版本自更新 =====
+const appVersion = ref("");
+const updateInfo = ref<UpdateInfo | null>(null);
+const updateChecking = ref(false);
+const updateApplying = ref(false);
+const updateDone = ref(false);
+const updateError = ref("");
+const updateProgress = ref(0);
+const notesHtml = ref("");
+const releasesUrl = "https://github.com/Naituw/AskHuman/releases";
+
+// 当前版本更新日志（折叠，懒加载；与「发现新版」的日志独立）。
+const currentNotesOpen = ref(false);
+const currentNotesHtml = ref("");
+const currentNotesLoading = ref(false);
+const currentNotesError = ref("");
+const currentNotesLoaded = ref(false);
+
+// 把后端错误转可读文案：限流（403/429，后端带 rate-limited 标记）→ 友好提示并引导手动下载 / 设 token；
+// 其余沿用「<前缀>: <原始错误>」。
+function updateErrText(e: unknown, prefixKey: string): string {
+  const s = String(e);
+  if (/rate-limited|\b403\b|\b429\b/i.test(s)) {
+    return t("settings.about.rateLimited");
+  }
+  return `${t(`settings.about.${prefixKey}`)}: ${s}`;
+}
+
+async function toggleCurrentNotes() {
+  currentNotesOpen.value = !currentNotesOpen.value;
+  if (!currentNotesOpen.value || currentNotesLoaded.value || !appVersion.value) {
+    return;
+  }
+  currentNotesLoading.value = true;
+  currentNotesError.value = "";
+  try {
+    const notes = await updateGetVersionNotes(appVersion.value);
+    currentNotesHtml.value = notes.trim() ? renderMarkdown(notes) : "";
+    currentNotesLoaded.value = true;
+  } catch (e) {
+    currentNotesError.value = updateErrText(e, "notesFailed");
+  } finally {
+    currentNotesLoading.value = false;
+  }
+}
+
+async function checkUpdate(manual: boolean) {
+  if (updateChecking.value) return;
+  updateChecking.value = true;
+  updateError.value = "";
+  try {
+    const info = await updateCheck(manual);
+    updateInfo.value = info;
+    notesHtml.value = "";
+    if (info.available) {
+      try {
+        const notes = await updateGetNotes(true);
+        notesHtml.value = notes.trim() ? renderMarkdown(notes) : "";
+      } catch {
+        notesHtml.value = "";
+      }
+    }
+  } catch (e) {
+    updateError.value = updateErrText(e, "checkFailed");
+  } finally {
+    updateChecking.value = false;
+  }
+}
+
+async function applyUpdate() {
+  if (updateApplying.value) return;
+  updateApplying.value = true;
+  updateError.value = "";
+  updateProgress.value = 0;
+  try {
+    await updateApply();
+    updateDone.value = true;
+  } catch (e) {
+    updateError.value = updateErrText(e, "updateFailed");
+  } finally {
+    updateApplying.value = false;
+  }
+}
+
+function openReleases() {
+  void openPath(releasesUrl);
+}
+
+// 渲染后的更新日志里的链接：用系统默认浏览器打开，避免在设置 webview 内跳转。
+function onNotesClick(e: MouseEvent) {
+  const anchor = (e.target as HTMLElement | null)?.closest?.("a") as
+    | HTMLAnchorElement
+    | null;
+  if (!anchor) return;
+  const href = anchor.href;
+  if (!/^(https?:|mailto:)/i.test(href)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  void openPath(href);
+}
+
+async function restartSettingsNow() {
+  try {
+    await restartSettings();
+  } catch {
+    /* ignore */
+  }
+}
+
+listen<{ percentage: number }>("update_download_progress", (e) => {
+  updateProgress.value = Math.round(e.payload.percentage);
+}).then((un) => {
+  unlistenProgress = un;
+});
+let unlistenProgress: UnlistenFn | null = null;
+onBeforeUnmount(() => unlistenProgress?.());
 </script>
 
 <template>
@@ -1074,6 +1207,128 @@ onMounted(async () => {
             style="margin-top: 6px"
           >
             {{ t("settings.speech.recordHint") }}
+          </p>
+        </div>
+
+        <!-- 关于 / 版本自更新 -->
+        <div class="card">
+          <p class="card-title">{{ t("settings.about.title") }}</p>
+          <div class="row">
+            <span class="label">{{ t("settings.about.currentVersion") }}</span>
+            <span class="spacer"></span>
+            <span class="value">{{ appVersion || "—" }}</span>
+          </div>
+          <hr class="divider" />
+          <div class="row">
+            <span class="label">{{ t("settings.about.latestVersion") }}</span>
+            <span class="spacer"></span>
+            <span class="value" v-if="updateInfo && !updateChecking">
+              {{ updateInfo.latestVersion }}
+              <template v-if="!updateInfo.available">
+                · {{ t("settings.about.upToDate") }}</template
+              >
+            </span>
+            <span class="value" v-else-if="updateChecking">{{
+              t("settings.about.checking")
+            }}</span>
+            <span class="value" v-else>—</span>
+            <button
+              class="btn"
+              type="button"
+              style="margin-left: 8px"
+              :disabled="updateChecking"
+              @click="checkUpdate(true)"
+            >
+              {{ t("settings.about.check") }}
+            </button>
+          </div>
+
+          <hr class="divider" />
+          <div class="row">
+            <span class="label">{{ t("settings.about.currentNotesTitle") }}</span>
+            <span class="spacer"></span>
+            <a class="link" href="#" @click.prevent="toggleCurrentNotes">{{
+              currentNotesOpen
+                ? t("settings.about.hideCurrentNotes")
+                : t("settings.about.viewCurrentNotes")
+            }}</a>
+          </div>
+          <template v-if="currentNotesOpen">
+            <p v-if="currentNotesLoading" class="card-desc">
+              {{ t("settings.about.notesLoading") }}
+            </p>
+            <p v-else-if="currentNotesError" class="result err">
+              {{ currentNotesError }}
+            </p>
+            <div
+              v-else-if="currentNotesHtml"
+              class="release-notes markdown"
+              v-html="currentNotesHtml"
+              @click="onNotesClick"
+            ></div>
+            <p v-else class="card-desc">{{ t("settings.about.noNotes") }}</p>
+          </template>
+
+          <template v-if="updateInfo && updateInfo.available">
+            <hr class="divider" />
+            <div class="row">
+              <span class="label">{{
+                t("settings.about.updateAvailable", {
+                  version: updateInfo.latestVersion,
+                })
+              }}</span>
+              <span class="spacer"></span>
+              <button
+                v-if="!updateDone"
+                class="btn btn-primary"
+                type="button"
+                :disabled="updateApplying"
+                @click="applyUpdate"
+              >
+                {{
+                  updateApplying
+                    ? updateProgress > 0
+                      ? `${t("settings.about.updating")} ${updateProgress}%`
+                      : t("settings.about.updating")
+                    : t("settings.about.update")
+                }}
+              </button>
+              <button
+                v-else
+                class="btn btn-primary"
+                type="button"
+                @click="restartSettingsNow"
+              >
+                {{ t("settings.about.restartSettings") }}
+              </button>
+            </div>
+            <p class="card-desc">
+              {{
+                updateDone
+                  ? t("settings.about.updatedRestartHint")
+                  : t("settings.about.applyAfterAnswer")
+              }}
+            </p>
+
+            <template v-if="notesHtml">
+              <hr class="divider" />
+              <p class="label">{{ t("settings.about.releaseNotes") }}</p>
+              <div
+                class="release-notes markdown"
+                v-html="notesHtml"
+                @click="onNotesClick"
+              ></div>
+            </template>
+            <div class="row" style="margin-top: 8px">
+              <span class="spacer"></span>
+              <a class="link" href="#" @click.prevent="openReleases">{{
+                t("settings.about.viewAllReleases")
+              }}</a>
+            </div>
+          </template>
+
+          <p v-if="updateError" class="result err" style="margin-top: 8px">
+            {{ updateError }}
           </p>
         </div>
       </template>
@@ -1807,6 +2062,47 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+/* 关于区：版本值、发布链接、更新日志容器 */
+.row .value {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.link {
+  font-size: 12px;
+  color: var(--accent, #3b82f6);
+  cursor: pointer;
+  text-decoration: none;
+}
+.link:hover {
+  text-decoration: underline;
+}
+.release-notes {
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.2));
+  border-radius: 8px;
+  margin-top: var(--space-2);
+}
+.release-notes :deep(h1),
+.release-notes :deep(h2),
+.release-notes :deep(h3) {
+  font-size: 13px;
+  margin: 8px 0 4px;
+}
+.release-notes :deep(ul) {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+.release-notes :deep(p) {
+  margin: 4px 0;
+}
+.release-notes :deep(a) {
+  color: var(--accent, #3b82f6);
 }
 .settings-body {
   flex: 1 1 auto;

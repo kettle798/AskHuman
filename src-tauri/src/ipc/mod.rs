@@ -180,6 +180,13 @@ pub enum ServerMsg {
     Cancel { request_id: String, winner: String },
     /// 配置实时变更，下发新的 `general` 配置给活动 GUI Helper 以即时切主题/语言（D→GUI，A12）。
     ConfigChanged { general: serde_json::Value },
+    /// 版本自更新状态（D→GUI）：`available` 有新版可更新；`pending` 新二进制已落盘、
+    /// 待所有在途弹窗答完后由 graceful-drain 换新生效。弹窗据此显示更新入口 / 待生效横条。
+    UpdateState {
+        available: bool,
+        latest_version: String,
+        pending: bool,
+    },
 }
 
 #[cfg(test)]
@@ -233,5 +240,29 @@ mod tests {
         let json = serde_json::to_string(&ServerMsg::Draining { active: 2 }).unwrap();
         let back: ServerMsg = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, ServerMsg::Draining { active: 2 }));
+    }
+
+    /// UpdateState 序列化往返（含 camelCase 字段）。
+    #[test]
+    fn update_state_roundtrip() {
+        let msg = ServerMsg::UpdateState {
+            available: true,
+            latest_version: "0.6.0".to_string(),
+            pending: false,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        // 变体名走 enum 级 camelCase；结构体变体的字段名保持 snake_case
+        // （与既有 `Final { exit_code }` 一致；IPC 两端同二进制，无需 camelCase）。
+        assert!(json.contains(r#""type":"updateState""#));
+        assert!(json.contains(r#""latest_version":"0.6.0""#));
+        let back: ServerMsg = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            ServerMsg::UpdateState {
+                available: true,
+                pending: false,
+                ..
+            }
+        ));
     }
 }

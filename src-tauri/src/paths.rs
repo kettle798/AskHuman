@@ -42,6 +42,11 @@ pub fn history_lock() -> PathBuf {
     config_dir().join("history.lock")
 }
 
+/// 版本自更新状态文件 `~/.askhuman/update.json`（最新版本/检查时间/忽略集合/待生效）。
+pub fn update_state_file() -> PathBuf {
+    config_dir().join("update.json")
+}
+
 /// Cursor 目录 `~/.cursor`。
 pub fn cursor_dir() -> PathBuf {
     home().join(".cursor")

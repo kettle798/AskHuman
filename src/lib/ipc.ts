@@ -13,6 +13,7 @@ import type {
   HistoryInit,
   HookStatus,
   PopupInit,
+  PushedUpdateState,
   RuleStatus,
   PopupSubmission,
   ProjectInfo,
@@ -23,6 +24,7 @@ import type {
   SlackWaitArgs,
   TelegramTestArgs,
   ThemeMode,
+  UpdateInfo,
   WindowEffect,
 } from "./types";
 
@@ -167,3 +169,26 @@ export const slackDetectPrepare = (args: SlackDetectArgs) =>
 
 export const slackDetectWait = (args: SlackWaitArgs) =>
   invoke<string>("slack_detect_wait", { args });
+
+// ===== 版本自更新 =====
+
+export const getAppVersion = () => invoke<string>("get_app_version");
+
+export const updateCheck = (manual: boolean) =>
+  invoke<UpdateInfo>("update_check", { manual });
+
+export const updateGetNotes = (aggregate: boolean) =>
+  invoke<string>("update_get_notes", { aggregate });
+
+export const updateGetVersionNotes = (version: string) =>
+  invoke<string>("update_get_version_notes", { version });
+
+export const updateApply = () => invoke<void>("update_apply");
+
+export const updateDismiss = (version: string) =>
+  invoke<void>("update_dismiss", { version });
+
+export const restartSettings = () => invoke<void>("restart_settings");
+
+export const popupUpdateState = () =>
+  invoke<PushedUpdateState>("popup_update_state");

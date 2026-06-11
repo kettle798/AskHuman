@@ -1172,3 +1172,126 @@ fn gen_detect_code() -> String {
         .unwrap_or(0);
     format!("{:04}", nanos % 10000)
 }
+
+// ===== 版本自更新（self-update） =====
+
+/// daemon 经 GUI Helper 推送的自更新态（弹窗进程内缓存，规避「事件早于前端监听」的竞态）。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushedUpdateState {
+    pub available: bool,
+    pub latest_version: String,
+    pub pending: bool,
+}
+
+static PUSHED_UPDATE: std::sync::OnceLock<std::sync::Mutex<PushedUpdateState>> =
+    std::sync::OnceLock::new();
+
+fn pushed_update_slot() -> &'static std::sync::Mutex<PushedUpdateState> {
+    PUSHED_UPDATE.get_or_init(|| std::sync::Mutex::new(PushedUpdateState::default()))
+}
+
+/// GUI Helper 读到 daemon 的 `UpdateState` 后写入此缓存（供弹窗挂载时拉取初值）。
+pub fn set_pushed_update(state: PushedUpdateState) {
+    if let Ok(mut slot) = pushed_update_slot().lock() {
+        *slot = state;
+    }
+}
+
+/// 弹窗挂载时拉取「已推送的自更新态」初值（之后变化经事件实时更新）。
+#[tauri::command]
+pub fn popup_update_state() -> PushedUpdateState {
+    pushed_update_slot().lock().map(|s| s.clone()).unwrap_or_default()
+}
+
+/// 本地当前版本（编译期嵌入）。
+#[tauri::command]
+pub fn get_app_version() -> String {
+    crate::update::current_version()
+}
+
+/// 检查更新：查远端最新正式版并与本地比较。`manual=true` 时清空「忽略」集合。
+#[tauri::command]
+pub async fn update_check(manual: bool) -> Result<crate::update::UpdateInfo, String> {
+    if manual {
+        crate::update::state::clear_dismissed();
+    }
+    let info = crate::update::check().await.map_err(|e| e.to_string())?;
+    crate::update::state::record_check(&info.latest_version, &info.release_notes);
+    Ok(info)
+}
+
+/// 取指定版本（tag `v<version>`）的更新日志（关于区「查看当前版本更新日志」用）。
+#[tauri::command]
+pub async fn update_get_version_notes(version: String) -> Result<String, String> {
+    crate::update::notes::notes_for_tag(&version)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 取更新日志：`aggregate=true` 聚合「当前版本→最新版本」之间所有版本（懒加载）。
+#[tauri::command]
+pub async fn update_get_notes(aggregate: bool) -> Result<String, String> {
+    if !aggregate {
+        return crate::update::notes::latest_notes()
+            .await
+            .map_err(|e| e.to_string());
+    }
+    let current = crate::update::current_version();
+    let to = {
+        let st = crate::update::state::load();
+        if st.latest_version.is_empty() {
+            crate::update::check()
+                .await
+                .map_err(|e| e.to_string())?
+                .latest_version
+        } else {
+            st.latest_version
+        }
+    };
+    crate::update::notes::aggregated_notes(&current, &to)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 应用更新：把新二进制落盘（不 restart；换新交给 daemon drain）。下载进度经
+/// `update_download_progress` 事件回传；完成发 `update_apply_finished`。
+#[tauri::command]
+pub async fn update_apply(app: AppHandle) -> Result<(), String> {
+    let updater = crate::update::select_updater();
+    let app_for_cb = app.clone();
+    let cb: crate::update::ProgressCb = Box::new(move |p| {
+        let _ = app_for_cb.emit("update_download_progress", p);
+    });
+    updater
+        .apply(Some(cb))
+        .await
+        .map_err(|e| e.to_string())?;
+    crate::update::state::set_pending(true);
+    let _ = app.emit("update_apply_finished", ());
+    Ok(())
+}
+
+/// 忽略某版本（不再主动弹该版本提示；设置内手动检查可重置）。
+#[tauri::command]
+pub fn update_dismiss(version: String) {
+    crate::update::state::dismiss(&version);
+}
+
+/// 设置内更新后「重启设置页面」：用新二进制重开设置进程，再退出当前设置窗。
+#[tauri::command]
+pub fn restart_settings(app: AppHandle) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+    let lang = crate::i18n::Lang::current();
+    let exe = std::env::current_exe()
+        .map_err(|e| crate::i18n::tr(lang, "cmd.locateExeFailed").replace("{e}", &e.to_string()))?;
+    Command::new(exe)
+        .arg("--settings")
+        .stdin(Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            crate::i18n::tr(lang, "cmd.openFailed").replace("{e}", &e.to_string())
+        })?;
+    app.exit(0);
+    Ok(())
+}
