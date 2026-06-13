@@ -25,6 +25,9 @@ function readStdin() {
 function main() {
   const agent = process.argv[2] || 'claude';
   const event = process.argv[3] || 'Unknown';
+  // 配置层级：user（~/.cursor|~/.claude）vs project（cwd 下 .cursor|.claude）。
+  // 用来在同一份 events.jsonl 里区分「用户级 hook」与「项目级 hook」分别有没有触发。
+  const scope = process.argv[4] || 'unknown';
   const profile = C.loadProfile(agent);
   const raw = readStdin();
 
@@ -50,6 +53,7 @@ function main() {
     ts: C.nowIso(),
     epoch_ms: Date.now(),
     agent, // intended agent（本 hook 注册在哪家的配置里）
+    config_scope: scope, // user | project（哪一层配置文件触发的）
     running_agent: runningAgent, // 运行时真实 agent（按 env 判定）
     dedupe_skip: dedupeSkip, // 生产实现会在此为 true 时跳过，避免重复
     event,

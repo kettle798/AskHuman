@@ -3,39 +3,39 @@
   "hooks": {
     "sessionStart": [
       {
-        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor sessionStart"
+        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor sessionStart project"
       }
     ],
     "sessionEnd": [
       {
-        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor sessionEnd"
+        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor sessionEnd project"
       }
     ],
     "beforeSubmitPrompt": [
       {
-        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor beforeSubmitPrompt"
+        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor beforeSubmitPrompt project"
       }
     ],
     "stop": [
       {
-        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor stop"
+        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor stop project"
       }
     ],
     "preToolUse": [
       {
-        "matcher": "*",
-        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor preToolUse"
+        "matcher": "Shell",
+        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor preToolUse project"
       }
     ],
     "postToolUse": [
       {
-        "matcher": "*",
-        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor postToolUse"
+        "matcher": "Shell",
+        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor postToolUse project"
       }
     ],
     "afterFileEdit": [
       {
-        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor afterFileEdit"
+        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor afterFileEdit project"
       }
     ]
   }

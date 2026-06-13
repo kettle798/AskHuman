@@ -1,12 +1,12 @@
 {
-  "_comment": "交叉触发实验：把同一套 hooklog 以 intended=claude 注册在 Cursor 启动目录的 .claude/settings.json。Cursor 会经兼容映射加载它（SessionStart→sessionStart、UserPromptSubmit→beforeSubmitPrompt、Stop→stop、Pre/PostToolUse）。在 cursor-agent 下这些会写入 logs/claude/events.jsonl 且 running_agent=cursor、dedupe_skip=true，证明 Cursor 对同一 hook 的重复触发。Notification 无 Cursor 对应（应不出现，作负向对照）。",
+  "_comment": "交叉触发实验（项目级）：同一套 hooklog 以 intended=claude、scope=project 注册在 Cursor 启动目录的 .claude/settings.json。若 Cursor 项目层兼容加载它，会写入 logs/claude/events.jsonl 且 config_scope=project、running_agent=cursor、dedupe_skip=true。本次实测项目级未触发（见 FINDINGS §7.5）；保留用于与用户级对照复测。Notification 无 Cursor 对应（应不出现）。",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" claude SessionStart"
+            "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" claude SessionStart project"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" claude SessionEnd"
+            "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" claude SessionEnd project"
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" claude UserPromptSubmit"
+            "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" claude UserPromptSubmit project"
           }
         ]
       }
@@ -36,29 +36,29 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" claude Stop"
+            "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" claude Stop project"
           }
         ]
       }
     ],
     "PreToolUse": [
       {
-        "matcher": "*",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" claude PreToolUse"
+            "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" claude PreToolUse project"
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "*",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" claude PostToolUse"
+            "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" claude PostToolUse project"
           }
         ]
       }
@@ -68,7 +68,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" claude Notification"
+            "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" claude Notification project"
           }
         ]
       }

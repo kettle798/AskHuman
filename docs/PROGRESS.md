@@ -2,7 +2,7 @@
 
 按具体任务 / 需求记录待办与当前进展。任务 / 需求完成后删除其 section（历史留在 git）。
 
-## 进行中：IM 渠道激活 —— Agent 信号 Demo（Claude/Codex 已过 / Cursor 静态核对完成，待实测）
+## 进行中：IM 渠道激活 —— Agent 信号 Demo（Claude/Codex/Cursor 三家均实测通过）
 
 需求 `docs/todos/im-channel-activation.md`；Demo 已升级为**共享核心** `demo/agent-lifecycle/`
 （`harness/`(common+hooklog+envprobe+poller, profile 驱动) + `harness/profiles/{claude,codex,cursor}.cjs`
@@ -24,15 +24,17 @@ turn-start↔turn-end 成对；`/clear` 轮换 session_id 但 pid 不变 → 会
 - 进程定位：walk 命中原生 `codex` 二进制 pid（链路有 node(npm 启动器) 父进程，二者同生共死）；poller 仅启动即 arm（0 turn）、跨会话自动 re-arm。
 - `/new`（干净复测）：再触发 `SessionStart`(source=startup)、**轮换 session_id、pid 不变** → 与 Claude `/clear` 一致，**身份绑 pid**。
 
-**Cursor：bundle 静态核对完成**（本机包 `~/.local/share/cursor-agent/versions/2026.06.12-…`，未运行）：
-- Hook 多源合并（企业/团队/用户 `~/.cursor/hooks.json`／项目 `.cursor/hooks.json`，`loadProjectHooks` 默认 true）+ **还读 `.claude/settings*.json`**；**无信任哈希**（不像 Codex）；hooks.json 支持块注释。
-- 原生事件 21 个（camelCase；CLI 对 `sessionStart`/`sessionEnd`/`beforeSubmitPrompt`/`stop`/`preToolUse`/`postToolUse`… 都有触发点）；Claude 事件名/工具名有兼容映射（`PermissionRequest`/`Notification` 无对应）。
-- 免 Hook 拿会话 ID：shell 工具子进程注入 `CURSOR_AGENT=1`+`CURSOR_CONVERSATION_ID`；**hook 子进程**用 `CURSOR_PROJECT_DIR`/`CLAUDE_PROJECT_DIR` 等、会话 ID 走 stdin（字段 **`session_id`**，非 conversation_id）。
-- payload 走 stdin（默认 `argv_heredoc` 用 `CURSOR_HOOK_EOF`），经 shell 执行；契约：`exit 0`+空 stdout=no-op，`exit 2`=阻塞，其它非零仅 `failClosed`(默认 false) 才阻塞 → 现有 hooklog 安全。
-- 已据此对齐 `agents/cursor/.cursor/hooks.json`（挂 7 个观测类事件）与 `profiles/cursor.cjs`（会话字段改 `session_id`、env 列两类子进程注入项）。最小轮次实测计划见 FINDINGS §7.5。
+**Cursor：实测通过**（2026-06-13，cursor-agent 2026.06.12 / macOS；先 bundle 静态核对再实测）：
+- 静态：Hook 多源合并（企业/团队/用户 `~/.cursor/hooks.json`／项目 `.cursor/hooks.json`，`loadProjectHooks` 默认 true）+ **还读 `.claude/settings*.json`**；无信任哈希；21 个 camelCase 原生事件 + Claude 事件/工具名兼容映射（`Notification` 无对应）；payload 走 stdin（`argv_heredoc`/`CURSOR_HOOK_EOF`），`exit 0`+空 stdout=no-op、`exit 2`=阻塞。
+- **生效的是用户级 hook**：项目级 `agents/cursor/.cursor`+`.claude` 在 CLI 下**全程未触发**（实测两轮，无 `scope=project` 事件）；改挂**用户级** `~/.cursor/hooks.json`+`~/.claude/settings.json` 后全部触发（与生产 `cursor_hook.rs`/`claude_hook.rs` 装用户级一致）。
+- **0-turn arm**：`sessionStart` 用户级**启动即触发** → poller `arm→LIVE`（无需发 prompt）。
+- 免 Hook 拿会话 ID（实测）：shell 工具子进程 `CURSOR_AGENT=1`+`CURSOR_CONVERSATION_ID`(==hook stdin `session_id`)+`AGENT_TRANSCRIPTS`；**hook 子进程**用 `CURSOR_PROJECT_DIR`/`CURSOR_VERSION`/`CURSOR_USER_EMAIL`/`CLAUDE_PROJECT_DIR`、会话 ID 走 stdin。
+- **双触发 + 去重实锤**：因恒兼容加载 `~/.claude`，每个生命周期事件在 cursor-agent 下从 `~/.cursor`+`~/.claude` **各触发一次**（同 sid、同毫秒）；`detectRunningAgent`（env 有 `CURSOR_*`→running=cursor）让 `~/.claude` 那批 `dedupe_skip=true`、净一次。
+- turn `beforeSubmitPrompt`↔`stop` 成对；关闭矩阵：正常退出有 `sessionEnd`、`kill -9` 必丢 → 唯一不漏靠 poller（~1-2s 抓 DEAD）；新会话＝新 pid（身份绑 pid）。详见 FINDINGS §7.7。
 
-待定下一步：① 取得许可后按 FINDINGS §7.5 做 Cursor 最小轮次实测；
-② 是否把三家结论回写设计 doc（§6/§10）；③ 是否开始改生产 daemon（attach 门控/进程轮询/turn 事件上报）。
+待定下一步：① 三家结论是否回写设计 doc（`docs/todos/im-channel-activation.md` §6/§10，已在 FINDINGS §9 列出建议）；
+② 是否开始改生产 daemon（attach 门控 / 进程存活轮询 / turn 事件上报 / 跨家族运行时去重）；
+③ 用户级临时 hook 改动已读完即还原（备份 `~/.cursor/hooks.json.bak.*`、`~/.claude/settings.json.bak.*`）。
 
 ## 进行中：严格选择模式 + 结构化输出（实测通过 → 仅剩收尾）
 
