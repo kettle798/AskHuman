@@ -15,7 +15,7 @@
 - 不得为了「顺便验证」而擅自 `claude -p "..."` / `codex exec ...` / `cursor-agent ...` 之类调用。
 - 纯文档查证、**读源码**、跑 harness 自带的**非 Agent 冒烟自测**（直接 `node envprobe.cjs <agent>` 等）不受此限。
 
-进度：**Claude Code 已实测通过**（§5）。**Codex 待实测**（§6，已备好 harness/配置，等用户许可+操作）。**Cursor 待实测**（§7，仅文档+源码旁证，配置为草稿）。
+进度：**Claude Code 已实测通过**（§5）。**Codex 已实测通过**（§6）。**Cursor 已完成静态核对**（§7，读本机安装包 bundle 得到完整 hook 加载/事件/契约/env 注入，配置已据此对齐；待用户许可后做最小轮次实测）。
 
 ---
 
@@ -28,7 +28,7 @@
 | Agent | 会话 ID env | 来源 | 旁证/可靠度 |
 |---|---|---|---|
 | Claude Code | `CLAUDE_CODE_SESSION_ID`（+`CLAUDECODE`/`CLAUDE_CODE_CHILD_SESSION`/`CLAUDE_PROJECT_DIR`） | 文档 + **实测确认** | §5 已验证：与 hook `session_id` 一致 |
-| Cursor (cursor-agent CLI) | `CURSOR_CONVERSATION_ID`（+`CURSOR_AGENT=1`/`CURSOR_INVOKED_AS=agent`） | **实测旁证**（读自身 ambient env，见 §7.1） | 与早期「文档说没有」相反，以实测为准 |
+| Cursor (cursor-agent CLI) | `CURSOR_CONVERSATION_ID`（+`CURSOR_AGENT=1`/`AGENT_TRANSCRIPTS`） | **实测旁证 + bundle 静态确认**（注入点见 §7.3） | shell 工具子进程注入 `CURSOR_CONVERSATION_ID` |
 | Codex CLI | `CODEX_THREAD_ID`（= 线程/会话 ID） | **源码确认**（见 §6.1） | 与早期「文档未见」相反，以源码为准 |
 
 > **env 的两个共同局限**（决定 Hook 仍不可替代）：
@@ -41,21 +41,21 @@
 
 | 维度 | Claude Code (2.1.176) | Cursor Agent (cursor-agent CLI) | Codex CLI |
 |---|---|---|---|
-| 子进程 env 带会话 ID？ | **是** `CLAUDE_CODE_SESSION_ID` | **是** `CURSOR_CONVERSATION_ID`（旁证） | **是** `CODEX_THREAD_ID`（源码） |
+| 子进程 env 带会话 ID？ | **是** `CLAUDE_CODE_SESSION_ID` | **是** `CURSOR_CONVERSATION_ID`（bundle 确认） | **是** `CODEX_THREAD_ID`（源码） |
 | turn-start 事件 | `UserPromptSubmit` | `beforeSubmitPrompt` | `UserPromptSubmit` |
 | turn-end 事件 | `Stop` | `stop` | `Stop` |
-| 会话结束事件 | `SessionEnd`（可靠，除 `kill -9`） | `sessionEnd`（历史不稳，待测） | **无 SessionEnd** → 只能靠进程存活轮询兜底 |
-| Hook 配置位置 | `~/.claude/settings.json` 或项目 `.claude/settings.json` | `~/.cursor/hooks.json` 或项目 `.cursor/hooks.json`（version 1） | `~/.codex/config.toml` 的 `[hooks]` 或 `.codex/hooks.json` |
-| Hook 输入会话字段 | `session_id` | `conversation_id`（+`generation_id`/`workspace_roots`） | `session_id`（+`turn_id`；**无** `reason`） |
-| 进程粒度 | 单 `claude` 进程＝单会话 ✓ | cursor-agent CLI 单进程/会话（IDE 版才粗粒度）⚠️待测 | 单 `codex` 进程＝单会话 ✓ |
-| Hook 是否默认开启 | 是 | 是（需在 hooks.json 配置） | **是**（`Feature::CodexHooks` stage=Stable, default_enabled=true，源码确认；旧的 `[features] codex_hooks` 已是兼容别名，无需手动开） |
-| Hook 信任机制 | 项目级 settings 自动加载 | Cursor Settings > Hooks | **需「信任」**：项目须被信任 + 每条 hook 内容哈希须被信任（见 §6.2） |
+| 会话结束事件 | `SessionEnd`（可靠，除 `kill -9`） | `sessionEnd`（CLI 确有触发点，但**硬杀必丢**→仍靠轮询，待实测） | **无 SessionEnd** → 只能靠进程存活轮询兜底 |
+| Hook 配置位置 | `~/.claude/settings.json` 或项目 `.claude/settings.json` | 多源合并：企业/团队/用户 `~/.cursor/hooks.json`/项目 `.cursor/hooks.json`（version 1）+ **还读** `.claude/settings*.json`（兼容） | `~/.codex/config.toml` 的 `[hooks]` 或 `.codex/hooks.json` |
+| Hook 输入会话字段 | `session_id` | `session_id`（+`workspace_roots`/`transcript_path`；shell 工具 env 才是 `CURSOR_CONVERSATION_ID`） | `session_id`（+`turn_id`；**无** `reason`） |
+| 进程粒度 | 单 `claude` 进程＝单会话 ✓ | cursor-agent CLI 单进程/会话（IDE 版才粗粒度）⚠️待实测 | 单 `codex` 进程＝单会话 ✓ |
+| Hook 是否默认开启 | 是 | **是**（`loadProjectHooks` 默认 true；需在 hooks.json 配置事件） | **是**（`Feature::CodexHooks` stage=Stable, default_enabled=true，源码确认；旧的 `[features] codex_hooks` 已是兼容别名，无需手动开） |
+| Hook 信任机制 | 项目级 settings 自动加载 | **无信任哈希**：项目层默认加载（不像 Codex 要逐条信任）；IDE 版另有 Settings>Hooks | **需「信任」**：项目须被信任 + 每条 hook 内容哈希须被信任（见 §6.2） |
 
 ### 1.3 综合结论
 
 1. **「不用 Hook 拿会话 ID」三家 CLI 都成立**（Claude/Cursor 实测、Codex 源码）。
 2. **三家都需 Hook 才能拿 turn-start 事件**（在第一次提问之前就 arm）；纯 env 给不了 turn 边沿。
-3. **「会话是否还在」最终都得靠进程存活轮询兜底**：Codex 干脆**没有** SessionEnd；Claude 的 SessionEnd 在 `kill -9` 下会丢；Cursor 事件历史不稳。这正是设计 doc 的电平骨干。
+3. **「会话是否还在」最终都得靠进程存活轮询兜底**：Codex 干脆**没有** SessionEnd；Claude 的 SessionEnd 在 `kill -9` 下会丢；Cursor 虽有 `sessionEnd` 触发点但硬杀同样必丢。这正是设计 doc 的电平骨干。
 4. harness 的**非 Agent 冒烟自测**已通过：`poller` 能 `arm→LIVE→DEAD`，`hooklog`/`envprobe` 读 env、回溯进程树、写日志均正常（三 profile 均冒烟过）。
 
 ---
@@ -79,7 +79,8 @@ demo/agent-lifecycle/
   agents/                           ── 每家一个「启动目录」，内含其项目级 hook 配置 ──
     claude/.claude/settings.json    9 个生命周期事件 → hooklog.cjs claude <Event>
     codex/.codex/hooks.json         Codex 事件集（无 SessionEnd/Notification）→ hooklog.cjs codex <Event>
-    cursor/.cursor/hooks.json       【草稿，待验证】beforeSubmitPrompt/stop/afterFileEdit → hooklog.cjs cursor <Event>
+    cursor/.cursor/hooks.json       sessionStart/sessionEnd/beforeSubmitPrompt/stop/preToolUse/postToolUse/afterFileEdit → hooklog.cjs cursor <Event>
+    cursor/.claude/settings.json    交叉触发实验：intended=claude，被 Cursor 兼容加载 → 实测「重复触发 + 去重判据」（§7.6）
   logs/<agent>/                     每家独立子目录：events.jsonl / poller.jsonl / envprobe-*.json / pid.json
 ```
 
@@ -92,7 +93,7 @@ demo/agent-lifecycle/
 ### 2.2 关键纪律
 
 - `hooklog` **绝不往 stdout 写**（Claude/Codex 的 `UserPromptSubmit`/`SessionStart` stdout 会被当上下文注入模型）；所有信息进日志文件；始终 `exit 0` fail-open。
-  - ⚠️ Cursor 例外待查：Cursor 的权限类 hook（`beforeShellExecution` 等）会**读 stdout 的 JSON 当裁决**——所以 cursor 配置里只挂**观测类**事件（`beforeSubmitPrompt`/`stop`/`afterFileEdit`），且需在实测前确认「空 stdout 是否被容忍」（见 §7.2）。
+  - Cursor 已确认（bundle，§7.4）：**exit 0 + 空 stdout = no-op**，不阻塞、不报错；权限类 hook 才会读 stdout JSON 当裁决，但本 demo 只挂观测类 + 空输出，故安全。`exit 2` 才会阻塞（Claude 风格），其它非零仅在 `failClosed`(默认 false) 时阻塞。
 - 配置里命令写**绝对路径**（仓库整体是一个 git repo）。若仓库迁移，需同步改 `agents/*/.../*.json` 里的绝对路径。
 
 ---
@@ -106,7 +107,7 @@ demo/agent-lifecycle/
   - `find_project_root` 默认按 `project_root_markers=[".git"]` 向上找——所以在本仓库内，Codex 的「项目根」会算成**仓库根**。
   - **但** `load_project_layers` 会从 cwd 向上**逐级扫描到项目根**，对**沿途每个**含 `.codex/` 的目录都加载其 `config.toml`/`hooks.json`。因此把 `.codex/` 放在 `agents/codex/`（位于 cwd 与 git 根之间），在该目录启动 codex 就会被发现并加载——**无需软链、无需放到 git 根**。
   - 兜底：万一需要强制「以 cwd 为根」，可 `codex -c 'project_root_markers=[]'`（源码里空数组→根=cwd）。
-- **Cursor**：待实测确认（预计同样基于 cwd / workspace，配置放 `agents/cursor/.cursor/`）。
+- **Cursor**（bundle 确认，§7.2）：用户级 `~/.cursor/hooks.json` **恒加载**；项目级 `<workspace>/.cursor/hooks.json` 由 `loadProjectHooks`（默认 true）门控，`<workspace>` = 启动时的工作区根。**无信任哈希**（不像 Codex 要逐条信任）。在 `agents/cursor/` 启动即可，无需软链。另外它**还会读** `<workspace>/.claude/settings.json`（兼容 Claude 配置）。
 
 ---
 
@@ -239,32 +240,113 @@ poller 全程自动在 3 个会话间 re-arm，每次 `arm→LIVE→DEAD` 正确
 
 ---
 
-## 7. Cursor Agent（仅文档+源码旁证，配置为草稿，待实测）
+## 7. Cursor Agent（已完成 bundle 静态核对，待实测）
 
-### 7.1 实测旁证：cursor-agent 的 ambient env（零成本，非主动调用）
+> 核对对象：本机安装包 `~/.local/share/cursor-agent/versions/2026.06.12-01-15-52-7244546/`
+> （webpack 分包的压缩 JS：hooks 模块在 `2097.index.js`，事件枚举/env 注入在 `index.js`）。
+> 纯静态读包，**未运行** cursor-agent（不违反 §0）。
 
-当前会话本就跑在 cursor-agent CLI 里，读**自身** ambient env（不违反 §0）即见：
+### 7.1 实测旁证：cursor-agent 的 ambient env + 进程 walk（零成本，非主动调用）
+
+当前会话本就跑在 cursor-agent CLI 里，对 harness 直接 `node envprobe.cjs cursor`（读**自身** shell 工具子进程 env，不主动驱动 Agent，不违反 §0）实测到：
 
 ```
-CURSOR_INVOKED_AS = agent
 CURSOR_AGENT = 1
-CURSOR_CONVERSATION_ID = <uuid>
+CURSOR_CONVERSATION_ID = 2083ffb0-…-052e009ddcc9     # == 该会话 transcript UUID
+AGENT_TRANSCRIPTS = ~/.cursor/projects/<proj>/agent-transcripts
+CURSOR_INVOKED_AS = agent
 CURSOR_ASKPASS_SOCKET / CURSOR_ASKPASS_SECRET / CURSOR_RIPGREP_PATH
 ```
 
-→ cursor-agent CLI 确实向子进程注入 `CURSOR_CONVERSATION_ID`（=会话 ID）。「无 Hook 拿会话 ID」对 cursor-agent CLI 成立（IDE 版未测）。
+进程 walk 也**实测命中**：`node(envprobe) → /bin/zsh → agent(pid 1051) → -zsh → login → Terminal`，
+`agent_comm=/Users/wutian/.local/bin/agent`、`command=agent --use-system-ca …/index.js --yolo`、`alive=alive`。
+→ 坐实 §7.3 的「shell 工具子进程注入 `CURSOR_AGENT`/`CURSOR_CONVERSATION_ID`/`AGENT_TRANSCRIPTS`」与 profile 的 `processTokens:["agent"]` 能稳定定位 cursor-agent 进程。（这是「免 Hook 拿会话 ID」+「进程 walk」两点的零成本实证；hook 链路仍待许可后实测。）
 
-### 7.2 实测前必须核对的点（本机安装包：`~/.local/share/cursor-agent/versions/<ver>/`）
+### 7.2 Hook 加载机制（bundle 确认）
 
-安装包是 ~9.7MB 压缩 JS bundle，含独立 `hooks-exec`/`hooks` 模块。实测前需从 bundle 确认：
+加载器 `load({loadProjectHooks=true})` 按下列**多源合并**（后者覆盖/追加前者），`loadProjectHooks` **默认 true**：
 
-- [ ] hook 配置加载位置与**项目根判定**（是否 cwd / workspace 决定，能否像 Claude/Codex 那样在子目录生效）。
-- [ ] 事件名是否确为 `beforeSubmitPrompt`/`stop`/`afterFileEdit`/`sessionStart`/`sessionEnd`，以及各自的 stdin/stdout 契约。
-- [ ] **观测类 hook 容忍空 stdout 吗**（权限类 hook 期待 JSON 裁决；我们只挂观测类，但需确认 `stop`/`beforeSubmitPrompt` 空输出不报错/不阻塞）。
-- [ ] `command` 是经 shell 执行还是直接 exec（决定多 token 命令串是否要换成 wrapper 脚本）。
-- [ ] cursor-agent 进程在树里的真实 `comm`/`command`（验证 profile 的 `processTokens/commandTokens` 能否命中）。
+| 源 | 路径 |
+|---|---|
+| enterprise | macOS `/Library/Application Support/Cursor/hooks.json`；win `C:\ProgramData\Cursor\hooks.json`；linux `/etc/cursor/hooks.json` |
+| team | `<workspace>/.cursor/managed/active-team-hooks/hooks.json` |
+| user | `~/.cursor/hooks.json`（**恒加载**） |
+| project | `<workspace>/.cursor/hooks.json`（`loadProjectHooks` 门控，默认开） |
+| claude-user | `~/.claude/settings.json`（**兼容 Claude 配置**） |
+| claude-project | `<workspace>/.claude/settings.json` |
+| claude-project-local | `<workspace>/.claude/settings.local.json` |
 
-`agents/cursor/.cursor/hooks.json` 当前是**草稿**（version 1，只挂 `beforeSubmitPrompt`/`stop`/`afterFileEdit`），在上述核对前**不要**实跑。
+- **无信任哈希机制**（不像 Codex 要逐条 `trusted_hash`）；项目层默认就加载。
+- `hooks.json` 支持**块注释**（解析前 `/* … */` 被剥除，即 JSONC）。
+- Claude 的 `.claude/settings.json` 会经「事件名/工具名兼容映射」并入（见 §7.3）。
+
+### 7.3 事件名、字段与 env 注入（bundle 确认）
+
+**原生事件枚举（21 个，camelCase）**：
+`beforeShellExecution` / `beforeMCPExecution` / `afterShellExecution` / `afterMCPExecution` /
+`beforeReadFile` / `afterFileEdit` / `beforeTabFileRead` / `afterTabFileEdit` / `stop` /
+`beforeSubmitPrompt` / `afterAgentResponse` / `afterAgentThought` / `sessionStart` / `sessionEnd` /
+`preCompact` / `subagentStart` / `subagentStop` / `preToolUse` / `postToolUse` / `postToolUseFailure` / `workspaceOpen`。
+（CLI 内对以上**都有触发点** `executeHookForStep(...)`——含 `sessionStart`/`sessionEnd`/`beforeSubmitPrompt`/`stop`。）
+
+**Claude→Cursor 兼容映射**（让 `.claude/settings.json` 能用）：
+`PreToolUse→preToolUse`、`PostToolUse→postToolUse`、`UserPromptSubmit→beforeSubmitPrompt`、`Stop→stop`、
+`SubagentStop→subagentStop`、`SessionStart→sessionStart`、`SessionEnd→sessionEnd`、`PreCompact→preCompact`；
+**`PermissionRequest`/`Notification` → 无对应（忽略）**。工具名映射：`Bash→Shell`、`Edit→Write`、`Glob→无`，`Read/Write/Grep/WebFetch/WebSearch/Task` 直通。
+
+**两类子进程 env（与 Claude/Codex 同样不对称）**：
+- **shell 工具子进程**（envprobe 走这条，「免 Hook 拿会话 ID」）：`CURSOR_AGENT="1"`、`CURSOR_CONVERSATION_ID=<safe 会话 ID>`（有 conversationId 时）、`AGENT_TRANSCRIPTS=<projectDir>/…`（有 projectDir 时）、`SUDO_ASKPASS`/`CURSOR_ASKPASS_SOCKET`/`CURSOR_ASKPASS_SECRET`（用 askpass 时）。
+- **hook 子进程**（hooklog 走这条）：`CURSOR_PROJECT_DIR`、`CURSOR_VERSION`、`CURSOR_USER_EMAIL`、`CURSOR_TRANSCRIPT_PATH`、`CLAUDE_PROJECT_DIR`（兼容）；**会话 ID 不在 env**，靠 stdin。
+
+**hook stdin payload（base）**：`{ hook_event_name, cursor_version, workspace_roots:[workspace], user_email, session_id, transcript_path, …各事件附加字段 }`（`subagentStop` 另带 `agent_transcript_path`）。
+→ **hook 里会话字段是 `session_id`**（不是 `conversation_id`；后者只在 shell 工具 env）。
+
+**payload 传输方式**：默认 `argv_heredoc`——把命令包成 `cmd <<'CURSOR_HOOK_EOF'\n{json}\nCURSOR_HOOK_EOF`（POSIX）或 `@'\n{json}\n'@ | & cmd`（PowerShell）；即 **JSON 走 stdin（heredoc）**。可选 `stdin` 直传模式。两种模式 hook 都从 **stdin 读 JSON** → 现有 `hooklog.cjs` 读 stdin 即兼容。命令经 **shell** 执行，多 token 命令串 OK。
+
+### 7.4 stdout / 退出码契约（bundle 确认）
+
+| hook 返回 | 行为 |
+|---|---|
+| `exit 0` + **空 stdout** | **no-op**：不阻塞、不报错（本 demo 观测类 hook 即此路径，安全） |
+| `exit 0` + JSON stdout | 解析为裁决；支持 Claude 嵌套 `hookSpecificOutput` 兼容 |
+| **`exit 2`** | **阻塞**（Claude 风格）；stdout/stderr 作为阻塞消息 |
+| 其它非零 | 记为失败；**仅当 `failClosed`(默认 false) 才阻塞**，否则非阻塞 |
+| 超时 / spawn 失败 | 同上，仅 `failClosed` 才阻塞 |
+
+各事件返回结构：权限类（`beforeShellExecution`/`beforeMCPExecution`/`beforeReadFile`/`preToolUse`…）→ `{permission:"allow"|"deny"|"ask", user_message?}`；`beforeSubmitPrompt`/`sessionStart` → `{continue:bool, user_message?}`；`stop`/`subagentStop` → `{}`（另有 `loop_limit`/`loop_count` 防 stop-hook 自循环）。
+
+### 7.5 配置现状与最小轮次实测计划
+
+`agents/cursor/.cursor/hooks.json`（version 1）已按上述对齐，挂**观测类**事件：`sessionStart`/`sessionEnd`/`beforeSubmitPrompt`/`stop`/`preToolUse(*)`/`postToolUse(*)`/`afterFileEdit`，全部 `exit 0` 空输出 → 不阻塞。profile `cursor.cjs` 的会话字段已改为 `session_id`、env 列表已含两类子进程的注入项。
+
+**最小轮次实测（沿用 §8，≈1 个计费 turn）**——待用户许可+操作：
+1. （AI，0 turn）后台起 poller：`node demo/agent-lifecycle/harness/poller.cjs cursor 1000`。
+2. （你，0 turn）`cd demo/agent-lifecycle/agents/cursor && cursor-agent`（或 `agent`）。读 `logs/cursor/events.jsonl` 看 `sessionStart` 是否触发、hook 子进程 env、poller 是否 `arm→LIVE`（walk 命中 `agent`/`cursor-agent` 进程）。
+3. （你，**1 turn**）让它用 shell 跑：`node /Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/envprobe.cjs cursor` → 一个 turn 覆盖 `beforeSubmitPrompt`→`preToolUse`/`postToolUse`→`stop`，并验证 shell 子进程 env 是否含 `CURSOR_CONVERSATION_ID`、walk 能否定位进程。
+4. （你，0 turn）关闭矩阵：① 正常退出；② `kill -9`；③ 关窗 → 看 `sessionEnd` 哪些场景触发、poller 是否都抓到 `DEAD`（预期硬杀丢 `sessionEnd`，靠 poller 兜底）。
+
+### 7.6 ⚠️ 重复触发：Cursor 兼容加载 Claude hook → 同一 hook 在 Cursor 下触发两次
+
+**问题**（bundle 确认）：Cursor 的 hook 加载器**恒加载** `~/.claude/settings.json`（claude-user 源**无门控**），项目 `.claude/settings.json`/`.claude/settings.local.json` 也在 `loadProjectHooks`（默认 true）下加载，并经事件名映射并入。**没有任何配置开关能关掉这层 Claude 兼容**（只有一个管「输出格式」的 `enableClaudeNestedHookSpecificOutputCompatibility`，与是否加载无关）。
+
+后果：若生产里我们为了同时支持两家，把生命周期 hook **既写进 Claude 配置又写进 Cursor 配置**，那么——
+- 跑 **Claude Code**：只有 Claude 读 `~/.claude/settings.json` → 触发**一次** ✓
+- 跑 **cursor-agent**：Cursor 读 `.cursor/hooks.json`（自己的）**外加**兼容读 `.claude/settings.json` → 两边都有我们的 hook → **同一事件触发两次** ✗（凡两家都有的事件：SessionStart/sessionStart、UserPromptSubmit/beforeSubmitPrompt、Stop/stop、Pre/PostToolUse…）
+
+**解决：在 hook 脚本里运行时判定「真实 Agent」，只让归属一致的那次生效。**
+判据来自 **hook 子进程 env**（§7.3/§7.4，bundle 确认）：
+- Cursor 的 hook 子进程**恒有** `CURSOR_VERSION`/`CURSOR_PROJECT_DIR`（且兼容性地也设 `CLAUDE_PROJECT_DIR`）。
+- Claude 的 hook 子进程有 `CLAUDECODE`/`CLAUDE_CODE_SESSION_ID`，但**没有** `CURSOR_*`。
+- ⚠️ `CLAUDE_PROJECT_DIR` **不能**用作「是 Claude」的判据——Cursor 也设它。必须**先判 Cursor**（看 `CURSOR_*`），排除后再认 Claude。
+
+规则：每条 hook 记住自己「注册给哪家」（intended）；运行时按 env 算出真实 agent（running）；`running !== intended` 就 **`exit 0` 跳过**。于是：
+- Claude 跑 → `.claude` 项 running=claude=intended → 执行（一次）✓
+- Cursor 跑 → `.cursor` 项 running=cursor=intended → 执行；`.claude` 项 running=cursor≠claude → **跳过** → 净一次 ✓
+
+harness 已落地该判据：`common.cjs::detectRunningAgent()`（顺序 Cursor→Codex→Claude）；`hooklog.cjs` 记录 `running_agent`/`dedupe_skip`（demo 里**仍照记两次**以便实测看到重复，生产实现应在 `dedupe_skip` 时直接跳过）。
+`agents/cursor/.claude/settings.json`（intended=claude）即**交叉触发实验**：在 cursor-agent 下，这些会写进 `logs/claude/events.jsonl` 且 `running_agent=cursor`/`dedupe_skip=true`，从而坐实「Cursor 重复触发 + 判据可去重」。其中 `Notification` 无 Cursor 对应（应**不**出现，作负向对照）。
+
+> 备注：Codex 不读 `.claude`/`.cursor`，无此交叉问题；但 `detectRunningAgent` 对它也给正确结果，规则统一无副作用。
 
 ---
 
@@ -308,3 +390,4 @@ CURSOR_ASKPASS_SOCKET / CURSOR_ASKPASS_SECRET / CURSOR_RIPGREP_PATH
 - §6 表：Claude 行标「实测确认」；Codex 行更新为「`CODEX_THREAD_ID` env 带会话 ID、**无 SessionEnd**、hooks 需信任」；Cursor 行标「cursor-agent CLI 有 `CURSOR_CONVERSATION_ID`」。
 - §10「PPID-at-ask 兜底」：实测 walk 路径 `子进程 → /bin/zsh(Bash包装) → claude`，确认「向上 walk 找稳定 Agent 进程」可行且必要。
 - 新增注意点：会话身份**应以进程 pid 为准**（`session_id`/`thread_id` 可能随 `/clear` 轮换）；**进程存活轮询是三家通用的不可漏底**（Codex 尤其，因为它根本没有 SessionEnd）。
+- **跨家族重复触发（重要，§7.6）**：Cursor 恒兼容加载 `~/.claude/settings.json` 且**无开关可关**——若 AskHuman 同时给 Claude 与 Cursor 装生命周期 hook，cursor-agent 下会**触发两次**。生产实现必须在 hook 里**运行时判定真实 Agent**（`CURSOR_VERSION`→cursor、`CODEX_*`→codex、`CLAUDECODE`→claude；注意 `CLAUDE_PROJECT_DIR` 会被 Cursor 兼容设置、不可作判据），`running !== intended` 即跳过；否则一次提问会被上报两次（误判忙闲 / 重复 attach）。

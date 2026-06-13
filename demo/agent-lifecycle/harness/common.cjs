@@ -136,6 +136,34 @@ function collectAgentEnv(profile) {
   return out;
 }
 
+// 从 hook 子进程的 env 判断「当前到底是哪个 Agent 在跑这个 hook」。
+//
+// 背景（见 FINDINGS §7.6）：Cursor 会把 `~/.claude/settings.json`（恒加载）以及项目
+// `.claude/settings.json` 里的 hook 经兼容映射一并加载。所以同一条生命周期 hook 若既
+// 注册在 Claude 配置又注册在 Cursor 配置，**在 cursor-agent 下会触发两次**（一次来自
+// .cursor/hooks.json，一次来自被兼容加载的 .claude/settings.json）。Cursor 没有「关掉
+// Claude 兼容」的开关，所以必须在 hook 脚本里**运行时判定真实 Agent**、只让「与本 hook
+// 归属一致」的那次生效。
+//
+// 判定依据（hook 子进程 env，bundle 确认）：
+//   - Cursor：恒设 CURSOR_VERSION / CURSOR_PROJECT_DIR（且会顺带设 CLAUDE_PROJECT_DIR 做兼容）。
+//   - Codex ：hook 子进程带 CODEX_*（如 CODEX_MANAGED_BY_NPM）。
+//   - Claude：带 CLAUDECODE / CLAUDE_CODE_SESSION_ID（CLAUDE_PROJECT_DIR 不可作判据——Cursor 也设它）。
+// 顺序很重要：先判 Cursor（因为它也设 CLAUDE_PROJECT_DIR），再 Codex，再 Claude。
+function detectRunningAgent(env = process.env) {
+  if (env.CURSOR_VERSION || env.CURSOR_PROJECT_DIR || env.CURSOR_AGENT) return 'cursor';
+  if (
+    env.CODEX_MANAGED_BY_NPM ||
+    env.CODEX_THREAD_ID ||
+    env.CODEX_HOME ||
+    Object.keys(env).some((k) => k.startsWith('CODEX_'))
+  ) {
+    return 'codex';
+  }
+  if (env.CLAUDECODE || env.CLAUDE_CODE_SESSION_ID) return 'claude';
+  return null;
+}
+
 function sessionIdFromEnv(profile) {
   if (profile.sessionIdEnvVar && process.env[profile.sessionIdEnvVar] !== undefined) {
     return process.env[profile.sessionIdEnvVar];
@@ -215,6 +243,7 @@ module.exports = {
   basename,
   guessAgentPid,
   collectAgentEnv,
+  detectRunningAgent,
   sessionIdFromEnv,
   sessionIdFromHook,
   redactedEnv,

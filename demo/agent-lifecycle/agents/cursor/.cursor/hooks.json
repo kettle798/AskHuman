@@ -1,6 +1,16 @@
 {
   "version": 1,
   "hooks": {
+    "sessionStart": [
+      {
+        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor sessionStart"
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor sessionEnd"
+      }
+    ],
     "beforeSubmitPrompt": [
       {
         "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor beforeSubmitPrompt"
@@ -9,6 +19,18 @@
     "stop": [
       {
         "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor stop"
+      }
+    ],
+    "preToolUse": [
+      {
+        "matcher": "*",
+        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor preToolUse"
+      }
+    ],
+    "postToolUse": [
+      {
+        "matcher": "*",
+        "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" cursor postToolUse"
       }
     ],
     "afterFileEdit": [

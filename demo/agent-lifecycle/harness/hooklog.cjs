@@ -40,10 +40,18 @@ function main() {
   const env = C.collectAgentEnv(profile);
   const sessionId = C.sessionIdFromHook(hook, profile) || C.sessionIdFromEnv(profile);
 
+  // 跨家族「重复触发」去重判据：本 hook 归属的 agent（命令行参数）vs 运行时真实 agent。
+  // Cursor 会兼容加载 Claude 配置 → 同一 hook 在 cursor 下可能触发两次；生产实现应在
+  // running_agent !== intended_agent 时直接跳过（这里仍照记，便于在实测里看到两次触发）。
+  const runningAgent = C.detectRunningAgent();
+  const dedupeSkip = !!(runningAgent && runningAgent !== agent);
+
   const rec = {
     ts: C.nowIso(),
     epoch_ms: Date.now(),
-    agent,
+    agent, // intended agent（本 hook 注册在哪家的配置里）
+    running_agent: runningAgent, // 运行时真实 agent（按 env 判定）
+    dedupe_skip: dedupeSkip, // 生产实现会在此为 true 时跳过，避免重复
     event,
     // hook JSON 里的关键字段（best-effort，跨家族尽量都记）
     json_event: hook && hook.hook_event_name,

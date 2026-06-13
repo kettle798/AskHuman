@@ -2,7 +2,7 @@
 
 按具体任务 / 需求记录待办与当前进展。任务 / 需求完成后删除其 section（历史留在 git）。
 
-## 进行中：IM 渠道激活 —— Agent 信号 Demo（Claude 已过 / Codex 待实测）
+## 进行中：IM 渠道激活 —— Agent 信号 Demo（Claude/Codex 已过 / Cursor 静态核对完成，待实测）
 
 需求 `docs/todos/im-channel-activation.md`；Demo 已升级为**共享核心** `demo/agent-lifecycle/`
 （`harness/`(common+hooklog+envprobe+poller, profile 驱动) + `harness/profiles/{claude,codex,cursor}.cjs`
@@ -24,11 +24,15 @@ turn-start↔turn-end 成对；`/clear` 轮换 session_id 但 pid 不变 → 会
 - 进程定位：walk 命中原生 `codex` 二进制 pid（链路有 node(npm 启动器) 父进程，二者同生共死）；poller 仅启动即 arm（0 turn）、跨会话自动 re-arm。
 - `/new`（干净复测）：再触发 `SessionStart`(source=startup)、**轮换 session_id、pid 不变** → 与 Claude `/clear` 一致，**身份绑 pid**。
 
-**Cursor：仅文档+源码旁证（cursor-agent CLI ambient env 有 `CURSOR_CONVERSATION_ID`，二进制名 `agent`），配置为草稿**；
-实测前需核对 bundle 的 hook 加载/事件名/stdout 契约（FINDINGS §7.2），要实测另行征许可。
+**Cursor：bundle 静态核对完成**（本机包 `~/.local/share/cursor-agent/versions/2026.06.12-…`，未运行）：
+- Hook 多源合并（企业/团队/用户 `~/.cursor/hooks.json`／项目 `.cursor/hooks.json`，`loadProjectHooks` 默认 true）+ **还读 `.claude/settings*.json`**；**无信任哈希**（不像 Codex）；hooks.json 支持块注释。
+- 原生事件 21 个（camelCase；CLI 对 `sessionStart`/`sessionEnd`/`beforeSubmitPrompt`/`stop`/`preToolUse`/`postToolUse`… 都有触发点）；Claude 事件名/工具名有兼容映射（`PermissionRequest`/`Notification` 无对应）。
+- 免 Hook 拿会话 ID：shell 工具子进程注入 `CURSOR_AGENT=1`+`CURSOR_CONVERSATION_ID`；**hook 子进程**用 `CURSOR_PROJECT_DIR`/`CLAUDE_PROJECT_DIR` 等、会话 ID 走 stdin（字段 **`session_id`**，非 conversation_id）。
+- payload 走 stdin（默认 `argv_heredoc` 用 `CURSOR_HOOK_EOF`），经 shell 执行；契约：`exit 0`+空 stdout=no-op，`exit 2`=阻塞，其它非零仅 `failClosed`(默认 false) 才阻塞 → 现有 hooklog 安全。
+- 已据此对齐 `agents/cursor/.cursor/hooks.json`（挂 7 个观测类事件）与 `profiles/cursor.cjs`（会话字段改 `session_id`、env 列两类子进程注入项）。最小轮次实测计划见 FINDINGS §7.5。
 
-待定下一步：① 取得许可后按 FINDINGS §6.3 做 Codex 实测；② 之后做 Cursor；
-③ 是否把结论回写设计 doc（§6/§10）；④ 是否开始改生产 daemon（attach 门控/进程轮询/turn 事件上报）。
+待定下一步：① 取得许可后按 FINDINGS §7.5 做 Cursor 最小轮次实测；
+② 是否把三家结论回写设计 doc（§6/§10）；③ 是否开始改生产 daemon（attach 门控/进程轮询/turn 事件上报）。
 
 ## 进行中：严格选择模式 + 结构化输出（实测通过 → 仅剩收尾）
 
