@@ -381,11 +381,32 @@ mod tests {
     #[test]
     fn turn_events_toggle_working_idle() {
         let r = reg();
-        r.apply_event(AgentKind::Claude, LifecycleEvent::SessionStart, "s1", Some(111), None, 100);
+        r.apply_event(
+            AgentKind::Claude,
+            LifecycleEvent::SessionStart,
+            "s1",
+            Some(111),
+            None,
+            100,
+        );
         assert_eq!(r.working_count(), 0);
-        r.apply_event(AgentKind::Claude, LifecycleEvent::TurnStart, "s1", Some(111), None, 110);
+        r.apply_event(
+            AgentKind::Claude,
+            LifecycleEvent::TurnStart,
+            "s1",
+            Some(111),
+            None,
+            110,
+        );
         assert_eq!(r.working_count(), 1);
-        r.apply_event(AgentKind::Claude, LifecycleEvent::TurnEnd, "s1", Some(111), None, 120);
+        r.apply_event(
+            AgentKind::Claude,
+            LifecycleEvent::TurnEnd,
+            "s1",
+            Some(111),
+            None,
+            120,
+        );
         assert_eq!(r.working_count(), 0);
     }
 
@@ -393,7 +414,14 @@ mod tests {
     fn turn_start_without_session_start_registers() {
         // spec D6：缺 session-start 也能登记。
         let r = reg();
-        r.apply_event(AgentKind::Codex, LifecycleEvent::TurnStart, "s1", Some(7), None, 100);
+        r.apply_event(
+            AgentKind::Codex,
+            LifecycleEvent::TurnStart,
+            "s1",
+            Some(7),
+            None,
+            100,
+        );
         assert_eq!(r.working_count(), 1);
     }
 
@@ -401,8 +429,22 @@ mod tests {
     fn pid_rotation_ends_previous_session() {
         // spec D7：同一 pid 新 session ⇒ 旧的判结束。
         let r = reg();
-        r.apply_event(AgentKind::Codex, LifecycleEvent::SessionStart, "old", Some(42), None, 100);
-        r.apply_event(AgentKind::Codex, LifecycleEvent::SessionStart, "new", Some(42), None, 200);
+        r.apply_event(
+            AgentKind::Codex,
+            LifecycleEvent::SessionStart,
+            "old",
+            Some(42),
+            None,
+            100,
+        );
+        r.apply_event(
+            AgentKind::Codex,
+            LifecycleEvent::SessionStart,
+            "new",
+            Some(42),
+            None,
+            200,
+        );
         let snap = r.snapshot();
         let arr = snap.as_array().unwrap();
         let old = arr.iter().find(|x| x["sessionId"] == "old").unwrap();
@@ -414,8 +456,22 @@ mod tests {
     #[test]
     fn session_end_moves_to_ended() {
         let r = reg();
-        r.apply_event(AgentKind::Cursor, LifecycleEvent::SessionStart, "s1", Some(1), None, 100);
-        r.apply_event(AgentKind::Cursor, LifecycleEvent::SessionEnd, "s1", Some(1), None, 110);
+        r.apply_event(
+            AgentKind::Cursor,
+            LifecycleEvent::SessionStart,
+            "s1",
+            Some(1),
+            None,
+            100,
+        );
+        r.apply_event(
+            AgentKind::Cursor,
+            LifecycleEvent::SessionEnd,
+            "s1",
+            Some(1),
+            None,
+            110,
+        );
         let arr = r.snapshot();
         let arr = arr.as_array().unwrap();
         assert_eq!(arr.len(), 1);
@@ -426,9 +482,23 @@ mod tests {
     fn ttl_only_affects_pidless_records() {
         let r = reg();
         // 有 pid 的不受 TTL 影响（但本测试进程 pid 一般存活，poll 不杀它）。
-        r.apply_event(AgentKind::Claude, LifecycleEvent::TurnStart, "withpid", Some(std::process::id()), None, 1);
+        r.apply_event(
+            AgentKind::Claude,
+            LifecycleEvent::TurnStart,
+            "withpid",
+            Some(std::process::id()),
+            None,
+            1,
+        );
         // 无 pid 且活动很久以前 → TTL 结束。
-        r.apply_event(AgentKind::Claude, LifecycleEvent::TurnStart, "nopid", None, None, 1);
+        r.apply_event(
+            AgentKind::Claude,
+            LifecycleEvent::TurnStart,
+            "nopid",
+            None,
+            None,
+            1,
+        );
         let changed = r.ttl_sweep();
         assert!(changed);
         let arr = r.snapshot();
@@ -444,8 +514,22 @@ mod tests {
         let r = reg();
         for i in 0..15 {
             let s = format!("s{i}");
-            r.apply_event(AgentKind::Codex, LifecycleEvent::SessionStart, &s, None, None, 1);
-            r.apply_event(AgentKind::Codex, LifecycleEvent::SessionEnd, &s, None, None, 2);
+            r.apply_event(
+                AgentKind::Codex,
+                LifecycleEvent::SessionStart,
+                &s,
+                None,
+                None,
+                1,
+            );
+            r.apply_event(
+                AgentKind::Codex,
+                LifecycleEvent::SessionEnd,
+                &s,
+                None,
+                None,
+                2,
+            );
         }
         let arr = r.snapshot();
         let ended: Vec<_> = arr
@@ -464,7 +548,14 @@ mod tests {
     fn touch_activity_only_existing() {
         let r = reg();
         assert!(!r.touch_activity(AgentKind::Claude, "missing", None));
-        r.apply_event(AgentKind::Claude, LifecycleEvent::SessionStart, "s1", None, None, 1);
+        r.apply_event(
+            AgentKind::Claude,
+            LifecycleEvent::SessionStart,
+            "s1",
+            None,
+            None,
+            1,
+        );
         assert!(r.touch_activity(AgentKind::Claude, "s1", Some(9)));
     }
 }

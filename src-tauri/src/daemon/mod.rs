@@ -3,10 +3,10 @@
 //! Phase 0：起一个不承载任何渠道的空 Daemon，提供握手（含二进制指纹换新）、status、stop、
 //! 单实例（flock）、自启、空闲退出。渠道 / 弹窗 / 提交将在后续 Phase 接入。
 
-pub mod lifecycle;
-pub mod request;
 #[cfg(unix)]
 pub mod config_watch;
+pub mod lifecycle;
+pub mod request;
 #[cfg(unix)]
 pub mod spawn;
 
@@ -40,14 +40,14 @@ mod unix_impl {
     use crate::config::AppConfig;
     use crate::dingtalk::router::DdRouter;
     use crate::feishu::router::FsRouter;
-    use crate::slack::router::SlRouter;
-    use crate::telegram::router::TgRouter;
     use crate::i18n::Lang;
     use crate::ipc::{
         self, transport, ClientMsg, DetectRequest, HelloAck, HelloStatus, ServerMsg, StatusInfo,
         TaskRequest,
     };
-    use crate::models::{ChannelResult, ChannelAction};
+    use crate::models::{ChannelAction, ChannelResult};
+    use crate::slack::router::SlRouter;
+    use crate::telegram::router::TgRouter;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -189,9 +189,14 @@ mod unix_impl {
     fn init_update_snapshot() -> UpdateSnapshot {
         let st = crate::update::state::load();
         let available = !st.latest_version.is_empty()
-            && crate::update::compare_versions(&st.latest_version, &crate::update::current_version())
-                > 0
-            && !st.dismissed_versions.iter().any(|v| v == &st.latest_version);
+            && crate::update::compare_versions(
+                &st.latest_version,
+                &crate::update::current_version(),
+            ) > 0
+            && !st
+                .dismissed_versions
+                .iter()
+                .any(|v| v == &st.latest_version);
         if st.pending {
             crate::update::state::set_pending(false);
         }
@@ -221,7 +226,8 @@ mod unix_impl {
                 let available = info.available && !dismissed;
                 let changed = {
                     let mut u = state.update.lock().unwrap();
-                    let changed = u.available != available || u.latest_version != info.latest_version;
+                    let changed =
+                        u.available != available || u.latest_version != info.latest_version;
                     u.available = available;
                     u.latest_version = info.latest_version.clone();
                     changed
@@ -291,6 +297,9 @@ mod unix_impl {
             meta.pid, meta.version, meta.protocol_version
         ));
 
+        // Ensure the user hooks directory exists and includes a sample script.
+        crate::hooks::ensure_sample();
+
         let state = Arc::new(ServerState {
             startup_fp,
             started_at,
@@ -324,7 +333,11 @@ mod unix_impl {
                         && state.agents.working_count() == 0
                         && !has_agent_subs(&state)
                     {
-                        let idle = state.last_active.lock().map(|t| t.elapsed()).unwrap_or_default();
+                        let idle = state
+                            .last_active
+                            .lock()
+                            .map(|t| t.elapsed())
+                            .unwrap_or_default();
                         if idle >= timeout {
                             log("idle timeout reached; shutting down");
                             state.shutdown.notify_one();
@@ -460,7 +473,11 @@ mod unix_impl {
     }
 
     /// 控制阶段：处理 Hello / Status / Stop（即时应答）；遇到 Submit / GuiHello 返回以便接管连接。
-    async fn control_loop(reader: &mut Reader, w: &mut OwnedWriteHalf, state: &Arc<ServerState>) -> Control {
+    async fn control_loop(
+        reader: &mut Reader,
+        w: &mut OwnedWriteHalf,
+        state: &Arc<ServerState>,
+    ) -> Control {
         loop {
             let msg: Option<ClientMsg> = match ipc::read_msg(reader).await {
                 Ok(m) => m,
@@ -469,7 +486,9 @@ mod unix_impl {
                     return Control::Closed;
                 }
             };
-            let Some(msg) = msg else { return Control::Closed }; // EOF / 对端关闭
+            let Some(msg) = msg else {
+                return Control::Closed;
+            }; // EOF / 对端关闭
 
             match msg {
                 ClientMsg::Hello(hello) => {
@@ -581,9 +600,12 @@ mod unix_impl {
                 // 排空期拒绝（兜底；正常情况下客户端在 Hello 即被挡住而回退进程内识别）。
                 ClientMsg::Detect(req) => {
                     if state.draining.load(Ordering::SeqCst) {
-                        let _ = ipc::write_msg(w, &ServerMsg::Error {
-                            message: "daemon is draining".to_string(),
-                        })
+                        let _ = ipc::write_msg(
+                            w,
+                            &ServerMsg::Error {
+                                message: "daemon is draining".to_string(),
+                            },
+                        )
                         .await;
                     } else {
                         handle_detect(&req, state, w).await
@@ -623,9 +645,12 @@ mod unix_impl {
         // 排空闸门（兜底，覆盖「Hello Ok → Submit 间隙开始排空」的竞态）：拒绝并断开，
         // 客户端等本 Daemon 下线后用新二进制重新提交。
         if state.draining.load(Ordering::SeqCst) {
-            let _ = ipc::write_msg(&mut w, &ServerMsg::Draining {
-                active: state.registry.active_count(),
-            })
+            let _ = ipc::write_msg(
+                &mut w,
+                &ServerMsg::Draining {
+                    active: state.registry.active_count(),
+                },
+            )
             .await;
             return;
         }
@@ -654,9 +679,22 @@ mod unix_impl {
         let request_id = entry.request_id.clone();
         log(&format!("request {} accepted", request_id));
 
-        if ipc::write_msg(&mut w, &ServerMsg::Accepted { request_id: request_id.clone() })
-            .await
-            .is_err()
+        // Fire `ask-received` once per accepted request, independent of popup state.
+        crate::hooks::fire_ask_received(
+            &request_id,
+            &entry.show.source,
+            &entry.show.project,
+            &entry.show.request,
+        );
+
+        if ipc::write_msg(
+            &mut w,
+            &ServerMsg::Accepted {
+                request_id: request_id.clone(),
+            },
+        )
+        .await
+        .is_err()
         {
             state.registry.remove(&request_id);
             return;
@@ -670,9 +708,16 @@ mod unix_impl {
             Ok(()) => true,
             Err(e) => {
                 log(&format!("failed to spawn GUI helper: {}", e));
-                let _ = ipc::write_msg(&mut w, &ServerMsg::Warn {
-                    text: format!("{}failed to spawn popup: {}", crate::i18n::err_prefix(lang), e),
-                })
+                let _ = ipc::write_msg(
+                    &mut w,
+                    &ServerMsg::Warn {
+                        text: format!(
+                            "{}failed to spawn popup: {}",
+                            crate::i18n::err_prefix(lang),
+                            e
+                        ),
+                    },
+                )
                 .await;
                 false
             }
@@ -680,10 +725,13 @@ mod unix_impl {
 
         // 既无弹窗也无 IM 渠道 → 无可用渠道，按错误收尾。
         if !popup_ok && !im_attached {
-            let _ = ipc::write_msg(&mut w, &ServerMsg::Final {
-                stdout: String::new(),
-                exit_code: request::EXIT_NO_CHANNEL,
-            })
+            let _ = ipc::write_msg(
+                &mut w,
+                &ServerMsg::Final {
+                    stdout: String::new(),
+                    exit_code: request::EXIT_NO_CHANNEL,
+                },
+            )
             .await;
             state.registry.remove(&request_id);
             return;
@@ -715,18 +763,24 @@ mod unix_impl {
                 if let Some(err) = &o.stderr {
                     let _ = ipc::write_msg(&mut w, &ServerMsg::Warn { text: err.clone() }).await;
                 }
-                let _ = ipc::write_msg(&mut w, &ServerMsg::Final {
-                    stdout: o.stdout,
-                    exit_code: o.exit_code,
-                })
+                let _ = ipc::write_msg(
+                    &mut w,
+                    &ServerMsg::Final {
+                        stdout: o.stdout,
+                        exit_code: o.exit_code,
+                    },
+                )
                 .await;
             }
             None => {
                 // 渲染通道意外关闭：判异常退出码 3。
-                let _ = ipc::write_msg(&mut w, &ServerMsg::Final {
-                    stdout: String::new(),
-                    exit_code: 3,
-                })
+                let _ = ipc::write_msg(
+                    &mut w,
+                    &ServerMsg::Final {
+                        stdout: String::new(),
+                        exit_code: 3,
+                    },
+                )
                 .await;
             }
         }
@@ -1023,14 +1077,17 @@ mod unix_impl {
                     attached = true;
                 }
                 None => {
-                    let _ = ipc::write_msg(w, &ServerMsg::Warn {
-                        text: format!(
-                            "{}{}",
-                            crate::i18n::warn_prefix(lang),
-                            crate::i18n::tr(lang, "channel.ddConfigInvalidSkip")
-                                .replace("{e}", "Stream connection failed"),
-                        ),
-                    })
+                    let _ = ipc::write_msg(
+                        w,
+                        &ServerMsg::Warn {
+                            text: format!(
+                                "{}{}",
+                                crate::i18n::warn_prefix(lang),
+                                crate::i18n::tr(lang, "channel.ddConfigInvalidSkip")
+                                    .replace("{e}", "Stream connection failed"),
+                            ),
+                        },
+                    )
                     .await;
                 }
             }
@@ -1046,14 +1103,17 @@ mod unix_impl {
                     attached = true;
                 }
                 None => {
-                    let _ = ipc::write_msg(w, &ServerMsg::Warn {
-                        text: format!(
-                            "{}{}",
-                            crate::i18n::warn_prefix(lang),
-                            crate::i18n::tr(lang, "channel.fsConfigInvalidSkip")
-                                .replace("{e}", "WebSocket connection failed"),
-                        ),
-                    })
+                    let _ = ipc::write_msg(
+                        w,
+                        &ServerMsg::Warn {
+                            text: format!(
+                                "{}{}",
+                                crate::i18n::warn_prefix(lang),
+                                crate::i18n::tr(lang, "channel.fsConfigInvalidSkip")
+                                    .replace("{e}", "WebSocket connection failed"),
+                            ),
+                        },
+                    )
                     .await;
                 }
             }
@@ -1070,14 +1130,17 @@ mod unix_impl {
                     attached = true;
                 }
                 None => {
-                    let _ = ipc::write_msg(w, &ServerMsg::Warn {
-                        text: format!(
-                            "{}{}",
-                            crate::i18n::warn_prefix(lang),
-                            crate::i18n::tr(lang, "channel.tgConfigInvalidSkip")
-                                .replace("{e}", "poller start failed"),
-                        ),
-                    })
+                    let _ = ipc::write_msg(
+                        w,
+                        &ServerMsg::Warn {
+                            text: format!(
+                                "{}{}",
+                                crate::i18n::warn_prefix(lang),
+                                crate::i18n::tr(lang, "channel.tgConfigInvalidSkip")
+                                    .replace("{e}", "poller start failed"),
+                            ),
+                        },
+                    )
                     .await;
                 }
             }
@@ -1093,14 +1156,17 @@ mod unix_impl {
                     attached = true;
                 }
                 None => {
-                    let _ = ipc::write_msg(w, &ServerMsg::Warn {
-                        text: format!(
-                            "{}{}",
-                            crate::i18n::warn_prefix(lang),
-                            crate::i18n::tr(lang, "channel.slConfigInvalidSkip")
-                                .replace("{e}", "Socket Mode connection failed"),
-                        ),
-                    })
+                    let _ = ipc::write_msg(
+                        w,
+                        &ServerMsg::Warn {
+                            text: format!(
+                                "{}{}",
+                                crate::i18n::warn_prefix(lang),
+                                crate::i18n::tr(lang, "channel.slConfigInvalidSkip")
+                                    .replace("{e}", "Socket Mode connection failed"),
+                            ),
+                        },
+                    )
                     .await;
                 }
             }
@@ -1224,7 +1290,10 @@ mod unix_impl {
 
     /// 钉钉原始 bot 消息 → (senderStaffId, 文本)；非文本返回 None。
     fn extract_dingtalk(ev: &serde_json::Value) -> Option<(String, String)> {
-        let sender = ev.get("senderStaffId").and_then(|v| v.as_str())?.to_string();
+        let sender = ev
+            .get("senderStaffId")
+            .and_then(|v| v.as_str())?
+            .to_string();
         let text = ev
             .get("text")
             .and_then(|t| t.get("content"))
@@ -1274,14 +1343,20 @@ mod unix_impl {
         match crate::autochannel::parse_command(text) {
             Some(crate::autochannel::Command::Status) => {
                 // 状态查询是独立功能：始终响应。仅当开关开、且本次因 /status 切了活跃槽时附激活回执。
-                let (switched, n) =
-                    if auto { set_active_channel(state, channel_id).await } else { (false, 0) };
+                let (switched, n) = if auto {
+                    set_active_channel(state, channel_id).await
+                } else {
+                    (false, 0)
+                };
                 let mut body = String::new();
                 if switched {
                     body.push_str(&crate::autochannel::activated_receipt(n, lang));
                     body.push_str("\n\n");
                 }
-                body.push_str(&crate::autochannel::status_text(&state.agents.snapshot(), lang));
+                body.push_str(&crate::autochannel::status_text(
+                    &state.agents.snapshot(),
+                    lang,
+                ));
                 let _ = reply_channel_text(channel_id, &config, &body).await;
             }
             Some(crate::autochannel::Command::Here) => {
@@ -1381,7 +1456,10 @@ mod unix_impl {
         let ch: Arc<dyn Channel> = match channel_id {
             "feishu" => {
                 let router = ensure_fs_router(state, &config.channels.feishu).await?;
-                Arc::new(FeishuChannel::shared(config.channels.feishu.clone(), router))
+                Arc::new(FeishuChannel::shared(
+                    config.channels.feishu.clone(),
+                    router,
+                ))
             }
             "dingding" => {
                 let dd = &config.channels.dingding;
@@ -1395,7 +1473,10 @@ mod unix_impl {
             }
             "telegram" => {
                 let router = ensure_tg_router(state, &config.channels.telegram).await?;
-                Arc::new(TelegramChannel::shared(config.channels.telegram.clone(), router))
+                Arc::new(TelegramChannel::shared(
+                    config.channels.telegram.clone(),
+                    router,
+                ))
             }
             _ => return None,
         };
@@ -1412,11 +1493,16 @@ mod unix_impl {
             "feishu" => {
                 let client = crate::feishu::client::FeishuClient::new(&config.channels.feishu)
                     .map_err(|e| e.to_string())?;
-                client.send_text(text).await.map(|_| ()).map_err(|e| e.to_string())
+                client
+                    .send_text(text)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             }
             "dingding" => {
-                let client = crate::dingtalk::client::DingTalkClient::new(&config.channels.dingding)
-                    .map_err(|e| e.to_string())?;
+                let client =
+                    crate::dingtalk::client::DingTalkClient::new(&config.channels.dingding)
+                        .map_err(|e| e.to_string())?;
                 client.send_oto_text(text).await.map_err(|e| e.to_string())
             }
             "slack" => {
@@ -1712,7 +1798,10 @@ mod unix_impl {
         if message.get("message_type").and_then(|v| v.as_str()) != Some("text") {
             return None;
         }
-        let content_str = message.get("content").and_then(|v| v.as_str()).unwrap_or("{}");
+        let content_str = message
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("{}");
         let content: serde_json::Value = serde_json::from_str(content_str).ok()?;
         let text = content.get("text").and_then(|v| v.as_str())?.to_string();
         Some((open_id, text))
@@ -1785,7 +1874,11 @@ mod unix_impl {
     /// 下一个请求会经 `ensure_*_router` 用新配置重连。注意：若仅改了同 client_id 的 secret，
     /// 且旧请求未结束时新请求又到达，可能短暂出现两条同 client_id 连接（平台会踢掉旧的）——
     /// 属配置在「问题进行中」被改动的少见边角，可接受。
-    async fn invalidate_changed_routers(state: &Arc<ServerState>, old: &AppConfig, new: &AppConfig) {
+    async fn invalidate_changed_routers(
+        state: &Arc<ServerState>,
+        old: &AppConfig,
+        new: &AppConfig,
+    ) {
         let dd_changed = !crate::app::is_dingding_active(new)
             || old.channels.dingding.client_id != new.channels.dingding.client_id
             || old.channels.dingding.client_secret != new.channels.dingding.client_secret;

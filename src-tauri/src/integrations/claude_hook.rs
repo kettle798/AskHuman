@@ -175,7 +175,10 @@ pub fn reveal() {
     }
     #[cfg(target_os = "linux")]
     {
-        let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or(path.clone());
+        let dir = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or(path.clone());
         let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
     }
     #[cfg(target_os = "windows")]
@@ -279,7 +282,10 @@ fn apply_install(text: &str, script_path: &str) -> Result<String> {
         .object_value_or_create("env")
         .ok_or_else(|| anyhow!("settings.json 的 'env' 不是对象，已中止"))?;
     let current = env.get(BASH_MAX_KEY).and_then(|p| p.to_serde_value());
-    let need_set = current.and_then(|v| parse_ms(&v)).map(|v| v < BASH_MAX_MS).unwrap_or(true);
+    let need_set = current
+        .and_then(|v| parse_ms(&v))
+        .map(|v| v < BASH_MAX_MS)
+        .unwrap_or(true);
     if need_set {
         if let Some(prop) = env.get(BASH_MAX_KEY) {
             prop.replace_with(BASH_MAX_KEY, json!(BASH_MAX_MS.to_string()));
@@ -399,7 +405,8 @@ mod tests {
 
     #[test]
     fn install_raises_smaller_env_value() {
-        let input = format!("{{ \"env\": {{ \"{BASH_MAX_KEY}\": \"600000\", \"FOO\": \"bar\" }} }}");
+        let input =
+            format!("{{ \"env\": {{ \"{BASH_MAX_KEY}\": \"600000\", \"FOO\": \"bar\" }} }}");
         let out = apply_install(&input, SCRIPT).unwrap();
         let v = to_value(&out);
         assert_eq!(v["env"][BASH_MAX_KEY], BASH_MAX_MS.to_string());
@@ -470,7 +477,10 @@ mod tests {
         let out = apply_uninstall(input).unwrap();
         let v = to_value(&out);
         assert!(!has_marker(&v));
-        assert_eq!(v["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "other.sh");
+        assert_eq!(
+            v["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "other.sh"
+        );
     }
 
     #[test]
@@ -482,7 +492,11 @@ mod tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["hooks"][0]["command"], "other.sh");
         assert!(!has_marker(&v));
-        assert_eq!(v["env"][BASH_MAX_KEY], BASH_MAX_MS.to_string(), "env 应不动");
+        assert_eq!(
+            v["env"][BASH_MAX_KEY],
+            BASH_MAX_MS.to_string(),
+            "env 应不动"
+        );
         assert_eq!(v["env"]["FOO"], "bar");
     }
 

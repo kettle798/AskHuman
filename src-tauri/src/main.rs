@@ -20,6 +20,7 @@ mod daemon;
 mod dingtalk;
 mod feishu;
 mod history;
+mod hooks;
 mod i18n;
 mod integrations;
 mod ipc;
@@ -31,14 +32,15 @@ mod macos_menu;
 mod macos_quicklook;
 #[cfg(target_os = "macos")]
 mod macos_window_anim;
-#[cfg(target_os = "macos")]
-mod speech;
 mod models;
 mod paths;
 mod project;
 mod prompts;
 mod secrets;
 mod slack;
+mod sound;
+#[cfg(target_os = "macos")]
+mod speech;
 mod telegram;
 mod update;
 

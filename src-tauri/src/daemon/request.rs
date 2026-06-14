@@ -57,7 +57,10 @@ impl RequestRegistry {
 
     /// 建立一个请求：分配 request_id / token，建 Coordinator（Ipc）+ popup adapter。
     /// 返回登记项与「渲染结果接收端」（连接处理器据此写 IPC `final`）。
-    pub fn create(&self, task: TaskRequest) -> (Arc<RequestEntry>, UnboundedReceiver<RenderOutcome>) {
+    pub fn create(
+        &self,
+        task: TaskRequest,
+    ) -> (Arc<RequestEntry>, UnboundedReceiver<RenderOutcome>) {
         let request_id = uuid::Uuid::new_v4().to_string();
         let token = uuid::Uuid::new_v4().to_string();
         let lang = Lang::resolve(&task.lang);

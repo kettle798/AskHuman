@@ -58,21 +58,33 @@ fn show(args: &[String], lang: Lang) -> Result<(), String> {
 }
 
 fn get(args: &[String], lang: Lang) -> Result<(), String> {
-    let key = args.first().ok_or_else(|| cfgio::t(lang, "usage: config get <key>", "用法: config get <键>"))?;
+    let key = args
+        .first()
+        .ok_or_else(|| cfgio::t(lang, "usage: config get <key>", "用法: config get <键>"))?;
     let v = cfgio::redacted_value();
     match cfgio::get_path(&v, key) {
         Some(val) => {
             print_line(&value_to_plain(val));
             Ok(())
         }
-        None => Err(cfgio::t(lang, &format!("unknown config key: {key}"), &format!("未知配置键: {key}"))),
+        None => Err(cfgio::t(
+            lang,
+            &format!("unknown config key: {key}"),
+            &format!("未知配置键: {key}"),
+        )),
     }
 }
 
 fn set(args: &[String], lang: Lang) -> Result<(), String> {
     let key = args
         .first()
-        .ok_or_else(|| cfgio::t(lang, "usage: config set <key> <value>", "用法: config set <键> <值>"))?
+        .ok_or_else(|| {
+            cfgio::t(
+                lang,
+                "usage: config set <key> <value>",
+                "用法: config set <键> <值>",
+            )
+        })?
         .clone();
 
     let mut cfg = AppConfig::load_without_secrets();
@@ -83,25 +95,47 @@ fn set(args: &[String], lang: Lang) -> Result<(), String> {
         let val = cfgio::read_secret(&src, lang)?;
         assign_secret_field(&mut cfg, &key, val);
         cfg.save().map_err(|e| e.to_string())?;
-        print_line(&cfgio::t(lang, &format!("{key} updated (stored in keychain)"), &format!("{key} 已更新（已存入钥匙串）")));
+        print_line(&cfgio::t(
+            lang,
+            &format!("{key} updated (stored in keychain)"),
+            &format!("{key} 已更新（已存入钥匙串）"),
+        ));
         return Ok(());
     }
 
     // 非密钥：需位置值。
-    let value_str = args
-        .get(1)
-        .ok_or_else(|| cfgio::t(lang, "usage: config set <key> <value>", "用法: config set <键> <值>"))?;
+    let value_str = args.get(1).ok_or_else(|| {
+        cfgio::t(
+            lang,
+            "usage: config set <key> <value>",
+            "用法: config set <键> <值>",
+        )
+    })?;
     let mut v = serde_json::to_value(&cfg).unwrap_or(Value::Null);
     let existing = cfgio::get_path(&v, &key)
-        .ok_or_else(|| cfgio::t(lang, &format!("unknown config key: {key}"), &format!("未知配置键: {key}")))?
+        .ok_or_else(|| {
+            cfgio::t(
+                lang,
+                &format!("unknown config key: {key}"),
+                &format!("未知配置键: {key}"),
+            )
+        })?
         .clone();
     let coerced = cfgio::coerce_to_type(&existing, value_str)?;
     cfgio::set_path(&mut v, &key, coerced)?;
     cfg = serde_json::from_value(v).map_err(|e| {
-        cfgio::t(lang, &format!("invalid value for {key}: {e}"), &format!("{key} 的值非法: {e}"))
+        cfgio::t(
+            lang,
+            &format!("invalid value for {key}: {e}"),
+            &format!("{key} 的值非法: {e}"),
+        )
     })?;
     cfg.save().map_err(|e| e.to_string())?;
-    print_line(&cfgio::t(lang, &format!("{key} updated"), &format!("{key} 已更新")));
+    print_line(&cfgio::t(
+        lang,
+        &format!("{key} updated"),
+        &format!("{key} 已更新"),
+    ));
     Ok(())
 }
 
@@ -114,20 +148,34 @@ fn unset(args: &[String], lang: Lang) -> Result<(), String> {
         let mut cfg = AppConfig::load_without_secrets();
         assign_secret_field(&mut cfg, key, String::new());
         cfg.save().map_err(|e| e.to_string())?;
-        print_line(&cfgio::t(lang, &format!("{key} cleared"), &format!("{key} 已清除")));
+        print_line(&cfgio::t(
+            lang,
+            &format!("{key} cleared"),
+            &format!("{key} 已清除"),
+        ));
         return Ok(());
     }
     // 非密钥：重置为默认值。
     let defaults = serde_json::to_value(AppConfig::default()).unwrap_or(Value::Null);
     let def = cfgio::get_path(&defaults, key)
-        .ok_or_else(|| cfgio::t(lang, &format!("unknown config key: {key}"), &format!("未知配置键: {key}")))?
+        .ok_or_else(|| {
+            cfgio::t(
+                lang,
+                &format!("unknown config key: {key}"),
+                &format!("未知配置键: {key}"),
+            )
+        })?
         .clone();
     let mut cfg = AppConfig::load_without_secrets();
     let mut v = serde_json::to_value(&cfg).unwrap_or(Value::Null);
     cfgio::set_path(&mut v, key, def)?;
     cfg = serde_json::from_value(v).map_err(|e| e.to_string())?;
     cfg.save().map_err(|e| e.to_string())?;
-    print_line(&cfgio::t(lang, &format!("{key} reset to default"), &format!("{key} 已重置为默认值")));
+    print_line(&cfgio::t(
+        lang,
+        &format!("{key} reset to default"),
+        &format!("{key} 已重置为默认值"),
+    ));
     Ok(())
 }
 
@@ -138,11 +186,19 @@ fn secret_source_from_flags(flags: &[String], lang: Lang) -> Result<SecretSource
     while i < flags.len() {
         match flags[i].as_str() {
             "--from-env" => {
-                let var = flags.get(i + 1).ok_or_else(|| cfgio::t(lang, "--from-env needs a variable name", "--from-env 需要变量名"))?;
+                let var = flags.get(i + 1).ok_or_else(|| {
+                    cfgio::t(
+                        lang,
+                        "--from-env needs a variable name",
+                        "--from-env 需要变量名",
+                    )
+                })?;
                 return Ok(SecretSource::Env(var.clone()));
             }
             "--from-file" => {
-                let p = flags.get(i + 1).ok_or_else(|| cfgio::t(lang, "--from-file needs a path", "--from-file 需要路径"))?;
+                let p = flags.get(i + 1).ok_or_else(|| {
+                    cfgio::t(lang, "--from-file needs a path", "--from-file 需要路径")
+                })?;
                 return Ok(SecretSource::File(p.clone()));
             }
             "--from-stdin" => return Ok(SecretSource::Stdin),
@@ -176,7 +232,11 @@ fn flatten(v: &Value, prefix: &str, out: &mut Vec<(String, String)>) {
     match v {
         Value::Object(map) => {
             for (k, val) in map {
-                let key = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                let key = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
                 flatten(val, &key, out);
             }
         }

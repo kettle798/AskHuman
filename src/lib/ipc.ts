@@ -16,6 +16,7 @@ import type {
   HookStatus,
   LifecycleStatus,
   PopupInit,
+  PopupSoundSupport,
   PushedUpdateState,
   RuleStatus,
   PopupSubmission,
@@ -64,6 +65,12 @@ export const saveSettings = (config: AppConfig, secretActions: SecretActions) =>
 export const getPrompt = () => invoke<string>("get_prompt");
 
 export const openTestPopup = () => invoke<void>("open_test_popup");
+
+export const popupSoundSupport = () =>
+  invoke<PopupSoundSupport>("popup_sound_support");
+
+export const playPopupSound = (name: string) =>
+  invoke<void>("play_popup_sound", { name });
 
 export const setTheme = (theme: ThemeMode) =>
   invoke<void>("set_theme", { theme });

@@ -130,7 +130,8 @@ impl RoutedTg {
         let s = self.seq.fetch_add(1, Ordering::SeqCst);
         let mut r = self.routes.lock().unwrap();
         r.cards.insert(card_message_id, self.route_id);
-        r.active.insert(self.route_id, ActiveInfo { chat_id, seq: s });
+        r.active
+            .insert(self.route_id, ActiveInfo { chat_id, seq: s });
     }
 
     /// 取消本会话的活动登记（仅当卡片归属仍是自己时才清除该卡片路由）。

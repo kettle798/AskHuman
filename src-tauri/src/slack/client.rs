@@ -120,7 +120,10 @@ impl SlackClient {
             body["blocks"] = b.clone();
         }
         let v = self.call("chat.postMessage", body).await?;
-        Ok(v.get("ts").and_then(|t| t.as_str()).unwrap_or("").to_string())
+        Ok(v.get("ts")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string())
     }
 
     /// 纯文本消息（mrkdwn）。
@@ -199,7 +202,10 @@ impl SlackClient {
             .map_err(|e| SlackError::Network(e.to_string()))?
             .status();
         if !status.is_success() {
-            return Err(SlackError::Api(format!("file upload failed: HTTP {}", status)));
+            return Err(SlackError::Api(format!(
+                "file upload failed: HTTP {}",
+                status
+            )));
         }
 
         // 3. 完成上传并分享进 DM 频道。

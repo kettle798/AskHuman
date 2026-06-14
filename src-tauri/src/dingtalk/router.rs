@@ -28,7 +28,10 @@ const SUBMIT_ACK_TIMEOUT: Duration = Duration::from_millis(2500);
 pub enum DdInbound {
     /// 卡片「提交」回调：会话裁决后经 `ack` 回包（成功置灰 / 空包），由 Router 写回连接。
     /// 仅提交回调才转发（选项切换等非提交回调由 Router 直接空 ACK、不转发）。
-    Card { data: Value, ack: oneshot::Sender<Value> },
+    Card {
+        data: Value,
+        ack: oneshot::Sender<Value>,
+    },
     /// 聊天消息（图片/文件/文字；已被底层 `StreamConn` 自动 ACK）。
     Bot(Value),
 }

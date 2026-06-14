@@ -146,7 +146,9 @@ pub fn normalize_version(tag: &str) -> String {
     let core = tag.trim().trim_start_matches('v');
     // 丢弃 `-rc.1` 等预发布后缀（一期自更新只面向正式版）。
     let core = core.split('-').next().unwrap_or(core);
-    core.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect()
+    core.chars()
+        .filter(|c| c.is_ascii_digit() || *c == '.')
+        .collect()
 }
 
 /// 逐段数字比较：a>b → 1，a<b → -1，相等 → 0。非数字段按 0 处理。
@@ -256,7 +258,9 @@ mod tests {
     #[test]
     fn install_kind_detects_npm_paths() {
         assert_eq!(
-            install_kind_from_path("/Users/x/.../node_modules/@humaninloop/darwin-arm64/bin/AskHuman"),
+            install_kind_from_path(
+                "/Users/x/.../node_modules/@humaninloop/darwin-arm64/bin/AskHuman"
+            ),
             InstallKind::Npm
         );
         assert_eq!(
@@ -269,7 +273,9 @@ mod tests {
         );
         // Windows 风格反斜杠路径也应识别。
         assert_eq!(
-            install_kind_from_path("C:\\Users\\x\\node_modules\\@humaninloop\\win32-x64\\bin\\AskHuman.exe"),
+            install_kind_from_path(
+                "C:\\Users\\x\\node_modules\\@humaninloop\\win32-x64\\bin\\AskHuman.exe"
+            ),
             InstallKind::Npm
         );
     }

@@ -94,6 +94,8 @@ AskHuman/
       project.rs             项目识别：从 cwd 向上找首个 .git 根，回退 cwd（回复历史归类）
       history.rs             回复历史存储：~/.askhuman/history.jsonl（每行一条 JSON，追加写 + 文件锁裁剪/清空）
       prompts.rs             CLI 参考提示词常量
+      hooks.rs               用户级 hooks：~/.askhuman/hooks/<event> 可执行脚本（首个事件 ask-received）
+      sound.rs               内置弹窗提示音（macOS afplay / Linux canberra·paplay / 其它不支持）
       commands.rs            #[tauri::command] 集合（前端调用入口，见下）
       app/
         mod.rs               Tauri 运行时：窗口创建 + 毛玻璃(apply_surface) + 主题 +
@@ -192,7 +194,7 @@ AskHuman/
 - 弹窗：`popup_init`（取请求+主题+是否置顶+来源名）、`submit_popup`、`cancel_popup`
 - 附件：`open_path`、`preview_attachments` / `close_preview`(QLPreviewPanel)、`read_image_data_url`(缩略图)、
   `file_icon_data_url`(系统图标，拖出预览)、`show_attachment_menu`(原生右键菜单)
-- 设置：`get_settings`、`save_settings`、`get_prompt`、`set_theme`、`update_theme`(持久化+应用)、`open_settings`(同进程建设置窗)
+- 设置：`get_settings`、`save_settings`、`get_prompt`、`set_theme`、`update_theme`(持久化+应用)、`open_settings`(同进程建设置窗)、`popup_sound_support`(平台支持 named/toggle/none + 音名列表)、`play_popup_sound`(试听)
 - 历史：`open_history`(弹窗→建历史窗)、`history_init`(主题+当前项目)、`get_history`(按项目/全部，倒序)、`get_history_projects`(项目下拉)、`history_count`、`trim_history`(立即裁剪)、`clear_history`(按项目/全部清空)
 - Cursor Hook：`cursor_hook_status`（含 outdated）/ `install` / `update` / `uninstall` / `reveal`
 - Claude Code Hook：`claude_hook_status`（含 outdated）/ `install` / `update` / `uninstall` / `reveal`
@@ -218,7 +220,7 @@ AskHuman/
 
 ## 配置
 
-`~/.askhuman/config.json`（新位置缺失时自动回退旧 `~/.humaninloop/config.json`）：`general`(theme, language, alwaysOnTop, appearAnimation, windowEffect, speechLanguage, speechShortcut, historyLimit) + `channels.popup`(enabled,width,height,rememberSize) + `channels.telegram`(enabled,botToken,chatId,apiBaseUrl) + `channels.dingding`(enabled,clientId,clientSecret,userId,cardTemplateId,…) + `channels.feishu`(enabled,appId,appSecret,openId,baseUrl) + `channels.slack`(enabled,botToken,appToken,userId) + `channels.autoActivation`(「IM 会话期自动激活」开关，默认 false) + `experimental`(enabled，实验性功能开关，默认 false)。缺字段走默认、未知字段忽略。用户向配置说明见 `docs/wiki/`。
+`~/.askhuman/config.json`（新位置缺失时自动回退旧 `~/.humaninloop/config.json`）：`general`(theme, language, alwaysOnTop, appearAnimation, windowEffect, speechLanguage, speechShortcut, historyLimit, popupSound) + `channels.popup`(enabled,width,height,rememberSize) + `channels.telegram`(enabled,botToken,chatId,apiBaseUrl) + `channels.dingding`(enabled,clientId,clientSecret,userId,cardTemplateId,…) + `channels.feishu`(enabled,appId,appSecret,openId,baseUrl) + `channels.slack`(enabled,botToken,appToken,userId) + `channels.autoActivation`(「IM 会话期自动激活」开关，默认 false) + `experimental`(enabled，实验性功能开关，默认 false)。缺字段走默认、未知字段忽略。用户向配置说明见 `docs/wiki/`。
 
 > IM 会话期自动激活（`channels.autoActivation`，默认关；设计 `docs/plans/im-channel-activation.md`）：开关关＝旧「每次提问全发所有启用 IM」。开关开（UI 入口在「实验」Tab，随 `experimental.enabled` 显露；旁注「建议同时开启生命周期追踪以提高状态识别准确性」）后：daemon 在 agent **工作中**才连各启用 IM、默认只监听入站；同一时刻只有「活跃槽」对应的 IM 收提问卡片；在某 IM 发 `/here`（或 `/这里`）把该渠道设为活跃槽，发 `/status`（或 `/状态`）回工作中/空闲 agent 文本，普通消息＝切到此渠道（文本不当答案）。**凡把活跃槽切到某 IM 都会把所有在途未答补推过去**（补推＝渠道激活的固有行为，统一在 `set_active_channel`、与触发方式无关：`/here`/普通消息/`/status` 切槽/作答切槽均同）。活跃槽**持久化**于 `~/.askhuman/state/auto-channel.json`、跨重启保留、仅由入站消息改变。忙/闲/结束判定复用 Agent 生命周期追踪（`agents/registry.rs`）；无 turn hook 时「首次提问起算工作中」（仅开关开时兜底登记）。代码：`autochannel.rs` + `daemon/mod.rs`（`ensure_inbound_listeners`/`spawn_listener` 通用循环 + `handle_inbound`/`backfill_inflight`/`attach_im_channels` 门控）。命令处理一份实现，各渠道只提供传输原语（连 Router + 原始消息观察者 + 抽取 `(发送者,文本)` + 期望发送者 + `build_im_channel`/`reply_channel_text` 分支）。**四家（飞书/钉钉/Slack/Telegram）均已接入并真机端到端验证 OK**。**入站消费随「工作中」起、随守护进程退出而止**：复用 lifecycle turn hook，turn-start/提问即 `ensure_inbound_listeners`（按 `working_count>0` 自门控、与开关无关），使 `/here`、`/status` 在工作期间随时可用；不做主动断连，连接随守护进程空闲退出而释放（D18）。**`/status` 与总开关独立**（开关只管切槽/发卡）；`/here` 在关态静默忽略。Telegram 自由文字既是答案又被观察者收到，斜线前缀文字仅当命令、不路由到在途卡片。**活跃槽统一含 "popup"**：在哪个渠道说话/作答就更新为哪个（弹窗作答 → "popup"，后续只弹窗），切槽时给旧 IM 发反激活提示（点明切到了哪个渠道）、把在途未答补推给新 IM、由调用方给新渠道发激活回执——逻辑统一在 `set_active_channel` 一处（返回 `(是否切换, 补推数)`；`winner_channel_id` 提供作答渠道）。
 
@@ -264,6 +266,18 @@ AskHuman/
 - **`agents`**（`agents_cmd.rs`，agent ∈ cursor|claude|codex）：`monitor [--json|--text]`（见上节）；`show [<agent>]`（打印 `prompts::cli_reference()` 手动集成提示词 + 各 agent 粘贴位置 + 三类安装状态）；`install/uninstall/update <agent>` **必须显式** `--rules`/`--hook`/`--lifecycle`（无默认捆绑，D6；`--hook` 仅 cursor/claude，codex 跳过；`--lifecycle` 实验性；lifecycle 无独立 update→重装即刷新）。
 - **`config`**（`config_cmd.rs`，兜底）：`show [--json]`（密钥脱敏 `●●●`）/`get`/`set`/`unset`/`path`，点号 camelCase 键。`set` 非密钥键按目标 JSON 类型强制（bool/数字/字符串/枚举）→ 反序列化校验 → save；**密钥键**（5 个，`cfgio::SECRET_KEYS`，与 `secrets::ACCOUNT_*` 一致）自动路由进钥匙串，值仍只从 env/file/stdin 取。`unset` 重置默认（密钥 → `secrets::delete`）。
 - **`doctor [--json]`**（`doctor.rs`）：一屏体检 daemon（运行/版本/在途/IM 连接）+ 各渠道（启用·齐全·连接）+ 各 agent 集成（rules·hook·lifecycle 装没装/需更新）。
+
+## 用户级 hooks + 内置弹窗提示音
+
+> 代码：`src-tauri/src/hooks.rs`（通用 hooks）、`src-tauri/src/sound.rs`（提示音）。
+
+- **用户 hooks（`~/.askhuman/hooks/`）**：通用机制——每个事件对应一个**同名可执行脚本**（靠 shebang 选解释器）。命中即调用：`ASKHUMAN_EVENT` 等简要字段经环境变量传入，**完整负载经 stdin JSON** 传入。非阻塞 fire-and-forget（后台线程 `wait` 回收子进程，避免 daemon 僵尸）。仅 unix 触发，其它平台空操作。
+  - 首个事件 **`ask-received`**：**收到一次提问即触发**，与弹窗是否弹出无关（headless / 仅 IM 也会触发）。触发点在 daemon `handle_submit`（规范单点，每次提问恰一次）。负载含 `requestId/source/project/isMarkdown/message{text,files}/questions[{message,options}]`。
+  - daemon 启动时 `hooks::ensure_sample()` 落盘参考示例 `~/.askhuman/hooks/ask-received.sample`（**非可执行、默认不触发**；含播放声音 / 桌面通知示例）。复制为无后缀的 `ask-received` 并 `chmod +x` 即启用。可扩展：新增事件只需定义事件名 + 负载并在对应时机 `hooks::fire(...)`。
+- **内置弹窗提示音（`general.popupSound`，默认空=关）**：弹窗出现时（GUI Helper 的 `app::launch`→`View::Popup`，`win.show()` 后）按配置播放。便利项，与 hooks 相互独立。
+  - macOS：`afplay /System/Library/Sounds/<name>.aiff`；设置页下拉列**实际可用音名**（读 `/System/Library/Sounds` 等目录）。
+  - Linux：仅当检测到播放器（`canberra-gtk-play` / `paplay` / `pw-play` / `ogg123`）时设置页**才显示**该项（`popup_sound_support()` 返回 `toggle`），播放 freedesktop 提示音；检测不到返回 `none` → 整项隐藏。Windows 返回 `none`、不显示。
+  - 设置→通用→弹窗行为：下拉（关闭 / 音名或开关）+「试听」；播放统一为非阻塞 spawn 播放器 + 后台线程回收。
 
 ## 构建 / 开发 / 测试
 

@@ -63,7 +63,14 @@ struct Inner {
 impl Coordinator {
     /// GUI 模式协调器。`project` / `source` 写入回复历史（可空）。
     pub fn new(app: AppHandle, request: AskRequest, project: String, source: String) -> Arc<Self> {
-        Self::build(Exiter::Gui(app), request, None, Lang::current(), project, source)
+        Self::build(
+            Exiter::Gui(app),
+            request,
+            None,
+            Lang::current(),
+            project,
+            source,
+        )
     }
 
     /// headless 模式协调器（无 GUI，结果到达后直接退出进程）。
@@ -135,7 +142,12 @@ impl Coordinator {
 
     /// 是否已登记某个渠道（按 id）。用于「补推在途」时避免对同一渠道重复挂接 / 重发卡片。
     pub fn has_channel(&self, id: &str) -> bool {
-        self.inner.lock().unwrap().channels.iter().any(|c| c.id() == id)
+        self.inner
+            .lock()
+            .unwrap()
+            .channels
+            .iter()
+            .any(|c| c.id() == id)
     }
 
     /// 赢家渠道 id（终态结果的来源；未作答 / 系统取消时为 None）。供作答后把活跃槽更新为该渠道。
@@ -304,7 +316,9 @@ impl Coordinator {
         image_paths: &[Vec<String>],
     ) {
         // 仅需 history_limit（general）；用 load_without_secrets() 避免每条回答落历史都读钥匙串。
-        let limit = crate::config::AppConfig::load_without_secrets().general.history_limit;
+        let limit = crate::config::AppConfig::load_without_secrets()
+            .general
+            .history_limit;
         if limit == 0 {
             return;
         }

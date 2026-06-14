@@ -169,7 +169,9 @@ pub fn read_secret(src: &SecretSource, lang: Lang) -> Result<String, String> {
         }
         SecretSource::Stdin => {
             let mut s = String::new();
-            std::io::stdin().read_to_string(&mut s).map_err(|e| e.to_string())?;
+            std::io::stdin()
+                .read_to_string(&mut s)
+                .map_err(|e| e.to_string())?;
             s
         }
         SecretSource::Prompt(label) => prompt_hidden(label)?,
@@ -203,7 +205,9 @@ pub fn prompt_line(label: &str, current: &str) -> Result<String, String> {
     eprint!(": ");
     std::io::stderr().flush().ok();
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
     let v = line.trim_end_matches(['\n', '\r']).to_string();
     Ok(if v.is_empty() { current.to_string() } else { v })
 }
@@ -242,7 +246,9 @@ pub fn prompt_hidden(label: &str) -> Result<String, String> {
     eprint!("{label}: ");
     std::io::stderr().flush().ok();
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
     Ok(line.trim_end_matches(['\n', '\r']).to_string())
 }
 
@@ -263,17 +269,25 @@ mod tests {
         let cfg = AppConfig::default();
         let mut v = serde_json::to_value(&cfg).unwrap();
         assert_eq!(
-            get_path(&v, "channels.telegram.apiBaseUrl").unwrap().as_str(),
+            get_path(&v, "channels.telegram.apiBaseUrl")
+                .unwrap()
+                .as_str(),
             Some("https://api.telegram.org")
         );
         set_path(&mut v, "channels.autoActivation", Value::Bool(true)).unwrap();
-        assert_eq!(get_path(&v, "channels.autoActivation").unwrap().as_bool(), Some(true));
+        assert_eq!(
+            get_path(&v, "channels.autoActivation").unwrap().as_bool(),
+            Some(true)
+        );
         assert!(set_path(&mut v, "channels.nope", Value::Bool(true)).is_err());
     }
 
     #[test]
     fn coerce_uses_existing_type() {
-        assert_eq!(coerce_to_type(&Value::Bool(false), "true").unwrap(), Value::Bool(true));
+        assert_eq!(
+            coerce_to_type(&Value::Bool(false), "true").unwrap(),
+            Value::Bool(true)
+        );
         assert!(coerce_to_type(&Value::from(1i64), "abc").is_err());
         assert_eq!(
             coerce_to_type(&Value::String(String::new()), "hi").unwrap(),

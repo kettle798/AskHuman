@@ -380,7 +380,10 @@ mod tests {
 
     #[test]
     fn blockquote() {
-        assert_eq!(to_html("> hi\n> there"), "<blockquote>hi\nthere</blockquote>");
+        assert_eq!(
+            to_html("> hi\n> there"),
+            "<blockquote>hi\nthere</blockquote>"
+        );
     }
 
     #[test]

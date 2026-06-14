@@ -22,8 +22,9 @@ pub fn save(
         return Ok(Vec::new());
     }
     let dir = paths::request_temp_dir(request_id).join(format!("q{}", question_index + 1));
-    std::fs::create_dir_all(&dir)
-        .with_context(|| tr(lang, "cli.createImageDirFailed").replace("{path}", &dir.display().to_string()))?;
+    std::fs::create_dir_all(&dir).with_context(|| {
+        tr(lang, "cli.createImageDirFailed").replace("{path}", &dir.display().to_string())
+    })?;
 
     let mut paths_out = Vec::with_capacity(images.len());
     for (index, img) in images.iter().enumerate() {
@@ -34,14 +35,20 @@ pub fn save(
 
 fn save_one(img: &ImageAttachment, index: usize, dir: &Path, lang: Lang) -> Result<String> {
     let ext = extension_from_media_type(&img.media_type);
-    let filename = match img.filename.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let filename = match img
+        .filename
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(name) => sanitize_filename(name, ext),
         None => format!("img-{}.{}", index + 1, ext),
     };
     let file_path = dir.join(&filename);
     let data = decode_image_data(&img.data, lang)?;
-    std::fs::write(&file_path, &data)
-        .with_context(|| tr(lang, "cli.writeImageFailed").replace("{path}", &file_path.display().to_string()))?;
+    std::fs::write(&file_path, &data).with_context(|| {
+        tr(lang, "cli.writeImageFailed").replace("{path}", &file_path.display().to_string())
+    })?;
     Ok(file_path.to_string_lossy().to_string())
 }
 

@@ -18,7 +18,10 @@ pub async fn latest_notes() -> Result<String> {
     if !resp.status().is_success() {
         return Err(github_status_error(resp.status()));
     }
-    let release = resp.json::<Value>().await.context("解析 release JSON 失败")?;
+    let release = resp
+        .json::<Value>()
+        .await
+        .context("解析 release JSON 失败")?;
     Ok(release["body"].as_str().unwrap_or("").to_string())
 }
 
@@ -38,7 +41,10 @@ pub async fn notes_for_tag(version: &str) -> Result<String> {
         }
         return Err(github_status_error(resp.status()));
     }
-    let release = resp.json::<Value>().await.context("解析 release JSON 失败")?;
+    let release = resp
+        .json::<Value>()
+        .await
+        .context("解析 release JSON 失败")?;
     Ok(release["body"].as_str().unwrap_or("").to_string())
 }
 
@@ -54,7 +60,10 @@ pub async fn aggregated_notes(from: &str, to: &str) -> Result<String> {
     if !resp.status().is_success() {
         return Err(github_status_error(resp.status()));
     }
-    let releases = resp.json::<Value>().await.context("解析 releases JSON 失败")?;
+    let releases = resp
+        .json::<Value>()
+        .await
+        .context("解析 releases JSON 失败")?;
     let list = releases.as_array().cloned().unwrap_or_default();
     Ok(aggregate(&list, from, to))
 }
@@ -63,7 +72,10 @@ pub async fn aggregated_notes(from: &str, to: &str) -> Result<String> {
 fn aggregate(list: &[Value], from: &str, to: &str) -> String {
     let mut picked: Vec<(String, String)> = Vec::new();
     for r in list {
-        if r.get("prerelease").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if r.get("prerelease")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             continue;
         }
         if r.get("draft").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -76,7 +88,11 @@ fn aggregate(list: &[Value], from: &str, to: &str) -> String {
         }
         // 区间 (from, to]：ver > from 且 ver <= to。
         if super::compare_versions(&ver, from) > 0 && super::compare_versions(&ver, to) <= 0 {
-            let body = r.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let body = r
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             picked.push((ver, body));
         }
     }

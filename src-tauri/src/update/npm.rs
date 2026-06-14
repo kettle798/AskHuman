@@ -28,7 +28,9 @@ impl Updater for NpmUpdater {
     async fn check_latest(&self) -> Result<RemoteLatest> {
         let version = npm_latest_version().await?;
         // 日志按 tag 从 GitHub 取（best-effort，取不到则空，前端显示占位）。
-        let notes = super::notes::notes_for_tag(&version).await.unwrap_or_default();
+        let notes = super::notes::notes_for_tag(&version)
+            .await
+            .unwrap_or_default();
         Ok(RemoteLatest {
             version,
             notes,

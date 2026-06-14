@@ -94,7 +94,8 @@ fn package(body_xml: &str) -> std::io::Result<Vec<u8>> {
     {
         let cursor = std::io::Cursor::new(&mut buf);
         let mut zip = zip::ZipWriter::new(cursor);
-        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let opts =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         let mut put = |name: &str, data: &str| -> std::io::Result<()> {
             zip.start_file(name, opts)?;
             zip.write_all(data.as_bytes())?;
@@ -200,7 +201,11 @@ fn heading_run(level: u8, text: &str) -> String {
 
 /// 独立标题段落（PlainCode 模式用）。
 fn heading_para(level: u8, text: &str) -> String {
-    format!("<w:p>{}{}</w:p>", heading_ppr(level), heading_run(level, text))
+    format!(
+        "<w:p>{}{}</w:p>",
+        heading_ppr(level),
+        heading_run(level, text)
+    )
 }
 
 /// 等宽代码框（单元格表格，浅灰底、无边框、不高亮）。
@@ -233,7 +238,12 @@ fn data_table(rows: &[TableRow]) -> String {
     let colw = CONTENT_WIDTH / ncols;
     let borders = ["top", "left", "bottom", "right", "insideH", "insideV"]
         .iter()
-        .map(|s| format!(r#"<w:{s} w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>"#, s = s))
+        .map(|s| {
+            format!(
+                r#"<w:{s} w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>"#,
+                s = s
+            )
+        })
         .collect::<String>();
 
     let mut trs = String::new();
@@ -595,6 +605,10 @@ mod tests {
         let code = "fn main() {\n    // 顶部是文件名标题，下面整块等宽\n    let xs = vec![1, 2, 3];\n    for x in xs {\n        println!(\"{}\", x);\n    }\n}\n";
         let b2 = build_plaincode_docx("main.rs", code).unwrap();
         std::fs::write("/tmp/ha-rust-code.docx", &b2).unwrap();
-        eprintln!("wrote /tmp/ha-rust-md.docx ({} B), /tmp/ha-rust-code.docx ({} B)", b1.len(), b2.len());
+        eprintln!(
+            "wrote /tmp/ha-rust-md.docx ({} B), /tmp/ha-rust-code.docx ({} B)",
+            b1.len(),
+            b2.len()
+        );
     }
 }

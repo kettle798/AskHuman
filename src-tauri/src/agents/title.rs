@@ -326,7 +326,8 @@ mod tests {
     fn extract_text_handles_array_and_string() {
         let v: Value = serde_json::json!({"message":{"content":"hello"}});
         assert_eq!(extract_text(&v).as_deref(), Some("hello"));
-        let v: Value = serde_json::json!({"payload":{"content":[{"type":"input_text","text":"hi there"}]}});
+        let v: Value =
+            serde_json::json!({"payload":{"content":[{"type":"input_text","text":"hi there"}]}});
         assert_eq!(extract_text(&v).as_deref(), Some("hi there"));
     }
 

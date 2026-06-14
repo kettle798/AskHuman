@@ -127,10 +127,7 @@ pub fn parse_card_submit(data: &Value) -> Option<CardSubmit> {
     let is_submit = private
         .get("actionIds")
         .and_then(|a| a.as_array())
-        .map(|a| {
-            a.iter()
-                .any(|v| v.as_str() == Some(SUBMIT_ACTION_ID))
-        })
+        .map(|a| a.iter().any(|v| v.as_str() == Some(SUBMIT_ACTION_ID)))
         .unwrap_or(false);
     if !is_submit {
         return None;
@@ -195,10 +192,7 @@ fn value_to_id(v: &Value) -> Option<usize> {
     match v {
         Value::Number(n) => n.as_u64().map(|x| x as usize),
         Value::String(s) => s.trim().parse::<usize>().ok(),
-        Value::Object(_) => v
-            .get("id")
-            .or_else(|| v.get("value"))
-            .and_then(value_to_id),
+        Value::Object(_) => v.get("id").or_else(|| v.get("value")).and_then(value_to_id),
         _ => None,
     }
 }
@@ -231,7 +225,8 @@ mod tests {
         assert!(m.get("submitted").is_none());
         assert!(m.get("private_input").is_none());
         // options 为 JSON 字符串：`[{id, md}]`，md 带 h5 字号。
-        let parsed: Value = serde_json::from_str(m.get("options").unwrap().as_str().unwrap()).unwrap();
+        let parsed: Value =
+            serde_json::from_str(m.get("options").unwrap().as_str().unwrap()).unwrap();
         assert_eq!(parsed[0]["id"], 0);
         assert_eq!(parsed[1]["id"], 1);
         assert_eq!(
@@ -251,7 +246,8 @@ mod tests {
     fn recommended_option_md_has_green_prefix() {
         let options = vec![OptionItem::new("继续", true)];
         let m = build_card_param_map("T", "Q", &options, false, false, "【👍推荐】");
-        let parsed: Value = serde_json::from_str(m.get("options").unwrap().as_str().unwrap()).unwrap();
+        let parsed: Value =
+            serde_json::from_str(m.get("options").unwrap().as_str().unwrap()).unwrap();
         let md = parsed[0]["md"].as_str().unwrap();
         assert!(md.contains("colorTokenV2=common_green1_color"));
         assert!(md.contains("【👍推荐】"));
@@ -279,19 +275,28 @@ mod tests {
             "userId": "u1", "outTrackId": "t1",
             "content": "{\"cardPrivateData\":{\"actionIds\":[\"submit_action\"],\"params\":{\"selected_options\":1}}}",
         });
-        assert_eq!(parse_card_submit(&single_val).unwrap().selected_indices, vec![1]);
+        assert_eq!(
+            parse_card_submit(&single_val).unwrap().selected_indices,
+            vec![1]
+        );
         // 单选对象 {id}。
         let single_obj = json!({
             "userId": "u1", "outTrackId": "t1",
             "value": {"cardPrivateData":{"actionIds":["submit_action"],"params":{"selected_options":{"id":2}}}},
         });
-        assert_eq!(parse_card_submit(&single_obj).unwrap().selected_indices, vec![2]);
+        assert_eq!(
+            parse_card_submit(&single_obj).unwrap().selected_indices,
+            vec![2]
+        );
         // 数字串数组。
         let str_arr = json!({
             "userId": "u1", "outTrackId": "t1",
             "value": {"cardPrivateData":{"actionIds":["submit_action"],"params":{"selected_options":["0","1"]}}},
         });
-        assert_eq!(parse_card_submit(&str_arr).unwrap().selected_indices, vec![0, 1]);
+        assert_eq!(
+            parse_card_submit(&str_arr).unwrap().selected_indices,
+            vec![0, 1]
+        );
     }
 
     #[test]

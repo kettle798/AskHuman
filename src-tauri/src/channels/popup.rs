@@ -41,7 +41,9 @@ impl Channel for PopupChannel {
 pub struct GuiHelperPopupChannel {
     request_id: String,
     /// GUI 连接的发送端槽位（Helper 连上后由连接处理器填入；未连上时为 None）。
-    gui: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::ipc::ServerMsg>>>>,
+    gui: std::sync::Arc<
+        std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::ipc::ServerMsg>>>,
+    >,
 }
 
 impl GuiHelperPopupChannel {

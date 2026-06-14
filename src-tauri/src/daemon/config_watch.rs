@@ -18,21 +18,21 @@ pub fn spawn() -> UnboundedReceiver<()> {
         use notify::{RecursiveMode, Watcher};
         let dir = crate::paths::config_dir();
         let _ = std::fs::create_dir_all(&dir);
-        let mut watcher = match notify::recommended_watcher(
-            move |res: notify::Result<notify::Event>| {
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 if let Ok(ev) = res {
-                    let hit = ev.paths.iter().any(|p| {
-                        p.file_name().map(|n| n == "config.json").unwrap_or(false)
-                    });
+                    let hit = ev
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name().map(|n| n == "config.json").unwrap_or(false));
                     if hit {
                         let _ = raw_tx.send(());
                     }
                 }
-            },
-        ) {
-            Ok(w) => w,
-            Err(_) => return,
-        };
+            }) {
+                Ok(w) => w,
+                Err(_) => return,
+            };
         if watcher.watch(&dir, RecursiveMode::NonRecursive).is_err() {
             return;
         }

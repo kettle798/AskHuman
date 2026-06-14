@@ -254,7 +254,10 @@ impl FeishuWs {
         out.payload = Some(resp.to_string().into_bytes());
         out.payload_encoding = None;
         out.payload_type = None;
-        let _ = self.write.send(Message::Binary(out.encode_to_vec().into())).await;
+        let _ = self
+            .write
+            .send(Message::Binary(out.encode_to_vec().into()))
+            .await;
     }
 
     /// 发送应用层 ping 帧（method=0, type=ping）。
@@ -356,7 +359,9 @@ fn combine_frag(
     seq: usize,
     bs: Vec<u8>,
 ) -> Option<Vec<u8>> {
-    let slots = frag.entry(msg_id.to_string()).or_insert_with(|| vec![None; sum]);
+    let slots = frag
+        .entry(msg_id.to_string())
+        .or_insert_with(|| vec![None; sum]);
     if seq < slots.len() {
         slots[seq] = Some(bs);
     }
@@ -389,7 +394,11 @@ pub fn debug_log(msg: &str) {
     let dir = crate::paths::config_dir();
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("feishu-debug.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -424,8 +433,14 @@ mod tests {
             service: 3,
             method: FRAME_DATA,
             headers: vec![
-                PbHeader { key: "type".into(), value: "event".into() },
-                PbHeader { key: "message_id".into(), value: "m1".into() },
+                PbHeader {
+                    key: "type".into(),
+                    value: "event".into(),
+                },
+                PbHeader {
+                    key: "message_id".into(),
+                    value: "m1".into(),
+                },
             ],
             payload_encoding: None,
             payload_type: None,

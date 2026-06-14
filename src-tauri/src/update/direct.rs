@@ -108,7 +108,11 @@ async fn apply_unix(progress: Option<ProgressCb>) -> Result<()> {
     let _guard = scopeguard(work.clone());
 
     // 下载资产到临时文件（带进度回调）。
-    let file_name = url.rsplit('/').next().unwrap_or("askhuman_update").to_string();
+    let file_name = url
+        .rsplit('/')
+        .next()
+        .unwrap_or("askhuman_update")
+        .to_string();
     let archive = work.join(&file_name);
     download_with_progress(&url, &archive, progress).await?;
 
@@ -118,8 +122,8 @@ async fn apply_unix(progress: Option<ProgressCb>) -> Result<()> {
     extract_archive(&archive, &extract)?;
 
     // 找解压出的可执行文件 AskHuman。
-    let new_exe = find_executable(&extract)
-        .ok_or_else(|| anyhow!("压缩包中未找到 AskHuman 可执行文件"))?;
+    let new_exe =
+        find_executable(&extract).ok_or_else(|| anyhow!("压缩包中未找到 AskHuman 可执行文件"))?;
 
     // macOS：替换前校验签名 + TeamID（完整性 + 钥匙串信任连续）。
     #[cfg(target_os = "macos")]
@@ -133,7 +137,9 @@ async fn apply_unix(progress: Option<ProgressCb>) -> Result<()> {
     }
 
     // 原子替换：先复制到目标同目录临时文件、chmod 0755，再 rename 覆盖。
-    let dir = current.parent().ok_or_else(|| anyhow!("无法定位安装目录"))?;
+    let dir = current
+        .parent()
+        .ok_or_else(|| anyhow!("无法定位安装目录"))?;
     let staged = dir.join(format!(".AskHuman.new-{}", uuid::Uuid::new_v4()));
     std::fs::copy(&new_exe, &staged).context("暂存新二进制失败")?;
     let mut perms = std::fs::metadata(&staged)?.permissions();
@@ -323,12 +329,18 @@ mod tests {
             asset_url_for_triple(&release, "x86_64-unknown-linux-gnu").as_deref(),
             Some("https://example.com/linux.tar.gz")
         );
-        assert_eq!(asset_url_for_triple(&release, "riscv64-unknown-linux-gnu"), None);
+        assert_eq!(
+            asset_url_for_triple(&release, "riscv64-unknown-linux-gnu"),
+            None
+        );
     }
 
     #[test]
     fn asset_match_handles_missing_assets() {
-        assert_eq!(asset_url_for_triple(&json!({}), "aarch64-apple-darwin"), None);
+        assert_eq!(
+            asset_url_for_triple(&json!({}), "aarch64-apple-darwin"),
+            None
+        );
         assert_eq!(
             asset_url_for_triple(&json!({"assets": []}), "aarch64-apple-darwin"),
             None

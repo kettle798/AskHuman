@@ -5,8 +5,8 @@
 use super::cfgio;
 use crate::agents::AgentKind;
 use crate::i18n::{err_prefix, Lang};
-use crate::integrations::{agent_lifecycle, agent_rules, claude_hook, cursor_hook};
 use crate::integrations::agent_rules::AgentTarget;
+use crate::integrations::{agent_lifecycle, agent_rules, claude_hook, cursor_hook};
 use serde_json::Value;
 use std::process::exit;
 
@@ -167,11 +167,20 @@ enum Action {
 }
 
 fn integrate(args: &[String], action: Action, lang: Lang) -> Result<(), String> {
-    let agent = args
-        .first()
-        .ok_or_else(|| cfgio::t(lang, "usage: agents <install|uninstall|update> <agent> [--rules] [--hook] [--lifecycle]", "用法: agents <install|uninstall|update> <agent> [--rules] [--hook] [--lifecycle]"))?;
-    let target = AgentTarget::parse(agent)
-        .ok_or_else(|| cfgio::t(lang, &format!("unknown agent: {agent} (expected cursor|claude|codex)"), &format!("未知 agent: {agent}（应为 cursor|claude|codex）")))?;
+    let agent = args.first().ok_or_else(|| {
+        cfgio::t(
+            lang,
+            "usage: agents <install|uninstall|update> <agent> [--rules] [--hook] [--lifecycle]",
+            "用法: agents <install|uninstall|update> <agent> [--rules] [--hook] [--lifecycle]",
+        )
+    })?;
+    let target = AgentTarget::parse(agent).ok_or_else(|| {
+        cfgio::t(
+            lang,
+            &format!("unknown agent: {agent} (expected cursor|claude|codex)"),
+            &format!("未知 agent: {agent}（应为 cursor|claude|codex）"),
+        )
+    })?;
     let kind = AgentKind::parse(agent).unwrap();
 
     let want_rules = args.iter().any(|a| a == "--rules");
@@ -248,7 +257,11 @@ fn show(args: &[String], lang: Lang) -> Result<(), String> {
     let targets: Vec<&str> = match args.first().map(|s| s.as_str()) {
         Some(a) if !a.starts_with('-') => {
             if AgentTarget::parse(a).is_none() {
-                return Err(cfgio::t(lang, &format!("unknown agent: {a}"), &format!("未知 agent: {a}")));
+                return Err(cfgio::t(
+                    lang,
+                    &format!("unknown agent: {a}"),
+                    &format!("未知 agent: {a}"),
+                ));
             }
             vec![a]
         }
@@ -269,32 +282,71 @@ fn show(args: &[String], lang: Lang) -> Result<(), String> {
 
         // Rules
         let rules = if agent_rules::is_installed(target) {
-            format!("{yes}{}", if agent_rules::needs_update(target) { upd.clone() } else { String::new() })
+            format!(
+                "{yes}{}",
+                if agent_rules::needs_update(target) {
+                    upd.clone()
+                } else {
+                    String::new()
+                }
+            )
         } else {
             no.clone()
         };
-        print_line(&format!("  {}: {} — {}", cfgio::t(lang, "rules", "规则"), rules, agent_rules::display_path(target)));
+        print_line(&format!(
+            "  {}: {} — {}",
+            cfgio::t(lang, "rules", "规则"),
+            rules,
+            agent_rules::display_path(target)
+        ));
 
         // Hook
         let hook = match target {
-            AgentTarget::Cursor => hook_state(cursor_hook::is_installed(), cursor_hook::needs_update(), &yes, &no, &upd),
-            AgentTarget::ClaudeCode => hook_state(claude_hook::is_installed(), claude_hook::needs_update(), &yes, &no, &upd),
+            AgentTarget::Cursor => hook_state(
+                cursor_hook::is_installed(),
+                cursor_hook::needs_update(),
+                &yes,
+                &no,
+                &upd,
+            ),
+            AgentTarget::ClaudeCode => hook_state(
+                claude_hook::is_installed(),
+                claude_hook::needs_update(),
+                &yes,
+                &no,
+                &upd,
+            ),
             AgentTarget::Codex => na.clone(),
         };
-        print_line(&format!("  {}: {}", cfgio::t(lang, "timeout hook", "超时 hook"), hook));
+        print_line(&format!(
+            "  {}: {}",
+            cfgio::t(lang, "timeout hook", "超时 hook"),
+            hook
+        ));
 
         // Lifecycle（实验性）
         let st = agent_lifecycle::status(kind);
         let lc = if !st.supported {
             na.clone()
         } else if st.installed {
-            format!("{yes}{}", if st.outdated { upd.clone() } else { String::new() })
+            format!(
+                "{yes}{}",
+                if st.outdated {
+                    upd.clone()
+                } else {
+                    String::new()
+                }
+            )
         } else {
             no.clone()
         };
         print_line(&format!(
             "  {}: {}",
-            cfgio::t(lang, "lifecycle hook (experimental)", "生命周期 hook（实验性）"),
+            cfgio::t(
+                lang,
+                "lifecycle hook (experimental)",
+                "生命周期 hook（实验性）"
+            ),
             lc
         ));
         print_line("");

@@ -20,7 +20,8 @@ pub const BLOCK_BEGIN: &str = "<!-- AskHuman:begin DO NOT EDIT (managed by AskHu
 /// 共享文件托管区块结束标记。
 pub const BLOCK_END: &str = "<!-- AskHuman:end -->";
 /// 旧版 Cursor 独占文件头标记（仅用于识别 / 迁移历史安装，新格式不再写入）。
-pub const MANAGED_FILE_MARK: &str = "<!-- AskHuman:managed-file DO NOT EDIT (managed by AskHuman) -->";
+pub const MANAGED_FILE_MARK: &str =
+    "<!-- AskHuman:managed-file DO NOT EDIT (managed by AskHuman) -->";
 
 /// Cursor 规则文件的 frontmatter（令规则始终生效）。
 pub const CURSOR_FRONTMATTER: &str = "---\nalwaysApply: true\n---\n";
@@ -283,7 +284,10 @@ pub fn reveal(agent: AgentTarget) {
     }
     #[cfg(target_os = "linux")]
     {
-        let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.clone());
+        let dir = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| path.clone());
         let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
     }
     #[cfg(target_os = "windows")]
@@ -379,7 +383,10 @@ mod tests {
     fn remove_from_empty_block_yields_empty() {
         let only = upsert_block("", BODY);
         let out = remove_block(&only);
-        assert!(out.is_empty(), "removing the sole block clears the file: {out:?}");
+        assert!(
+            out.is_empty(),
+            "removing the sole block clears the file: {out:?}"
+        );
     }
 
     #[test]
@@ -434,13 +441,19 @@ mod tests {
         let installed = build_cursor_rule("", BODY);
         let residual = remove_block(&installed);
         assert!(cursor_residual_is_empty(&residual), "only frontmatter left");
-        let with_user = format!("{}\nkeep this\n", remove_block(&build_cursor_rule("", BODY)));
+        let with_user = format!(
+            "{}\nkeep this\n",
+            remove_block(&build_cursor_rule("", BODY))
+        );
         assert!(!cursor_residual_is_empty(&with_user));
     }
 
     #[test]
     fn strip_frontmatter_removes_block() {
-        assert_eq!(strip_frontmatter("---\nalwaysApply: true\n---\n").trim(), "");
+        assert_eq!(
+            strip_frontmatter("---\nalwaysApply: true\n---\n").trim(),
+            ""
+        );
         assert_eq!(strip_frontmatter("---\nk: v\n---\nbody").trim(), "body");
         assert_eq!(strip_frontmatter("no fm").trim(), "no fm");
     }

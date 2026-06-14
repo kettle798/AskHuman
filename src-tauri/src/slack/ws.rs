@@ -197,7 +197,11 @@ pub fn debug_log(msg: &str) {
     let dir = crate::paths::config_dir();
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("slack-debug.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())

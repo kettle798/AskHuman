@@ -152,9 +152,7 @@ impl MessagingChannel for TelegramSession {
         preempt: &Preemption,
     ) -> Option<QuestionAnswer> {
         // 拆分借用：client 不可变 + events 可变。
-        let Self {
-            client, events, ..
-        } = self;
+        let Self { client, events, .. } = self;
         let client = client.as_ref()?;
         let events = events.as_mut()?;
         ask_question(
@@ -300,7 +298,15 @@ async fn ask_question(
         {
             // 本端胜出：卡片改「已回复」终态、去键盘。
             let status = i18n::tr(lang, "channel.tgReplied");
-            finalize_card(client, card_message_id, header, &content, &status, is_markdown).await;
+            finalize_card(
+                client,
+                card_message_id,
+                header,
+                &content,
+                &status,
+                is_markdown,
+            )
+            .await;
             events.clear_active(card_message_id);
             return Some(QuestionAnswer {
                 selected_options: selected,
@@ -330,7 +336,15 @@ async fn ask_question(
         }
         _ => i18n::tr(lang, "channel.tgCancelled").to_string(),
     };
-    finalize_card(client, card_message_id, header, &content, &status, is_markdown).await;
+    finalize_card(
+        client,
+        card_message_id,
+        header,
+        &content,
+        &status,
+        is_markdown,
+    )
+    .await;
     events.clear_active(card_message_id);
     None
 }
@@ -366,7 +380,9 @@ async fn finalize_card(
             plain.push_str("\n\n");
         }
         plain.push_str(status);
-        let _ = client.edit_message_text(card_message_id, &plain, None).await;
+        let _ = client
+            .edit_message_text(card_message_id, &plain, None)
+            .await;
     }
 }
 
@@ -438,7 +454,11 @@ fn compose_html(header: &str, body: &str, is_markdown: bool) -> String {
         (true, true) => "…".to_string(),
         (false, true) => format!("<b>{}</b>", markdown::escape_html(header)),
         (true, false) => body_html(body),
-        (false, false) => format!("<b>{}</b>\n\n{}", markdown::escape_html(header), body_html(body)),
+        (false, false) => format!(
+            "<b>{}</b>\n\n{}",
+            markdown::escape_html(header),
+            body_html(body)
+        ),
     }
 }
 

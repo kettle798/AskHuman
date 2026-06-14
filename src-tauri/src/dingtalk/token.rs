@@ -55,7 +55,10 @@ pub async fn get_token(
         .and_then(|v| v.as_str())
         .ok_or(DingTalkError::BadResponse)?
         .to_string();
-    let expire_in = body.get("expireIn").and_then(|v| v.as_u64()).unwrap_or(7200);
+    let expire_in = body
+        .get("expireIn")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(7200);
     let expire_at = Instant::now() + Duration::from_secs(expire_in.saturating_sub(60));
 
     if let Ok(mut guard) = cache().lock() {

@@ -65,7 +65,8 @@ impl DingTalkClient {
     /// 调用新版接口（`https://api.dingtalk.com{path}`，header 携带 access_token），返回响应体。
     /// 以 HTTP 2xx 判定成功；失败时取 body.message 作为错误信息。
     pub(crate) async fn call_new(&self, path: &str, body: Value) -> Result<Value, DingTalkError> {
-        self.call_new_method(reqwest::Method::POST, path, body).await
+        self.call_new_method(reqwest::Method::POST, path, body)
+            .await
     }
 
     /// 同 `call_new`，但可指定 HTTP method（如更新卡片用 PUT）。
@@ -107,12 +108,14 @@ impl DingTalkClient {
             "msgKey": msg_key,
             "msgParam": msg_param.to_string(),
         });
-        self.call_new("/v1.0/robot/oToMessages/batchSend", body).await?;
+        self.call_new("/v1.0/robot/oToMessages/batchSend", body)
+            .await?;
         Ok(())
     }
 
     pub async fn send_oto_text(&self, content: &str) -> Result<(), DingTalkError> {
-        self.send_oto("sampleText", json!({ "content": content })).await
+        self.send_oto("sampleText", json!({ "content": content }))
+            .await
     }
 
     pub async fn send_oto_markdown(&self, title: &str, text: &str) -> Result<(), DingTalkError> {
@@ -152,7 +155,10 @@ impl DingTalkClient {
             .to_string();
         let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name);
         let form = reqwest::multipart::Form::new().part("media", part);
-        let url = format!("{}/media/upload?access_token={}&type={}", OAPI_BASE, token, kind);
+        let url = format!(
+            "{}/media/upload?access_token={}&type={}",
+            OAPI_BASE, token, kind
+        );
         let resp = self
             .http
             .post(&url)

@@ -196,14 +196,23 @@ pub fn agent_help_text(lang: Lang) -> String {
             out.extend(result_field_lines(lang));
             out.push(String::new());
             out.push("Multi-question output:".to_string());
-            out.push("  Each question is grouped under \"# Qn\", with questions separated by \"---\"".to_string());
+            out.push(
+                "  Each question is grouped under \"# Qn\", with questions separated by \"---\""
+                    .to_string(),
+            );
             out.push(String::new());
             out.push("Examples:".to_string());
-            out.push(format!("  {prog} -q \"Proceed with deploy?\" -o! \"Proceed\" -o \"Stop\""));
+            out.push(format!(
+                "  {prog} -q \"Proceed with deploy?\" -o! \"Proceed\" -o \"Stop\""
+            ));
             out.push(format!("  {prog} \"Review this change?\" -f ./diff.patch -q \"Continue?\" -o \"Continue\" -o \"Stop\""));
             out.push(format!("  {prog} \"A few things to confirm\" -q \"Keep logs?\" -o \"Keep\" -o \"Clear\" -q \"Enable cache?\" -o \"On\" -o \"Off\""));
-            out.push(format!("  {prog} --stdin -q \"Continue?\" -o \"Continue\" -o \"Stop\" <<'EOF'"));
-            out.push("# A long Markdown message with `backticks`, $vars and \"quotes\"".to_string());
+            out.push(format!(
+                "  {prog} --stdin -q \"Continue?\" -o \"Continue\" -o \"Stop\" <<'EOF'"
+            ));
+            out.push(
+                "# A long Markdown message with `backticks`, $vars and \"quotes\"".to_string(),
+            );
             out.push("EOF".to_string());
         }
         Lang::Zh => {
@@ -222,10 +231,14 @@ pub fn agent_help_text(lang: Lang) -> String {
             out.push("  每题以「# Qn」分组，题与题之间用「---」分隔".to_string());
             out.push(String::new());
             out.push("使用示例:".to_string());
-            out.push(format!("  {prog} -q \"要继续部署吗？\" -o! \"继续\" -o \"停止\""));
+            out.push(format!(
+                "  {prog} -q \"要继续部署吗？\" -o! \"继续\" -o \"停止\""
+            ));
             out.push(format!("  {prog} \"看看这个改动？\" -f ./diff.patch -q \"要继续吗？\" -o \"继续\" -o \"停止\""));
             out.push(format!("  {prog} \"以下是几处待确认\" -q \"保留日志？\" -o \"保留\" -o \"清除\" -q \"开启缓存？\" -o \"开\" -o \"关\""));
-            out.push(format!("  {prog} --stdin -q \"要继续吗？\" -o \"继续\" -o \"停止\" <<'EOF'"));
+            out.push(format!(
+                "  {prog} --stdin -q \"要继续吗？\" -o \"继续\" -o \"停止\" <<'EOF'"
+            ));
             out.push("# 含 `反引号`、$VAR 与 \"引号\" 的长 Markdown 消息".to_string());
             out.push("EOF".to_string());
         }
@@ -240,7 +253,9 @@ pub fn scripting_help_text(lang: Lang) -> String {
     let mut out: Vec<String> = Vec::new();
     match lang {
         Lang::En => {
-            out.push(format!("{prog} — collect a structured choice from a human, for scripts/automation."));
+            out.push(format!(
+                "{prog} — collect a structured choice from a human, for scripts/automation."
+            ));
             out.push(String::new());
             out.push("Invocation:".to_string());
             out.push(format!("  {prog} \"<Message>\" -q \"<question>\" -o \"<option>\" ... [--single] [--select-only] [--output json]"));
@@ -255,13 +270,28 @@ pub fn scripting_help_text(lang: Lang) -> String {
             out.extend(exit_code_lines(lang));
             out.push(String::new());
             out.push("JSON output (--output json):".to_string());
-            out.push("  action   \"answer\" when the user responded, \"cancel\" when they cancelled".to_string());
-            out.push("  channel  Which channel the response came from (popup/slack/feishu/...)".to_string());
-            out.push("  answers  Present only for \"answer\"; one entry per ANSWERED question:".to_string());
+            out.push(
+                "  action   \"answer\" when the user responded, \"cancel\" when they cancelled"
+                    .to_string(),
+            );
+            out.push(
+                "  channel  Which channel the response came from (popup/slack/feishu/...)"
+                    .to_string(),
+            );
+            out.push(
+                "  answers  Present only for \"answer\"; one entry per ANSWERED question:"
+                    .to_string(),
+            );
             out.push("    question_index    0-based index of the question".to_string());
-            out.push("    selected_options  Option texts the user picked (single choice → exactly one)".to_string());
+            out.push(
+                "    selected_options  Option texts the user picked (single choice → exactly one)"
+                    .to_string(),
+            );
             out.push("    selected_indices  0-based indices of those options".to_string());
-            out.push("    user_input        Free text (omitted under --select-only or when empty)".to_string());
+            out.push(
+                "    user_input        Free text (omitted under --select-only or when empty)"
+                    .to_string(),
+            );
             out.push("    files             Local paths attached (omitted when none)".to_string());
             out.push("  Empty/omitted fields and unanswered questions are dropped to keep the JSON small.".to_string());
             out.push(String::new());
@@ -311,7 +341,10 @@ mod tests {
 
     #[test]
     fn derives_basename_from_path() {
-        assert_eq!(program_name_from(Some("/usr/local/bin/AskHuman")), "AskHuman");
+        assert_eq!(
+            program_name_from(Some("/usr/local/bin/AskHuman")),
+            "AskHuman"
+        );
         assert_eq!(program_name_from(Some("./AskHuman")), "AskHuman");
     }
 

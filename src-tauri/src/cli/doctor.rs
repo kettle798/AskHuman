@@ -12,7 +12,10 @@ const AGENTS: [&str; 3] = ["cursor", "claude", "codex"];
 
 pub fn dispatch(args: &[String], lang: Lang) {
     let json = args.iter().any(|a| a == "--json");
-    if args.iter().any(|a| a == "help" || a == "-h" || a == "--help") {
+    if args
+        .iter()
+        .any(|a| a == "help" || a == "-h" || a == "--help")
+    {
         super::print_line(&cfgio::t(
             lang,
             "AskHuman doctor [--json] — one-screen health check (daemon, channels, integrations)",
@@ -31,11 +34,7 @@ pub fn dispatch(args: &[String], lang: Lang) {
     }
 }
 
-fn render_text(
-    cfg: &AppConfig,
-    status: &Option<crate::ipc::StatusInfo>,
-    lang: Lang,
-) -> String {
+fn render_text(cfg: &AppConfig, status: &Option<crate::ipc::StatusInfo>, lang: Lang) -> String {
     let yes = cfgio::t(lang, "yes", "是");
     let no = cfgio::t(lang, "no", "否");
     let yn = |b: bool| if b { yes.clone() } else { no.clone() };
@@ -60,11 +59,18 @@ fn render_text(
                 },
             ));
         }
-        None => out.push_str(&format!("  {}: {}\n", cfgio::t(lang, "running", "运行中"), no)),
+        None => out.push_str(&format!(
+            "  {}: {}\n",
+            cfgio::t(lang, "running", "运行中"),
+            no
+        )),
     }
 
     // Channels
-    let conns = status.as_ref().map(|s| s.im_connections.clone()).unwrap_or_default();
+    let conns = status
+        .as_ref()
+        .map(|s| s.im_connections.clone())
+        .unwrap_or_default();
     let daemon_up = status.is_some();
     out.push_str(&cfgio::t(lang, "\nChannels\n", "\n渠道\n"));
     for &name in &channel_cmd::CHANNELS {
@@ -90,10 +96,22 @@ fn render_text(
     for &name in &AGENTS {
         let target = AgentTarget::parse(name).unwrap();
         let kind = crate::agents::AgentKind::parse(name).unwrap();
-        let rules = state_label(agent_rules::is_installed(target), agent_rules::needs_update(target), lang);
+        let rules = state_label(
+            agent_rules::is_installed(target),
+            agent_rules::needs_update(target),
+            lang,
+        );
         let hook = match target {
-            AgentTarget::Cursor => state_label(cursor_hook::is_installed(), cursor_hook::needs_update(), lang),
-            AgentTarget::ClaudeCode => state_label(claude_hook::is_installed(), claude_hook::needs_update(), lang),
+            AgentTarget::Cursor => state_label(
+                cursor_hook::is_installed(),
+                cursor_hook::needs_update(),
+                lang,
+            ),
+            AgentTarget::ClaudeCode => state_label(
+                claude_hook::is_installed(),
+                claude_hook::needs_update(),
+                lang,
+            ),
             AgentTarget::Codex => cfgio::t(lang, "n/a", "—"),
         };
         let lc = agent_lifecycle::status(kind);
@@ -128,7 +146,10 @@ fn state_label(installed: bool, needs_update: bool, lang: Lang) -> String {
 }
 
 fn render_json(cfg: &AppConfig, status: &Option<crate::ipc::StatusInfo>) -> String {
-    let conns = status.as_ref().map(|s| s.im_connections.clone()).unwrap_or_default();
+    let conns = status
+        .as_ref()
+        .map(|s| s.im_connections.clone())
+        .unwrap_or_default();
     let daemon_up = status.is_some();
     let channels: Vec<serde_json::Value> = channel_cmd::CHANNELS
         .iter()

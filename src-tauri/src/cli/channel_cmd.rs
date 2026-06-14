@@ -42,7 +42,10 @@ fn list(args: &[String], lang: Lang) -> Result<(), String> {
     let json = args.iter().any(|a| a == "--json");
     let cfg = AppConfig::load_without_secrets();
     let status = cfgio::daemon_status();
-    let conns = status.as_ref().map(|s| s.im_connections.clone()).unwrap_or_default();
+    let conns = status
+        .as_ref()
+        .map(|s| s.im_connections.clone())
+        .unwrap_or_default();
     let daemon_up = status.is_some();
 
     if json {
@@ -103,9 +106,13 @@ fn list(args: &[String], lang: Lang) -> Result<(), String> {
 // ——— set ———
 
 fn set(args: &[String], lang: Lang) -> Result<(), String> {
-    let name = args
-        .first()
-        .ok_or_else(|| cfgio::t(lang, "usage: channel set <name> [flags]", "用法: channel set <渠道> [选项]"))?;
+    let name = args.first().ok_or_else(|| {
+        cfgio::t(
+            lang,
+            "usage: channel set <name> [flags]",
+            "用法: channel set <渠道> [选项]",
+        )
+    })?;
     let canonical = canon(name, lang)?;
     let rest = &args[1..];
     let pf = parse_flags(rest, lang)?;
@@ -154,11 +161,13 @@ fn parse_flags(args: &[String], lang: Lang) -> Result<ParsedFlags, String> {
                 i += 1;
             } else if let Some(field) = name.strip_suffix("-env") {
                 let v = args.get(i + 1).ok_or_else(|| needs_value(lang, a))?;
-                pf.secrets.insert(field.to_string(), SecretSource::Env(v.clone()));
+                pf.secrets
+                    .insert(field.to_string(), SecretSource::Env(v.clone()));
                 i += 2;
             } else if let Some(field) = name.strip_suffix("-file") {
                 let v = args.get(i + 1).ok_or_else(|| needs_value(lang, a))?;
-                pf.secrets.insert(field.to_string(), SecretSource::File(v.clone()));
+                pf.secrets
+                    .insert(field.to_string(), SecretSource::File(v.clone()));
                 i += 2;
             } else {
                 let v = args.get(i + 1).ok_or_else(|| needs_value(lang, a))?;
@@ -182,7 +191,11 @@ fn parse_flags(args: &[String], lang: Lang) -> Result<ParsedFlags, String> {
 }
 
 fn needs_value(lang: Lang, flag: &str) -> String {
-    cfgio::t(lang, &format!("{flag} needs a value"), &format!("{flag} 需要参数值"))
+    cfgio::t(
+        lang,
+        &format!("{flag} needs a value"),
+        &format!("{flag} 需要参数值"),
+    )
 }
 
 fn apply_flags(name: &str, mut pf: ParsedFlags, lang: Lang) -> Result<(), String> {
@@ -274,16 +287,24 @@ fn apply_flags(name: &str, mut pf: ParsedFlags, lang: Lang) -> Result<(), String
         ));
     }
     cfg.save().map_err(|e| e.to_string())?;
-    print_line(&cfgio::t(lang, &format!("{name} updated"), &format!("{name} 已更新")));
+    print_line(&cfgio::t(
+        lang,
+        &format!("{name} updated"),
+        &format!("{name} 已更新"),
+    ));
     Ok(())
 }
 
 // ——— enable / disable ———
 
 fn toggle(args: &[String], on: bool, lang: Lang) -> Result<(), String> {
-    let name = args
-        .first()
-        .ok_or_else(|| cfgio::t(lang, "usage: channel enable|disable <name>", "用法: channel enable|disable <渠道>"))?;
+    let name = args.first().ok_or_else(|| {
+        cfgio::t(
+            lang,
+            "usage: channel enable|disable <name>",
+            "用法: channel enable|disable <渠道>",
+        )
+    })?;
     let canonical = canon(name, lang)?;
     let mut cfg = AppConfig::load_without_secrets();
     set_enabled(&mut cfg, canonical, on);
@@ -300,9 +321,13 @@ fn toggle(args: &[String], on: bool, lang: Lang) -> Result<(), String> {
 // ——— test ———
 
 fn test(args: &[String], lang: Lang) -> Result<(), String> {
-    let name = args
-        .first()
-        .ok_or_else(|| cfgio::t(lang, "usage: channel test <name>", "用法: channel test <渠道>"))?;
+    let name = args.first().ok_or_else(|| {
+        cfgio::t(
+            lang,
+            "usage: channel test <name>",
+            "用法: channel test <渠道>",
+        )
+    })?;
     let canonical = canon(name, lang)?;
     let cfg = AppConfig::load();
     let res: Result<String, String> = cfgio::block_on(async {
@@ -355,9 +380,13 @@ fn test(args: &[String], lang: Lang) -> Result<(), String> {
 // ——— detect ———
 
 fn detect(args: &[String], lang: Lang) -> Result<(), String> {
-    let name = args
-        .first()
-        .ok_or_else(|| cfgio::t(lang, "usage: channel detect <name>", "用法: channel detect <渠道>"))?;
+    let name = args.first().ok_or_else(|| {
+        cfgio::t(
+            lang,
+            "usage: channel detect <name>",
+            "用法: channel detect <渠道>",
+        )
+    })?;
     let canonical = canon(name, lang)?;
     let save = args.iter().any(|a| a == "--save");
     if canonical == "telegram" {
@@ -485,14 +514,20 @@ fn wizard(name: &str, lang: Lang) -> Result<(), String> {
     match name {
         "telegram" => {
             let c = &mut cfg.channels.telegram;
-            c.enabled = yes_no(&cfgio::t(lang, "Enable this channel?", "启用该渠道?"), c.enabled)?;
+            c.enabled = yes_no(
+                &cfgio::t(lang, "Enable this channel?", "启用该渠道?"),
+                c.enabled,
+            )?;
             c.chat_id = cfgio::prompt_line("chatId", &c.chat_id)?;
             c.api_base_url = cfgio::prompt_line("apiBaseUrl", &c.api_base_url)?;
             prompt_secret_into(&mut c.bot_token, "botToken", lang)?;
         }
         "dingding" => {
             let c = &mut cfg.channels.dingding;
-            c.enabled = yes_no(&cfgio::t(lang, "Enable this channel?", "启用该渠道?"), c.enabled)?;
+            c.enabled = yes_no(
+                &cfgio::t(lang, "Enable this channel?", "启用该渠道?"),
+                c.enabled,
+            )?;
             c.client_id = cfgio::prompt_line("clientId", &c.client_id)?;
             c.user_id = cfgio::prompt_line("userId", &c.user_id)?;
             c.card_template_id = cfgio::prompt_line("cardTemplateId", &c.card_template_id)?;
@@ -500,7 +535,10 @@ fn wizard(name: &str, lang: Lang) -> Result<(), String> {
         }
         "feishu" => {
             let c = &mut cfg.channels.feishu;
-            c.enabled = yes_no(&cfgio::t(lang, "Enable this channel?", "启用该渠道?"), c.enabled)?;
+            c.enabled = yes_no(
+                &cfgio::t(lang, "Enable this channel?", "启用该渠道?"),
+                c.enabled,
+            )?;
             c.app_id = cfgio::prompt_line("appId", &c.app_id)?;
             c.open_id = cfgio::prompt_line("openId", &c.open_id)?;
             c.base_url = cfgio::prompt_line("baseUrl", &c.base_url)?;
@@ -508,7 +546,10 @@ fn wizard(name: &str, lang: Lang) -> Result<(), String> {
         }
         "slack" => {
             let c = &mut cfg.channels.slack;
-            c.enabled = yes_no(&cfgio::t(lang, "Enable this channel?", "启用该渠道?"), c.enabled)?;
+            c.enabled = yes_no(
+                &cfgio::t(lang, "Enable this channel?", "启用该渠道?"),
+                c.enabled,
+            )?;
             c.user_id = cfgio::prompt_line("userId", &c.user_id)?;
             prompt_secret_into(&mut c.bot_token, "botToken", lang)?;
             prompt_secret_into(&mut c.app_token, "appToken", lang)?;
@@ -517,7 +558,11 @@ fn wizard(name: &str, lang: Lang) -> Result<(), String> {
     }
 
     cfg.save().map_err(|e| e.to_string())?;
-    print_line(&cfgio::t(lang, &format!("{name} saved"), &format!("{name} 已保存")));
+    print_line(&cfgio::t(
+        lang,
+        &format!("{name} saved"),
+        &format!("{name} 已保存"),
+    ));
     eprintln!(
         "{}",
         cfgio::t(

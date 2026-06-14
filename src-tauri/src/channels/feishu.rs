@@ -135,7 +135,9 @@ impl MessagingChannel for FeishuSession {
         // 长连接由 Router 独占，这里只需 OpenAPI client（发送卡片/消息/置灰）。
         let client = FeishuClient::new(&self.config).map_err(|e| e.to_string())?;
         if client.open_id().is_empty() {
-            return Err(i18n::tr(Lang::current(), "err.fsEmptyConfig").replace("{field}", "Open ID"));
+            return Err(
+                i18n::tr(Lang::current(), "err.fsEmptyConfig").replace("{field}", "Open ID")
+            );
         }
         self.client = Some(client);
         Ok(())
@@ -239,7 +241,8 @@ impl MessagingChannel for FeishuSession {
                 eprintln!(
                     "{}{}",
                     i18n::warn_prefix(ctx.lang),
-                    i18n::tr(ctx.lang, "channel.fsCardDeliverFailed").replace("{e}", &e.to_string())
+                    i18n::tr(ctx.lang, "channel.fsCardDeliverFailed")
+                        .replace("{e}", &e.to_string())
                 );
                 return ask_question_text(client, events, &open_id, ctx, preempt).await;
             }
@@ -322,10 +325,7 @@ impl MessagingChannel for FeishuSession {
                                         && oid == open_id
                                         && idx < ctx.options.len()
                                     {
-                                        toggle_single(
-                                            &mut selected_single,
-                                            &ctx.options[idx].text,
-                                        );
+                                        toggle_single(&mut selected_single, &ctx.options[idx].text);
                                         let updated = card::build_question_card(
                                             title,
                                             ctx.text,
@@ -338,8 +338,7 @@ impl MessagingChannel for FeishuSession {
                                             submit_label,
                                             recommended_prefix,
                                         );
-                                        let _ =
-                                            ack.send(Some(card::callback_update_card(updated)));
+                                        let _ = ack.send(Some(card::callback_update_card(updated)));
                                         continue;
                                     }
                                 }
@@ -434,14 +433,9 @@ async fn ask_question_text(
                 if event_open_id(&event) != open_id {
                     continue;
                 }
-                if let Some(answer) = message_to_answer(
-                    client,
-                    &event,
-                    &option_texts,
-                    ctx.select_only,
-                    ctx.single,
-                )
-                .await
+                if let Some(answer) =
+                    message_to_answer(client, &event, &option_texts, ctx.select_only, ctx.single)
+                        .await
                 {
                     events.clear_active(None, open_id);
                     return Some(answer);
@@ -547,7 +541,11 @@ async fn message_to_answer(
     let (msg_type, message_id, content) = parse_message(event)?;
     match msg_type.as_str() {
         "text" => {
-            let text = content.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
+            let text = content
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .trim();
             if text.is_empty() {
                 return None;
             }
@@ -612,7 +610,8 @@ async fn message_to_answer(
                     eprintln!(
                         "{}{}",
                         i18n::warn_prefix(lang),
-                        i18n::tr(lang, "channel.fsFileDownloadFailed").replace("{e}", &e.to_string())
+                        i18n::tr(lang, "channel.fsFileDownloadFailed")
+                            .replace("{e}", &e.to_string())
                     );
                     None
                 }
@@ -676,13 +675,19 @@ fn event_open_id(event: &Value) -> &str {
 /// 解析 `event.message`：返回 (message_type, message_id, 解析后的 content)。
 fn parse_message(event: &Value) -> Option<(String, String, Value)> {
     let message = event.get("message")?;
-    let msg_type = message.get("message_type").and_then(|v| v.as_str())?.to_string();
+    let msg_type = message
+        .get("message_type")
+        .and_then(|v| v.as_str())?
+        .to_string();
     let message_id = message
         .get("message_id")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let content_str = message.get("content").and_then(|v| v.as_str()).unwrap_or("{}");
+    let content_str = message
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("{}");
     let content: Value = serde_json::from_str(content_str).unwrap_or(Value::Null);
     Some((msg_type, message_id, content))
 }

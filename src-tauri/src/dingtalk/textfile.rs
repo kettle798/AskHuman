@@ -15,12 +15,79 @@ const DINGTALK_WHITELIST: &[&str] = &[
 
 /// 视为“文本类”的扩展名（命中且内容为 UTF-8 才进入处理）。
 const TEXT_EXTS: &[&str] = &[
-    "md", "markdown", "txt", "text", "log", "csv", "tsv", "json", "json5", "yaml", "yml", "toml",
-    "ini", "conf", "cfg", "env", "properties", "xml", "html", "htm", "css", "scss", "less", "svg",
-    "js", "jsx", "ts", "tsx", "mjs", "cjs", "vue", "svelte", "py", "rb", "go", "rs", "java", "kt",
-    "kts", "scala", "c", "h", "cpp", "cc", "cxx", "hpp", "hh", "cs", "m", "mm", "swift", "php",
-    "pl", "lua", "dart", "r", "sql", "graphql", "gql", "proto", "sh", "bash", "zsh", "fish", "ps1",
-    "bat", "gradle", "dockerfile", "makefile", "mk", "cmake", "diff", "patch",
+    "md",
+    "markdown",
+    "txt",
+    "text",
+    "log",
+    "csv",
+    "tsv",
+    "json",
+    "json5",
+    "yaml",
+    "yml",
+    "toml",
+    "ini",
+    "conf",
+    "cfg",
+    "env",
+    "properties",
+    "xml",
+    "html",
+    "htm",
+    "css",
+    "scss",
+    "less",
+    "svg",
+    "js",
+    "jsx",
+    "ts",
+    "tsx",
+    "mjs",
+    "cjs",
+    "vue",
+    "svelte",
+    "py",
+    "rb",
+    "go",
+    "rs",
+    "java",
+    "kt",
+    "kts",
+    "scala",
+    "c",
+    "h",
+    "cpp",
+    "cc",
+    "cxx",
+    "hpp",
+    "hh",
+    "cs",
+    "m",
+    "mm",
+    "swift",
+    "php",
+    "pl",
+    "lua",
+    "dart",
+    "r",
+    "sql",
+    "graphql",
+    "gql",
+    "proto",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "ps1",
+    "bat",
+    "gradle",
+    "dockerfile",
+    "makefile",
+    "mk",
+    "cmake",
+    "diff",
+    "patch",
 ];
 
 /// 路由决策结果，由调用方执行实际发送。
@@ -87,7 +154,11 @@ fn read_utf8(path: &str) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     // 去掉可能的 UTF-8 BOM。
     let s = String::from_utf8(bytes).ok()?;
-    Some(s.strip_prefix('\u{feff}').map(|s| s.to_string()).unwrap_or(s))
+    Some(
+        s.strip_prefix('\u{feff}')
+            .map(|s| s.to_string())
+            .unwrap_or(s),
+    )
 }
 
 fn human_size(n: usize) -> String {
@@ -123,7 +194,12 @@ fn build_inline_text(name: &str, ext: &str, content: &str, byte_len: usize) -> S
         content.to_string()
     } else {
         let f = fence(content);
-        format!("{f}{lang}\n{content}\n{f}", f = f, lang = lang_of(ext), content = content)
+        format!(
+            "{f}{lang}\n{content}\n{f}",
+            f = f,
+            lang = lang_of(ext),
+            content = content
+        )
     };
     format!("{header}\n\n---\n\n{body}", header = header, body = body)
 }
@@ -187,9 +263,18 @@ mod tests {
     #[test]
     fn whitelist_and_nontext_pass_through() {
         let c = cfg(true, true);
-        assert!(matches!(plan(&c, "/x/a.pdf", "a.pdf"), TextAction::PassThrough));
-        assert!(matches!(plan(&c, "/x/a.png", "a.png"), TextAction::PassThrough));
-        assert!(matches!(plan(&c, "/x/a.bin", "a.bin"), TextAction::PassThrough));
+        assert!(matches!(
+            plan(&c, "/x/a.pdf", "a.pdf"),
+            TextAction::PassThrough
+        ));
+        assert!(matches!(
+            plan(&c, "/x/a.png", "a.png"),
+            TextAction::PassThrough
+        ));
+        assert!(matches!(
+            plan(&c, "/x/a.bin", "a.bin"),
+            TextAction::PassThrough
+        ));
     }
 
     #[test]

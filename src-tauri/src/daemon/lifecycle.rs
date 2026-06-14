@@ -118,7 +118,14 @@ fn store_cached_hash(path: &Path, size: u64, mtime_ms: u64, hash: u64) {
             return;
         }
     }
-    map.insert(key, HashCacheEntry { mtime_ms, size, hash });
+    map.insert(
+        key,
+        HashCacheEntry {
+            mtime_ms,
+            size,
+            hash,
+        },
+    );
     let Ok(data) = serde_json::to_vec(&map) else {
         return;
     };
@@ -222,14 +229,23 @@ mod tests {
         let p2 = dir.join("b/AskHuman");
         std::fs::create_dir_all(p1.parent().unwrap()).unwrap();
         std::fs::create_dir_all(p2.parent().unwrap()).unwrap();
-        std::fs::File::create(&p1).unwrap().write_all(bytes).unwrap();
-        std::fs::File::create(&p2).unwrap().write_all(bytes).unwrap();
+        std::fs::File::create(&p1)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+        std::fs::File::create(&p2)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
         assert_eq!(hash_file(&p1).unwrap(), hash_file(&p2).unwrap());
 
         // 内容不同 → 哈希不同。
         let p3 = dir.join("c/AskHuman");
         std::fs::create_dir_all(p3.parent().unwrap()).unwrap();
-        std::fs::File::create(&p3).unwrap().write_all(b"different").unwrap();
+        std::fs::File::create(&p3)
+            .unwrap()
+            .write_all(b"different")
+            .unwrap();
         assert_ne!(hash_file(&p1).unwrap(), hash_file(&p3).unwrap());
 
         let _ = std::fs::remove_dir_all(&dir);

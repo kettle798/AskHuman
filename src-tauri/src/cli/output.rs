@@ -31,10 +31,7 @@ impl RenderedAnswer<'_> {
     /// 空回答：没选项、没（去空白后的）输入、没图片、没回复文件。
     fn is_empty(&self) -> bool {
         self.selected_options.is_empty()
-            && self
-                .user_input
-                .map(|s| s.trim().is_empty())
-                .unwrap_or(true)
+            && self.user_input.map(|s| s.trim().is_empty()).unwrap_or(true)
             && self.image_paths.is_empty()
             && self.file_paths.is_empty()
     }
@@ -97,7 +94,11 @@ pub fn send_output(
     let mut sections: Vec<String> = Vec::new();
 
     if !selected_options.is_empty() {
-        sections.push(format!("{}\n{}", MARKER_SELECTED_OPTIONS, selected_options.join(", ")));
+        sections.push(format!(
+            "{}\n{}",
+            MARKER_SELECTED_OPTIONS,
+            selected_options.join(", ")
+        ));
     }
 
     if let Some(input) = user_input {
@@ -110,12 +111,20 @@ pub fn send_output(
     // 图片落盘路径 + 透传文件路径，合并为单一 `[files]`（D6b：模型按后缀区分类型）。
     let files: Vec<&String> = image_paths.iter().chain(file_paths.iter()).collect();
     if !files.is_empty() {
-        let joined = files.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("\n");
+        let joined = files
+            .iter()
+            .map(|p| p.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         sections.push(format!("{}\n{}", MARKER_FILES, joined));
     }
 
     if sections.is_empty() {
-        sections.push(format!("{}\n{}", MARKER_USER_INPUT, tr(lang, "status.confirmContinue")));
+        sections.push(format!(
+            "{}\n{}",
+            MARKER_USER_INPUT,
+            tr(lang, "status.confirmContinue")
+        ));
     }
 
     sections.join("\n\n")
@@ -163,8 +172,7 @@ pub fn render_json(
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
             let images = image_paths_per_q.get(i).map(Vec::as_slice).unwrap_or(&[]);
-            let files: Vec<String> =
-                images.iter().chain(ans.files.iter()).cloned().collect();
+            let files: Vec<String> = images.iter().chain(ans.files.iter()).cloned().collect();
 
             // 跳过空回答（与文本侧 is_empty 一致：无选项 / 无输入 / 无附件）。
             if ans.selected_options.is_empty() && user_input.is_none() && files.is_empty() {
@@ -232,12 +240,21 @@ mod tests {
     #[test]
     fn images_render_as_files() {
         let out = send_output(Lang::En, &s(&["A"]), Some("hi"), &s(&["/tmp/a.png"]), &[]);
-        assert_eq!(out, "[selected_options]\nA\n\n[user_input]\nhi\n\n[files]\n/tmp/a.png");
+        assert_eq!(
+            out,
+            "[selected_options]\nA\n\n[user_input]\nhi\n\n[files]\n/tmp/a.png"
+        );
     }
 
     #[test]
     fn images_and_files_merge_into_single_files_block() {
-        let out = send_output(Lang::En, &[], Some("hi"), &s(&["/tmp/a.png"]), &s(&["/tmp/b.md"]));
+        let out = send_output(
+            Lang::En,
+            &[],
+            Some("hi"),
+            &s(&["/tmp/a.png"]),
+            &s(&["/tmp/b.md"]),
+        );
         assert_eq!(out, "[user_input]\nhi\n\n[files]\n/tmp/a.png\n/tmp/b.md");
     }
 
@@ -294,7 +311,10 @@ mod tests {
             Lang::En,
             &[ans(&o1, None, &[], &[]), ans(&[], Some("ok"), &[], &[])],
         );
-        assert_eq!(out, "# Q1\n[selected_options]\nA\n\n---\n\n# Q2\n[user_input]\nok");
+        assert_eq!(
+            out,
+            "# Q1\n[selected_options]\nA\n\n---\n\n# Q2\n[user_input]\nok"
+        );
     }
 
     #[test]
@@ -312,8 +332,10 @@ mod tests {
 
     #[test]
     fn multi_all_unanswered_is_cancel() {
-        let out =
-            aggregate_output(Lang::En, &[ans(&[], None, &[], &[]), ans(&[], Some(" "), &[], &[])]);
+        let out = aggregate_output(
+            Lang::En,
+            &[ans(&[], None, &[], &[]), ans(&[], Some(" "), &[], &[])],
+        );
         assert_eq!(out, cancel_output(Lang::En));
     }
 
@@ -369,14 +391,15 @@ mod tests {
         let result = ChannelResult {
             action: ChannelAction::Send,
             answers: vec![
-                QuestionAnswer::default(),     // Q0 未答
-                answered(&["B"], None, &[]),   // Q1 已答
-                QuestionAnswer::default(),     // Q2 未答
+                QuestionAnswer::default(),   // Q0 未答
+                answered(&["B"], None, &[]), // Q1 已答
+                QuestionAnswer::default(),   // Q2 未答
             ],
             source_channel_id: "slack".into(),
         };
         let v: serde_json::Value =
-            serde_json::from_str(&render_json(&request, &result, &[vec![], vec![], vec![]])).unwrap();
+            serde_json::from_str(&render_json(&request, &result, &[vec![], vec![], vec![]]))
+                .unwrap();
         assert_eq!(v["answers"].as_array().unwrap().len(), 1);
         assert_eq!(v["answers"][0]["question_index"], 1);
     }
@@ -389,9 +412,12 @@ mod tests {
             answers: vec![answered(&[], Some("note"), &["/tmp/b.md"])],
             source_channel_id: "telegram".into(),
         };
-        let v: serde_json::Value =
-            serde_json::from_str(&render_json(&request, &result, &[vec!["/tmp/a.png".into()]]))
-                .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&render_json(
+            &request,
+            &result,
+            &[vec!["/tmp/a.png".into()]],
+        ))
+        .unwrap();
         let files = v["answers"][0]["files"].as_array().unwrap();
         assert_eq!(files[0], "/tmp/a.png");
         assert_eq!(files[1], "/tmp/b.md");

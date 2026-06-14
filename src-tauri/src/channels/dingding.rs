@@ -96,11 +96,8 @@ impl Channel for DingTalkChannel {
             // Own Router 直至会话结束；Shared 的 Router 由 Daemon 持有，不在此处保活。
             let (events, _keep): (RoutedDd, Option<Arc<DdRouter>>) = match transport {
                 DdTransport::Own => {
-                    match DdRouter::connect(
-                        config.client_id.trim(),
-                        config.client_secret.trim(),
-                    )
-                    .await
+                    match DdRouter::connect(config.client_id.trim(), config.client_secret.trim())
+                        .await
                     {
                         Ok(router) => (router.register(), Some(router)),
                         Err(e) => {
@@ -323,10 +320,7 @@ impl MessagingChannel for DingTalkSession {
                             let images = std::mem::take(&mut *images.lock().unwrap());
                             let files = std::mem::take(&mut *files.lock().unwrap());
                             return Some(QuestionAnswer {
-                                selected_options: restore_selected(
-                                    s.selected_indices,
-                                    ctx.options,
-                                ),
+                                selected_options: restore_selected(s.selected_indices, ctx.options),
                                 user_input: s.user_input,
                                 images,
                                 files,
@@ -425,14 +419,9 @@ async fn ask_question_text(
                 if !bot_message_belongs(&data, user_id) {
                     continue;
                 }
-                if let Some(answer) = message_to_answer(
-                    client,
-                    &data,
-                    &option_texts,
-                    ctx.select_only,
-                    ctx.single,
-                )
-                .await
+                if let Some(answer) =
+                    message_to_answer(client, &data, &option_texts, ctx.select_only, ctx.single)
+                        .await
                 {
                     events.clear_active(None, user_id);
                     return Some(answer);
@@ -534,10 +523,7 @@ fn build_question_text(ctx: &QuestionCtx<'_>, is_markdown: bool) -> String {
 }
 
 /// 钉钉卡片模板回传的是选项【下标】(id)；按本题选项还原为原文（越界则忽略）。
-fn restore_selected(
-    indices: Vec<usize>,
-    options: &[crate::models::OptionItem],
-) -> Vec<String> {
+fn restore_selected(indices: Vec<usize>, options: &[crate::models::OptionItem]) -> Vec<String> {
     indices
         .into_iter()
         .filter_map(|i| options.get(i).map(|o| o.text.clone()))
@@ -628,7 +614,8 @@ async fn message_to_answer(
                     eprintln!(
                         "{}{}",
                         i18n::warn_prefix(lang),
-                        i18n::tr(lang, "channel.ddFileDownloadFailed").replace("{e}", &e.to_string())
+                        i18n::tr(lang, "channel.ddFileDownloadFailed")
+                            .replace("{e}", &e.to_string())
                     );
                     None
                 }
@@ -671,7 +658,10 @@ fn parse_reply(text: &str, options: &[String]) -> (Vec<String>, Option<String>) 
 
 /// 判定 bot 消息是否来自目标用户。
 fn bot_message_belongs(data: &Value, user_id: &str) -> bool {
-    data.get("senderStaffId").and_then(|v| v.as_str()).unwrap_or("") == user_id
+    data.get("senderStaffId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        == user_id
 }
 
 /// 下载图片消息并转为 `ImageAttachment`（raw base64 + media_type）。
@@ -773,7 +763,10 @@ mod tests {
 
     #[test]
     fn restore_selected_maps_indices_to_text() {
-        let options = vec![OptionItem::new("继续", true), OptionItem::new("停止", false)];
+        let options = vec![
+            OptionItem::new("继续", true),
+            OptionItem::new("停止", false),
+        ];
         assert_eq!(
             restore_selected(vec![0, 1], &options),
             vec!["继续".to_string(), "停止".to_string()]
@@ -783,6 +776,9 @@ mod tests {
     #[test]
     fn restore_selected_skips_out_of_range() {
         let options = vec![OptionItem::new("A", true)];
-        assert_eq!(restore_selected(vec![0, 5], &options), vec!["A".to_string()]);
+        assert_eq!(
+            restore_selected(vec![0, 5], &options),
+            vec!["A".to_string()]
+        );
     }
 }

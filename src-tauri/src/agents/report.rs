@@ -62,12 +62,23 @@ pub fn run(args: &[String]) {
 }
 
 /// 解析会话 ID：env 专用变量优先，其次 stdin JSON 的若干常见字段。
-fn resolve_session_id(kind: AgentKind, env: &HashMap<String, String>, stdin: Option<&Value>) -> String {
+fn resolve_session_id(
+    kind: AgentKind,
+    env: &HashMap<String, String>,
+    stdin: Option<&Value>,
+) -> String {
     if let Some(s) = detect::session_id_from_env_map(kind, env) {
         return s;
     }
     if let Some(v) = stdin {
-        for key in ["session_id", "sessionId", "conversation_id", "conversationId", "thread_id", "threadId"] {
+        for key in [
+            "session_id",
+            "sessionId",
+            "conversation_id",
+            "conversationId",
+            "thread_id",
+            "threadId",
+        ] {
             if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
                 let s = s.trim();
                 if !s.is_empty() {

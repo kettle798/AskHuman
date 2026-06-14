@@ -105,7 +105,9 @@ pub fn status(kind: AgentKind) -> LifecycleStatus {
 pub fn install(kind: AgentKind) -> Result<String> {
     let exe = exe_path()?;
     match kind {
-        AgentKind::Claude => json_install(kind, &exe, &paths::claude_settings_json(), Shape::Nested)?,
+        AgentKind::Claude => {
+            json_install(kind, &exe, &paths::claude_settings_json(), Shape::Nested)?
+        }
         AgentKind::Cursor => json_install(kind, &exe, &paths::cursor_hooks_json(), Shape::Flat)?,
         AgentKind::Codex => codex_install(&exe)?,
     }
@@ -179,7 +181,9 @@ fn json_status(kind: AgentKind, path: &std::path::Path, shape: Shape) -> Lifecyc
     let mut complete = true;
     for (event_key, lc) in events(kind) {
         let want = hook_command(&exe, kind, lc);
-        let arr = hooks.and_then(|h| h.get(event_key)).and_then(|a| a.as_array());
+        let arr = hooks
+            .and_then(|h| h.get(event_key))
+            .and_then(|a| a.as_array());
         let has_ours = arr
             .map(|a| a.iter().any(|e| elem_has_marker(e, shape)))
             .unwrap_or(false);
@@ -206,7 +210,10 @@ fn elem_cmd_equals(elem: &Value, shape: Shape, want: &str) -> bool {
         Shape::Nested => elem
             .get("hooks")
             .and_then(|h| h.as_array())
-            .map(|arr| arr.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(want)))
+            .map(|arr| {
+                arr.iter()
+                    .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(want))
+            })
             .unwrap_or(false),
         Shape::Flat => elem.get("command").and_then(|c| c.as_str()) == Some(want),
     }
@@ -259,7 +266,9 @@ fn apply_json_install(kind: AgentKind, exe: &str, text: &str, shape: Shape) -> R
                 if let Some(obj) = e.as_object() {
                     match shape {
                         Shape::Nested => {
-                            obj.replace_with(json!({ "hooks": [ { "type": "command", "command": cmd } ] }));
+                            obj.replace_with(
+                                json!({ "hooks": [ { "type": "command", "command": cmd } ] }),
+                            );
                         }
                         Shape::Flat => {
                             obj.replace_with(json!({ "command": cmd }));
@@ -652,15 +661,16 @@ mod tests {
         let v = to_value(&out);
         assert!(v["hooks"].get("SessionStart").is_none(), "空数组应删键");
         assert_eq!(
-            v["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-            "x/askhuman-timeout.sh",
+            v["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "x/askhuman-timeout.sh",
             "timeout hook 应保留"
         );
     }
 
     #[test]
     fn parse_error_aborts() {
-        assert!(apply_json_install(AgentKind::Claude, EXE, "{ \"hooks\": ", Shape::Nested).is_err());
+        assert!(
+            apply_json_install(AgentKind::Claude, EXE, "{ \"hooks\": ", Shape::Nested).is_err()
+        );
         assert!(apply_json_uninstall("{ \"hooks\": ", Shape::Nested).is_err());
     }
 

@@ -10,18 +10,18 @@ use crate::channels::telegram::TelegramChannel;
 use crate::channels::Channel;
 use crate::cli::{image_writer, output};
 use crate::config::{AppConfig, ThemeMode, WindowEffect};
-use crate::i18n::{self, Lang};
 use crate::dingtalk::client::DingTalkClient;
 use crate::feishu::client::FeishuClient;
-use crate::slack::client::SlackClient;
+use crate::i18n::{self, Lang};
 use crate::models::{AskRequest, ChannelAction, ChannelResult, QuestionAnswer};
+use crate::slack::client::SlackClient;
 use crate::telegram::TelegramClient;
 use coordinator::Coordinator;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 #[cfg(target_os = "macos")]
 use tauri::window::{Effect, EffectState, EffectsBuilder};
+use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 /// 运行时只读状态：供 popup_init 拉取请求内容与主题。
 pub struct AppState {
@@ -40,7 +40,9 @@ enum View {
     Popup,
     Settings,
     /// 独立历史窗口；`all` 为 true 时默认展示全部项目。
-    History { all: bool },
+    History {
+        all: bool,
+    },
     /// Agent 生命周期状态窗口（实验性功能，spec D13）：订阅 daemon 推送，动态更新。
     #[cfg(unix)]
     Agents,
@@ -133,7 +135,9 @@ pub fn run_ask(request: AskRequest, config: AppConfig) -> ! {
         run_headless(request, config);
     } else {
         let reason = match (popup_wanted, &gui) {
-            (true, Err(r)) => i18n::tr(lang, "app.popupUnavailableNoChannel").replace("{reason}", r),
+            (true, Err(r)) => {
+                i18n::tr(lang, "app.popupUnavailableNoChannel").replace("{reason}", r)
+            }
             (false, _) => i18n::tr(lang, "app.popupDisabledNoChannel").to_string(),
             (true, Ok(())) => unreachable!(),
         };
@@ -150,8 +154,12 @@ pub fn run_ask(request: AskRequest, config: AppConfig) -> ! {
 pub(crate) fn is_telegram_active(config: &AppConfig) -> bool {
     let tg = &config.channels.telegram;
     tg.enabled
-        && TelegramClient::new(tg.bot_token.clone(), tg.chat_id.clone(), tg.api_base_url.clone())
-            .is_ok()
+        && TelegramClient::new(
+            tg.bot_token.clone(),
+            tg.chat_id.clone(),
+            tg.api_base_url.clone(),
+        )
+        .is_ok()
 }
 
 /// 钉钉是否已配置且可用（构造 client 成功——即三项非空——即视为可用）。
@@ -163,17 +171,13 @@ pub(crate) fn is_dingding_active(config: &AppConfig) -> bool {
 /// 飞书是否已配置且可用（构造 client 成功且 open_id 非空——即四项齐备——即视为可用）。
 pub(crate) fn is_feishu_active(config: &AppConfig) -> bool {
     let fs = &config.channels.feishu;
-    fs.enabled
-        && !fs.open_id.trim().is_empty()
-        && FeishuClient::new(fs).is_ok()
+    fs.enabled && !fs.open_id.trim().is_empty() && FeishuClient::new(fs).is_ok()
 }
 
 /// Slack 是否已配置且可用（构造 client 成功——双 token 齐备——且 user_id 非空即视为可用）。
 pub(crate) fn is_slack_active(config: &AppConfig) -> bool {
     let sl = &config.channels.slack;
-    sl.enabled
-        && !sl.user_id.trim().is_empty()
-        && SlackClient::new(sl).is_ok()
+    sl.enabled && !sl.user_id.trim().is_empty() && SlackClient::new(sl).is_ok()
 }
 
 /// 是否存在任一可用的会话型消息渠道。
@@ -188,10 +192,14 @@ fn has_active_messaging(config: &AppConfig) -> bool {
 fn active_messaging_channels(config: &AppConfig) -> Vec<Arc<dyn Channel>> {
     let mut channels: Vec<Arc<dyn Channel>> = Vec::new();
     if is_telegram_active(config) {
-        channels.push(Arc::new(TelegramChannel::new(config.channels.telegram.clone())));
+        channels.push(Arc::new(TelegramChannel::new(
+            config.channels.telegram.clone(),
+        )));
     }
     if is_dingding_active(config) {
-        channels.push(Arc::new(DingTalkChannel::new(config.channels.dingding.clone())));
+        channels.push(Arc::new(DingTalkChannel::new(
+            config.channels.dingding.clone(),
+        )));
     }
     if is_feishu_active(config) {
         channels.push(Arc::new(FeishuChannel::new(config.channels.feishu.clone())));
@@ -568,7 +576,11 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
     let always_on_top = state.config.general.always_on_top;
     let window_effect = state.config.general.window_effect;
     #[cfg(target_os = "macos")]
-    let appear_behavior = state.config.general.appear_animation.ns_animation_behavior();
+    let appear_behavior = state
+        .config
+        .general
+        .appear_animation
+        .ns_animation_behavior();
 
     // GUI Helper 模式（Daemon 拉起的弹窗进程）：弹窗是唯一渠道，恒显示窗口；作答经 IPC 回 Daemon。
     let is_helper = popup_ipc.is_some();
@@ -598,6 +610,8 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::save_settings,
             crate::commands::get_prompt,
             crate::commands::open_test_popup,
+            crate::commands::popup_sound_support,
+            crate::commands::play_popup_sound,
             crate::commands::set_theme,
             crate::commands::update_theme,
             crate::commands::open_settings,
@@ -729,6 +743,8 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                             apply_liquid_glass(&win);
                         }
                         let _ = win.show();
+                        // Play the configured popup sound after the window becomes visible.
+                        crate::sound::play(&app.state::<AppState>().config.general.popup_sound);
                         // GUI Helper 由 Daemon 拉起，可能不自动获焦 → 尽力前置。
                         if is_helper {
                             let _ = win.set_focus();
@@ -765,7 +781,9 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                                         }
                                         // 配置实时变更（A12）：转发给前端实时切主题/语言。
                                         // 复用既有 "settings-updated" 事件（前端已监听 general 配置）。
-                                        Ok(Some(crate::ipc::ServerMsg::ConfigChanged { general })) => {
+                                        Ok(Some(crate::ipc::ServerMsg::ConfigChanged {
+                                            general,
+                                        })) => {
                                             use tauri::Emitter;
                                             // 先同步原生窗口外观：玻璃/毛玻璃材质随 NSAppearance 切换，
                                             // 仅靠前端 CSS 会出现「网页变浅、窗体仍深」（见 A12 实测）。
@@ -1197,8 +1215,8 @@ fn watch_history_file<R: tauri::Runtime>(window: tauri::WebviewWindow<R>) {
         let dir = crate::paths::config_dir();
         let _ = std::fs::create_dir_all(&dir);
         let (tx, rx) = channel::<()>();
-        let mut watcher = match notify::recommended_watcher(
-            move |res: notify::Result<notify::Event>| {
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 if let Ok(ev) = res {
                     let hit = ev
                         .paths
@@ -1208,11 +1226,10 @@ fn watch_history_file<R: tauri::Runtime>(window: tauri::WebviewWindow<R>) {
                         let _ = tx.send(());
                     }
                 }
-            },
-        ) {
-            Ok(w) => w,
-            Err(_) => return,
-        };
+            }) {
+                Ok(w) => w,
+                Err(_) => return,
+            };
         if watcher.watch(&dir, RecursiveMode::NonRecursive).is_err() {
             return;
         }
@@ -1354,8 +1371,8 @@ fn persist_popup_size(window: &tauri::Window) {
 /// macOS / Windows 使用系统 WebView，默认视为可用。
 #[cfg(target_os = "linux")]
 fn gui_available(lang: Lang) -> Result<(), String> {
-    let has_display = std::env::var_os("DISPLAY").is_some()
-        || std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let has_display =
+        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
     if !has_display {
         return Err(i18n::tr(lang, "app.noDisplay").to_string());
     }
@@ -1408,8 +1425,10 @@ mod stderr_redirect {
             if saved < 0 {
                 return;
             }
-            let devnull =
-                libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_WRONLY);
+            let devnull = libc::open(
+                b"/dev/null\0".as_ptr() as *const libc::c_char,
+                libc::O_WRONLY,
+            );
             if devnull < 0 {
                 libc::close(saved);
                 return;

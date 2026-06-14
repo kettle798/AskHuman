@@ -37,7 +37,10 @@ pub async fn get_token(
         }
     }
 
-    let url = format!("{}/open-apis/auth/v3/tenant_access_token/internal", base_url);
+    let url = format!(
+        "{}/open-apis/auth/v3/tenant_access_token/internal",
+        base_url
+    );
     let resp = http
         .post(&url)
         .json(&serde_json::json!({ "app_id": app_id, "app_secret": app_secret }))

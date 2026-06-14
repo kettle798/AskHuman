@@ -181,7 +181,8 @@ impl TelegramClient {
 
     /// 以文档形式发送文件。
     pub async fn send_document(&self, path: &str, filename: &str) -> Result<i64, TelegramError> {
-        self.send_file("sendDocument", "document", path, filename).await
+        self.send_file("sendDocument", "document", path, filename)
+            .await
     }
 
     /// 以图片形式发送文件（可内联预览）。

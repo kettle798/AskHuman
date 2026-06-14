@@ -157,10 +157,11 @@ pub fn reveal() {
     #[cfg(target_os = "linux")]
     {
         // 无“选中”语义，定位到所在目录。
-        let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or(path.clone());
-        let _ = std::process::Command::new("xdg-open")
-            .arg(dir)
-            .spawn();
+        let dir = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or(path.clone());
+        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
     }
     #[cfg(target_os = "windows")]
     {

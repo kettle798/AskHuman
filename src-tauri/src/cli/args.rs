@@ -137,8 +137,9 @@ pub fn parse_ask(
                     "text" => crate::models::OutputFormat::Text,
                     "json" => crate::models::OutputFormat::Json,
                     other => {
-                        return Err(tr(lang, "cli.unsupportedOutputFormat")
-                            .replace("{value}", other))
+                        return Err(
+                            tr(lang, "cli.unsupportedOutputFormat").replace("{value}", other)
+                        )
                     }
                 };
                 i += 2;
@@ -211,7 +212,10 @@ mod tests {
     fn o(items: &[&str]) -> Vec<OptArg> {
         items
             .iter()
-            .map(|s| OptArg { text: s.to_string(), recommended: false })
+            .map(|s| OptArg {
+                text: s.to_string(),
+                recommended: false,
+            })
             .collect()
     }
 
@@ -230,7 +234,13 @@ mod tests {
         let a = pa(&v(&["X"])).unwrap();
         let b = pa(&v(&["-q", "X"])).unwrap();
         assert_eq!(a.message_text, "");
-        assert_eq!(a.questions, vec![QuestionArgs { message: "X".into(), options: vec![] }]);
+        assert_eq!(
+            a.questions,
+            vec![QuestionArgs {
+                message: "X".into(),
+                options: vec![]
+            }]
+        );
         assert_eq!(a.questions, b.questions);
         assert_eq!(b.message_text, "");
         assert!(a.is_markdown);
@@ -240,7 +250,13 @@ mod tests {
     fn single_with_options_promoted() {
         let p = pa(&v(&["X", "-o", "A", "--option", "B"])).unwrap();
         assert_eq!(p.message_text, "");
-        assert_eq!(p.questions, vec![QuestionArgs { message: "X".into(), options: o(&["A", "B"]) }]);
+        assert_eq!(
+            p.questions,
+            vec![QuestionArgs {
+                message: "X".into(),
+                options: o(&["A", "B"])
+            }]
+        );
     }
 
     #[test]
@@ -250,8 +266,14 @@ mod tests {
         assert_eq!(
             p.questions[0].options,
             vec![
-                OptArg { text: "A".into(), recommended: true },
-                OptArg { text: "B".into(), recommended: false },
+                OptArg {
+                    text: "A".into(),
+                    recommended: true
+                },
+                OptArg {
+                    text: "B".into(),
+                    recommended: false
+                },
             ]
         );
     }
@@ -259,13 +281,33 @@ mod tests {
     #[test]
     fn recommended_long_form_and_multiple() {
         // --option! 与 -o! 等价；一题允许多个推荐。
-        let p = pa(&v(&["M", "-q", "Q1", "--option!", "A", "-o!", "B", "-o", "C"])).unwrap();
+        let p = pa(&v(&[
+            "M",
+            "-q",
+            "Q1",
+            "--option!",
+            "A",
+            "-o!",
+            "B",
+            "-o",
+            "C",
+        ]))
+        .unwrap();
         assert_eq!(
             p.questions[0].options,
             vec![
-                OptArg { text: "A".into(), recommended: true },
-                OptArg { text: "B".into(), recommended: true },
-                OptArg { text: "C".into(), recommended: false },
+                OptArg {
+                    text: "A".into(),
+                    recommended: true
+                },
+                OptArg {
+                    text: "B".into(),
+                    recommended: true
+                },
+                OptArg {
+                    text: "C".into(),
+                    recommended: false
+                },
             ]
         );
     }
@@ -293,19 +335,34 @@ mod tests {
         let p = pa(&v(&["X", "-f", "f.png"])).unwrap();
         assert_eq!(p.message_text, "");
         assert_eq!(p.message_files, v(&["f.png"]));
-        assert_eq!(p.questions, vec![QuestionArgs { message: "X".into(), options: vec![] }]);
+        assert_eq!(
+            p.questions,
+            vec![QuestionArgs {
+                message: "X".into(),
+                options: vec![]
+            }]
+        );
     }
 
     #[test]
     fn multi_message_and_questions() {
-        let p = pa(&v(&[
-            "M", "-q", "Q1", "-o", "A", "-q", "Q2", "-o", "B",
-        ]))
-        .unwrap();
+        let p = pa(&v(&["M", "-q", "Q1", "-o", "A", "-q", "Q2", "-o", "B"])).unwrap();
         assert_eq!(p.message_text, "M");
         assert_eq!(p.questions.len(), 2);
-        assert_eq!(p.questions[0], QuestionArgs { message: "Q1".into(), options: o(&["A"]) });
-        assert_eq!(p.questions[1], QuestionArgs { message: "Q2".into(), options: o(&["B"]) });
+        assert_eq!(
+            p.questions[0],
+            QuestionArgs {
+                message: "Q1".into(),
+                options: o(&["A"])
+            }
+        );
+        assert_eq!(
+            p.questions[1],
+            QuestionArgs {
+                message: "Q2".into(),
+                options: o(&["B"])
+            }
+        );
     }
 
     #[test]
@@ -385,7 +442,13 @@ mod tests {
     fn stdin_is_shared_message_with_q() {
         let p = pas(&v(&["--stdin", "-q", "Q1"]), "MSG").unwrap();
         assert_eq!(p.message_text, "MSG");
-        assert_eq!(p.questions, vec![QuestionArgs { message: "Q1".into(), options: vec![] }]);
+        assert_eq!(
+            p.questions,
+            vec![QuestionArgs {
+                message: "Q1".into(),
+                options: vec![]
+            }]
+        );
     }
 
     #[test]
@@ -395,7 +458,10 @@ mod tests {
         assert_eq!(p.message_text, "");
         assert_eq!(
             p.questions,
-            vec![QuestionArgs { message: "the only question body".into(), options: vec![] }]
+            vec![QuestionArgs {
+                message: "the only question body".into(),
+                options: vec![]
+            }]
         );
     }
 
@@ -437,7 +503,16 @@ mod tests {
     #[test]
     fn parses_select_only_single_and_output_json() {
         let p = pa(&v(&[
-            "-q", "Q1", "-o", "A", "-o", "B", "--select-only", "--single", "--output", "json",
+            "-q",
+            "Q1",
+            "-o",
+            "A",
+            "-o",
+            "B",
+            "--select-only",
+            "--single",
+            "--output",
+            "json",
         ]))
         .unwrap();
         assert!(p.select_only);
@@ -448,7 +523,16 @@ mod tests {
     #[test]
     fn flags_are_position_free() {
         // 全局开关位置自由（题前/题后均可）。
-        let p = pa(&v(&["--single", "M", "-q", "Q1", "-o", "A", "--select-only"])).unwrap();
+        let p = pa(&v(&[
+            "--single",
+            "M",
+            "-q",
+            "Q1",
+            "-o",
+            "A",
+            "--select-only",
+        ]))
+        .unwrap();
         assert!(p.single);
         assert!(p.select_only);
     }
@@ -479,7 +563,18 @@ mod tests {
 
     #[test]
     fn select_only_with_options_ok() {
-        let p = pa(&v(&["-q", "Q1", "-o", "A", "-q", "Q2", "-o", "B", "--select-only"])).unwrap();
+        let p = pa(&v(&[
+            "-q",
+            "Q1",
+            "-o",
+            "A",
+            "-q",
+            "Q2",
+            "-o",
+            "B",
+            "--select-only",
+        ]))
+        .unwrap();
         assert!(p.select_only);
         assert_eq!(p.questions.len(), 2);
     }

@@ -122,6 +122,10 @@ export default {
       effectGlass: "Glass",
       effectBlur: "Blur",
       appearAnimation: "Appear animation",
+      sound: "Sound",
+      soundOff: "Off",
+      soundOn: "On",
+      soundPreview: "Preview",
       testPopup: "Open test popup",
     },
     speech: {

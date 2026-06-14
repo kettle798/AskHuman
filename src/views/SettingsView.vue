@@ -36,6 +36,8 @@ import {
   historyCount,
   openPath,
   openTestPopup,
+  playPopupSound,
+  popupSoundSupport,
   restartSettings,
   saveSettings,
   setTheme,
@@ -68,6 +70,7 @@ import type {
   HookStatus,
   LifecycleStatus,
   PopupAnimation,
+  PopupSoundSupport,
   RuleStatus,
   SecretAction,
   SecretActions,
@@ -372,6 +375,22 @@ async function changeAnimation(anim: PopupAnimation) {
   if (!config.value) return;
   config.value.general.appearAnimation = anim;
   await persist();
+}
+
+// Popup sound support: named choices on macOS, toggle on Linux, hidden otherwise.
+const soundSupport = ref<PopupSoundSupport>({ kind: "none", names: [] });
+
+async function changePopupSound(value: string) {
+  if (!config.value) return;
+  config.value.general.popupSound = value;
+  await persist();
+  // Preview immediately after selecting a non-empty sound.
+  if (value) playPopupSound(value).catch(() => {});
+}
+
+function previewSound() {
+  const name = config.value?.general.popupSound;
+  if (name) playPopupSound(name).catch(() => {});
 }
 
 // 当前历史总条数（用于「超额」提示与「立即清理」）。
@@ -897,6 +916,11 @@ onMounted(async () => {
   );
   prompt.value = await getPrompt();
   historyTotal.value = await historyCount();
+  try {
+    soundSupport.value = await popupSoundSupport();
+  } catch {
+    soundSupport.value = { kind: "none", names: [] };
+  }
   await refreshHook();
   await refreshClaudeHook();
   await Promise.all(AGENTS.map((a) => refreshRule(a.id)));
@@ -1186,6 +1210,33 @@ onBeforeUnmount(() => unlistenProgress?.());
                   Alert
                 </button>
               </div>
+            </div>
+          </template>
+          <template v-if="soundSupport.kind !== 'none'">
+            <hr class="divider" />
+            <div class="row">
+              <span class="label">{{ t("settings.popupBehavior.sound") }}</span>
+              <span class="spacer"></span>
+              <select
+                class="select"
+                :value="config.general.popupSound"
+                @change="changePopupSound(($event.target as HTMLSelectElement).value)"
+              >
+                <option value="">{{ t("settings.popupBehavior.soundOff") }}</option>
+                <template v-if="soundSupport.kind === 'named'">
+                  <option v-for="n in soundSupport.names" :key="n" :value="n">{{ n }}</option>
+                </template>
+                <option v-else value="default">{{ t("settings.popupBehavior.soundOn") }}</option>
+              </select>
+              <button
+                class="btn"
+                type="button"
+                style="margin-left: 6px"
+                :disabled="!config.general.popupSound"
+                @click="previewSound"
+              >
+                {{ t("settings.popupBehavior.soundPreview") }}
+              </button>
             </div>
           </template>
           <hr class="divider" />

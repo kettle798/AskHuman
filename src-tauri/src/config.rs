@@ -96,6 +96,10 @@ pub struct GeneralConfig {
     pub speech_shortcut: String,
     /// 回复历史保留条数上限。默认 200；`0` 表示停止新增记录（但保留并仍可查看旧记录）。
     pub history_limit: u32,
+    /// Built-in sound played when a popup appears. Empty string disables it.
+    /// macOS stores a sound name, such as "Glass"; Linux treats any non-empty
+    /// value as enabled and plays a freedesktop notification sound.
+    pub popup_sound: String,
 }
 
 /// 回复历史默认保留条数。
@@ -114,6 +118,7 @@ impl Default for GeneralConfig {
             speech_language: "auto".to_string(),
             speech_shortcut: "cmd+d".to_string(),
             history_limit: default_history_limit(),
+            popup_sound: String::new(),
         }
     }
 }
@@ -470,22 +475,22 @@ mod tests {
         assert!(c.channels.popup.remember_size);
         assert!(!c.channels.telegram.enabled);
         assert_eq!(c.channels.telegram.api_base_url, "https://api.telegram.org");
-    assert!(!c.channels.dingding.enabled);
-    assert!(c.channels.dingding.client_id.is_empty());
-    assert!(c.channels.dingding.card_template_id.is_empty());
-    // 文本附件预览开关默认开启。
-    assert!(c.channels.dingding.inline_small_text);
-    assert!(c.channels.dingding.convert_text_to_docx);
-    // 飞书默认未启用、字段为空、域名为飞书国内。
-    assert!(!c.channels.feishu.enabled);
-    assert!(c.channels.feishu.app_id.is_empty());
-    assert_eq!(c.channels.feishu.base_url, "https://open.feishu.cn");
-    // Slack 默认未启用、字段为空。
-    assert!(!c.channels.slack.enabled);
-    assert!(c.channels.slack.bot_token.is_empty());
-    assert!(c.channels.slack.app_token.is_empty());
-    assert!(c.channels.slack.user_id.is_empty());
-}
+        assert!(!c.channels.dingding.enabled);
+        assert!(c.channels.dingding.client_id.is_empty());
+        assert!(c.channels.dingding.card_template_id.is_empty());
+        // 文本附件预览开关默认开启。
+        assert!(c.channels.dingding.inline_small_text);
+        assert!(c.channels.dingding.convert_text_to_docx);
+        // 飞书默认未启用、字段为空、域名为飞书国内。
+        assert!(!c.channels.feishu.enabled);
+        assert!(c.channels.feishu.app_id.is_empty());
+        assert_eq!(c.channels.feishu.base_url, "https://open.feishu.cn");
+        // Slack 默认未启用、字段为空。
+        assert!(!c.channels.slack.enabled);
+        assert!(c.channels.slack.bot_token.is_empty());
+        assert!(c.channels.slack.app_token.is_empty());
+        assert!(c.channels.slack.user_id.is_empty());
+    }
 
     #[test]
     fn missing_file_returns_default() {

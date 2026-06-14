@@ -143,7 +143,8 @@ unsafe fn ensure_controller(app: &AppHandle, window: usize) -> Retained<Controll
     let controller = match existing {
         Some(c) => c,
         None => {
-            let mtm = MainThreadMarker::new().expect("ensure_controller must run on the main thread");
+            let mtm =
+                MainThreadMarker::new().expect("ensure_controller must run on the main thread");
             let c = Controller::new(app.clone(), mtm);
             CONTROLLER.with(|cell| *cell.borrow_mut() = Some(c.clone()));
             c

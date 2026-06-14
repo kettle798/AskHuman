@@ -31,7 +31,11 @@ pub struct QuestionCtx<'a> {
 /// 仅用于各渠道展示；提交值（`selected_options`）必须用 `opt.text` 原文。
 pub fn display_text(opt: &OptionItem, lang: Lang) -> String {
     if opt.recommended {
-        format!("{}{}", i18n::tr(lang, "channel.recommendedPrefix"), opt.text)
+        format!(
+            "{}{}",
+            i18n::tr(lang, "channel.recommendedPrefix"),
+            opt.text
+        )
     } else {
         opt.text.clone()
     }
@@ -73,8 +77,7 @@ pub async fn run_conversation(
     sink: ResultSink,
 ) {
     let n = request.questions.len();
-    let has_message =
-        !request.message.text.trim().is_empty() || !request.message.files.is_empty();
+    let has_message = !request.message.text.trim().is_empty() || !request.message.files.is_empty();
     let source = crate::models::source_name();
     let lang = Lang::current();
     let mut answers: Vec<QuestionAnswer> = Vec::with_capacity(n);

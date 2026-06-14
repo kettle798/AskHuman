@@ -39,7 +39,9 @@ async fn connect_split() -> std::io::Result<(Reader, OwnedWriteHalf)> {
 /// 连一次并握手，返回握手状态（连不上返回 None）。
 async fn hello_status() -> Option<HelloStatus> {
     let (mut reader, mut writer) = connect_split().await.ok()?;
-    ipc::write_msg(&mut writer, &ClientMsg::Hello(hello())).await.ok()?;
+    ipc::write_msg(&mut writer, &ClientMsg::Hello(hello()))
+        .await
+        .ok()?;
     match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
         Ok(Some(ServerMsg::HelloAck(ack))) => Some(ack.status),
         _ => None,
@@ -94,7 +96,10 @@ pub async fn request_stop(force: bool) -> bool {
     let Ok((mut reader, mut writer)) = connect_split().await else {
         return false;
     };
-    if ipc::write_msg(&mut writer, &ClientMsg::Stop { force }).await.is_err() {
+    if ipc::write_msg(&mut writer, &ClientMsg::Stop { force })
+        .await
+        .is_err()
+    {
         return false;
     }
     matches!(
@@ -149,7 +154,10 @@ pub async fn request_detect(req: DetectRequest) -> Option<Result<String, String>
         return None;
     }
     let (mut reader, mut writer) = connect_split().await.ok()?;
-    if ipc::write_msg(&mut writer, &ClientMsg::Hello(hello())).await.is_err() {
+    if ipc::write_msg(&mut writer, &ClientMsg::Hello(hello()))
+        .await
+        .is_err()
+    {
         return None;
     }
     match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
@@ -158,7 +166,10 @@ pub async fn request_detect(req: DetectRequest) -> Option<Result<String, String>
         _ => return None,
     }
     // 握手 OK 后发 Detect；此后的失败都视作「Daemon 已接管」的结果，不再回退。
-    if ipc::write_msg(&mut writer, &ClientMsg::Detect(req)).await.is_err() {
+    if ipc::write_msg(&mut writer, &ClientMsg::Detect(req))
+        .await
+        .is_err()
+    {
         return Some(Err("failed to send detect request".to_string()));
     }
     loop {
@@ -201,7 +212,9 @@ pub async fn open_for_subscribe() -> std::io::Result<(Reader, OwnedWriteHalf)> {
 pub async fn request_agents_snapshot() -> Option<serde_json::Value> {
     ensure_running().await.ok()?;
     let (mut reader, mut writer) = connect_split().await.ok()?;
-    ipc::write_msg(&mut writer, &ClientMsg::Hello(hello())).await.ok()?;
+    ipc::write_msg(&mut writer, &ClientMsg::Hello(hello()))
+        .await
+        .ok()?;
     // 等握手 Ok（忽略期间其它消息）。
     loop {
         match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
@@ -210,7 +223,9 @@ pub async fn request_agents_snapshot() -> Option<serde_json::Value> {
             _ => return None,
         }
     }
-    ipc::write_msg(&mut writer, &ClientMsg::AgentsSubscribe).await.ok()?;
+    ipc::write_msg(&mut writer, &ClientMsg::AgentsSubscribe)
+        .await
+        .ok()?;
     loop {
         match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
             Ok(Some(ServerMsg::AgentsState { agents })) => return Some(agents),
@@ -255,7 +270,10 @@ async fn run_ask_async(task: crate::ipc::TaskRequest) -> i32 {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 continue;
             };
-            if ipc::write_msg(&mut writer, &ClientMsg::Hello(hello())).await.is_err() {
+            if ipc::write_msg(&mut writer, &ClientMsg::Hello(hello()))
+                .await
+                .is_err()
+            {
                 continue;
             }
             match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
@@ -273,7 +291,10 @@ async fn run_ask_async(task: crate::ipc::TaskRequest) -> i32 {
                 _ => continue,
             }
             // 提交任务。
-            if ipc::write_msg(&mut writer, &ClientMsg::Submit(task.clone())).await.is_err() {
+            if ipc::write_msg(&mut writer, &ClientMsg::Submit(task.clone()))
+                .await
+                .is_err()
+            {
                 continue;
             }
             // 流式取回：Warn → stderr；Final → stdout + 退出码；中途断连 → 退出码 3（P4）。

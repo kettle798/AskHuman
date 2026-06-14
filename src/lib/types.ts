@@ -153,6 +153,14 @@ export interface GeneralConfig {
   speechShortcut: string;
   /** 回复历史保留条数上限。默认 200；0 = 停止新增记录（但保留旧记录）。 */
   historyLimit: number;
+  /** Built-in popup sound. Empty disables it; macOS stores a name, Linux uses a toggle. */
+  popupSound: string;
+}
+
+/** Popup sound support: kind="named" with names, "toggle", or "none". */
+export interface PopupSoundSupport {
+  kind: "named" | "toggle" | "none";
+  names: string[];
 }
 
 export interface PopupChannelConfig {

@@ -69,7 +69,11 @@ pub fn build_question_card(
     }
 
     // 选项控件：单选用 radio_buttons、多选用 checkboxes；均按 10 个一组拆成多个 input 块。
-    let element_type = if single { "radio_buttons" } else { "checkboxes" };
+    let element_type = if single {
+        "radio_buttons"
+    } else {
+        "checkboxes"
+    };
     if !options.is_empty() {
         for (k, chunk) in options.chunks(CHECKBOXES_MAX).enumerate() {
             let base = k * CHECKBOXES_MAX;
@@ -218,7 +222,12 @@ pub fn parse_submit(payload: &Value, options: &[OptionItem]) -> Option<CardSubmi
         .get("container")
         .and_then(|c| c.get("message_ts"))
         .and_then(|v| v.as_str())
-        .or_else(|| payload.get("message").and_then(|m| m.get("ts")).and_then(|v| v.as_str()))
+        .or_else(|| {
+            payload
+                .get("message")
+                .and_then(|m| m.get("ts"))
+                .and_then(|v| v.as_str())
+        })
         .unwrap_or("")
         .to_string();
     let channel_id = payload
@@ -389,7 +398,18 @@ mod tests {
     #[test]
     fn single_renders_radio_buttons() {
         let card = build_question_card(
-            "t", "x", &plain(&["a", "b"]), false, true, false, "L", "N", "p", "S", "R", "n",
+            "t",
+            "x",
+            &plain(&["a", "b"]),
+            false,
+            true,
+            false,
+            "L",
+            "N",
+            "p",
+            "S",
+            "R",
+            "n",
         );
         let bs = blocks(&card);
         assert!(bs.iter().any(|b| b["element"]["type"] == "radio_buttons"));
@@ -399,18 +419,45 @@ mod tests {
     #[test]
     fn select_only_omits_text_input() {
         let card = build_question_card(
-            "t", "x", &plain(&["a", "b"]), false, false, true, "L", "N", "p", "S", "R", "n",
+            "t",
+            "x",
+            &plain(&["a", "b"]),
+            false,
+            false,
+            true,
+            "L",
+            "N",
+            "p",
+            "S",
+            "R",
+            "n",
         );
         let bs = blocks(&card);
-        assert!(!bs.iter().any(|b| b["element"]["type"] == "plain_text_input"));
+        assert!(!bs
+            .iter()
+            .any(|b| b["element"]["type"] == "plain_text_input"));
         assert!(bs.iter().any(|b| b["element"]["type"] == "checkboxes"));
     }
 
     #[test]
     fn recommended_option_bolds_text_and_adds_description() {
-        let opts = vec![OptionItem::new("继续", true), OptionItem::new("停止", false)];
+        let opts = vec![
+            OptionItem::new("继续", true),
+            OptionItem::new("停止", false),
+        ];
         let card = build_question_card(
-            "t", "x", &opts, false, false, false, "L", "N", "p", "S", "👍 推荐", "n",
+            "t",
+            "x",
+            &opts,
+            false,
+            false,
+            false,
+            "L",
+            "N",
+            "p",
+            "S",
+            "👍 推荐",
+            "n",
         );
         let checkboxes = blocks(&card)
             .iter()
@@ -428,15 +475,42 @@ mod tests {
 
     #[test]
     fn title_rendered_as_header_with_question_icon() {
-        let card =
-            build_question_card("继续吗", "正文", &[], false, false, false, "L", "N", "p", "S", "R", "n");
-        let header = blocks(&card).iter().find(|b| b["type"] == "header").unwrap();
+        let card = build_question_card(
+            "继续吗",
+            "正文",
+            &[],
+            false,
+            false,
+            false,
+            "L",
+            "N",
+            "p",
+            "S",
+            "R",
+            "n",
+        );
+        let header = blocks(&card)
+            .iter()
+            .find(|b| b["type"] == "header")
+            .unwrap();
         assert_eq!(header["text"]["type"], "plain_text");
         assert!(header["text"]["text"].as_str().unwrap().starts_with("❓ "));
         // 超长标题回退为普通加粗 section（不致 Slack 报错）。
         let long: String = "题".repeat(200);
-        let card2 =
-            build_question_card(&long, "", &[], false, false, false, "L", "N", "p", "S", "R", "n");
+        let card2 = build_question_card(
+            &long,
+            "",
+            &[],
+            false,
+            false,
+            false,
+            "L",
+            "N",
+            "p",
+            "S",
+            "R",
+            "n",
+        );
         assert!(!blocks(&card2).iter().any(|b| b["type"] == "header"));
     }
 
@@ -444,10 +518,32 @@ mod tests {
     fn input_block_ids_carry_nonce() {
         // 唯一 nonce 应拼入各 input 块 block_id（清除 Slack 跨卡片输入缓存）。
         let a = build_question_card(
-            "t", "x", &plain(&["o"]), false, false, false, "L", "N", "p", "S", "R", "AAA",
+            "t",
+            "x",
+            &plain(&["o"]),
+            false,
+            false,
+            false,
+            "L",
+            "N",
+            "p",
+            "S",
+            "R",
+            "AAA",
         );
         let b = build_question_card(
-            "t", "x", &plain(&["o"]), false, false, false, "L", "N", "p", "S", "R", "BBB",
+            "t",
+            "x",
+            &plain(&["o"]),
+            false,
+            false,
+            false,
+            "L",
+            "N",
+            "p",
+            "S",
+            "R",
+            "BBB",
         );
         let id_of = |card: &Value, typ: &str| -> String {
             blocks(card)
@@ -466,8 +562,9 @@ mod tests {
 
     #[test]
     fn options_split_into_chunks_of_ten() {
-        let options: Vec<OptionItem> =
-            (0..23).map(|i| OptionItem::new(format!("o{}", i), false)).collect();
+        let options: Vec<OptionItem> = (0..23)
+            .map(|i| OptionItem::new(format!("o{}", i), false))
+            .collect();
         let card = build_question_card(
             "t", "x", &options, false, false, false, "Options", "Note", "ph", "Submit", "R", "n",
         );
@@ -477,18 +574,34 @@ mod tests {
             .filter(|b| b["element"]["type"] == "checkboxes")
             .collect();
         assert_eq!(checkbox_blocks.len(), 3); // 10 + 10 + 3
-        // 第三块第一项的全局下标应为 20。
-        assert_eq!(checkbox_blocks[2]["element"]["options"][0]["value"], "opt_20");
+                                              // 第三块第一项的全局下标应为 20。
+        assert_eq!(
+            checkbox_blocks[2]["element"]["options"][0]["value"],
+            "opt_20"
+        );
     }
 
     #[test]
     fn build_card_without_options_omits_checkboxes() {
         let card = build_question_card(
-            "", "随便说点什么", &[], false, false, false, "Options", "Note", "ph", "Submit", "R", "n",
+            "",
+            "随便说点什么",
+            &[],
+            false,
+            false,
+            false,
+            "Options",
+            "Note",
+            "ph",
+            "Submit",
+            "R",
+            "n",
         );
         let bs = blocks(&card);
         assert!(!bs.iter().any(|b| b["element"]["type"] == "checkboxes"));
-        assert!(bs.iter().any(|b| b["element"]["type"] == "plain_text_input"));
+        assert!(bs
+            .iter()
+            .any(|b| b["element"]["type"] == "plain_text_input"));
     }
 
     #[test]
@@ -574,10 +687,17 @@ mod tests {
         });
         let bs = blocks(&card);
         // 无任何交互控件。
-        assert!(!bs.iter().any(|b| b["type"] == "actions" || b["type"] == "input"));
+        assert!(!bs
+            .iter()
+            .any(|b| b["type"] == "actions" || b["type"] == "input"));
         // 含勾选回显 + 补充文字 + 状态 context。
-        assert!(bs.iter().any(|b| b["text"]["text"].as_str().unwrap_or("").contains("✓ 停止")));
-        assert!(bs.iter().any(|b| b["text"]["text"].as_str().unwrap_or("").contains("💬 再想想")));
+        assert!(bs
+            .iter()
+            .any(|b| b["text"]["text"].as_str().unwrap_or("").contains("✓ 停止")));
+        assert!(bs.iter().any(|b| b["text"]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("💬 再想想")));
         assert!(bs.iter().any(|b| b["type"] == "context"));
     }
 }

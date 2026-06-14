@@ -207,22 +207,40 @@ pub enum ServerMsg {
     Status(StatusInfo),
     Stopping,
     /// 排空期收到新 Submit 时的拒绝回复（回完即断开），回带剩余在途请求数。
-    Draining { active: usize },
-    Error { message: String },
+    Draining {
+        active: usize,
+    },
+    Error {
+        message: String,
+    },
     /// 任务已受理，回带 Daemon 分配的 request_id（D→CLI）。
-    Accepted { request_id: String },
+    Accepted {
+        request_id: String,
+    },
     /// 流式警告 / 诊断 → CLI 的 stderr（D→CLI）。
-    Warn { text: String },
+    Warn {
+        text: String,
+    },
     /// 终态：渲染好的结果文本 + 退出码（D→CLI）。CLI 原样打印 stdout 后按码退出。
-    Final { stdout: String, exit_code: i32 },
+    Final {
+        stdout: String,
+        exit_code: i32,
+    },
     /// 自动识别成功，回带识别出的 userId/open_id（D→设置进程，Q6）。失败用 `Error`。
-    Detected { id: String },
+    Detected {
+        id: String,
+    },
     /// 下发题目（D→GUI）。
     Show(ShowPayload),
     /// 被其它渠道抢答，通知 GUI 收尾关窗（D→GUI）。
-    Cancel { request_id: String, winner: String },
+    Cancel {
+        request_id: String,
+        winner: String,
+    },
     /// 配置实时变更，下发新的 `general` 配置给活动 GUI Helper 以即时切主题/语言（D→GUI，A12）。
-    ConfigChanged { general: serde_json::Value },
+    ConfigChanged {
+        general: serde_json::Value,
+    },
     /// 版本自更新状态（D→GUI）：`available` 有新版可更新；`pending` 新二进制已落盘、
     /// 待所有在途弹窗答完后由 graceful-drain 换新生效。弹窗据此显示更新入口 / 待生效横条。
     UpdateState {
@@ -232,7 +250,9 @@ pub enum ServerMsg {
     },
     /// Agent 注册表全量快照（D→状态窗口订阅者，spec D20）。变化时推 + 周期心跳推。
     /// `agents` 为记录数组，前端按类型分组、按状态排序渲染。
-    AgentsState { agents: serde_json::Value },
+    AgentsState {
+        agents: serde_json::Value,
+    },
 }
 
 #[cfg(test)]

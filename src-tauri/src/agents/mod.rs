@@ -11,9 +11,9 @@
 
 pub mod detect;
 pub mod registry;
-pub mod title;
 #[cfg(unix)]
 pub mod report;
+pub mod title;
 
 use serde::{Deserialize, Serialize};
 

@@ -453,8 +453,12 @@ mod tests {
         let fe = form["elements"].as_array().unwrap();
         // 两个 checker + 一个 input + 一个 submit button。
         assert_eq!(fe.iter().filter(|e| e["tag"] == "checker").count(), 2);
-        assert!(fe.iter().any(|e| e["tag"] == "input" && e["name"] == "user_input"));
-        assert!(fe.iter().any(|e| e["tag"] == "button" && e["form_action_type"] == "submit"));
+        assert!(fe
+            .iter()
+            .any(|e| e["tag"] == "input" && e["name"] == "user_input"));
+        assert!(fe
+            .iter()
+            .any(|e| e["tag"] == "button" && e["form_action_type"] == "submit"));
         assert_eq!(fe[0]["name"], "opt_0");
         assert_eq!(fe[1]["name"], "opt_1");
     }
@@ -462,17 +466,22 @@ mod tests {
     #[test]
     fn single_moves_checkers_out_of_form_with_toggle_callback() {
         let card = build_question_card(
-            "T", "Q", &plain(&["a", "b"]), false, true, false, &[], "ph", "提交", "R",
+            "T",
+            "Q",
+            &plain(&["a", "b"]),
+            false,
+            true,
+            false,
+            &[],
+            "ph",
+            "提交",
+            "R",
         );
         let elements = card["body"]["elements"].as_array().unwrap();
         // 勾选器在表单外（顶层），各挂 toggle 回调。
-        let top_checkers: Vec<&Value> =
-            elements.iter().filter(|e| e["tag"] == "checker").collect();
+        let top_checkers: Vec<&Value> = elements.iter().filter(|e| e["tag"] == "checker").collect();
         assert_eq!(top_checkers.len(), 2);
-        assert_eq!(
-            top_checkers[0]["behaviors"][0]["value"]["action"],
-            "toggle"
-        );
+        assert_eq!(top_checkers[0]["behaviors"][0]["value"]["action"], "toggle");
         assert_eq!(top_checkers[0]["behaviors"][0]["value"]["index"], 0);
         // 表单内无勾选器（只有 input + submit）。
         let form = form_of(&card);
@@ -490,7 +499,16 @@ mod tests {
     #[test]
     fn select_only_omits_input() {
         let card = build_question_card(
-            "T", "Q", &plain(&["a", "b"]), false, false, true, &[], "ph", "提交", "R",
+            "T",
+            "Q",
+            &plain(&["a", "b"]),
+            false,
+            false,
+            true,
+            &[],
+            "ph",
+            "提交",
+            "R",
         );
         let form = form_of(&card);
         let fe = form["elements"].as_array().unwrap();
@@ -500,9 +518,20 @@ mod tests {
 
     #[test]
     fn recommended_option_uses_lark_md_prefix() {
-        let opts = vec![OptionItem::new("继续", true), OptionItem::new("停止", false)];
+        let opts = vec![
+            OptionItem::new("继续", true),
+            OptionItem::new("停止", false),
+        ];
         let card = build_question_card(
-            "T", "Q", &opts, true, false, false, &[], "ph", "提交",
+            "T",
+            "Q",
+            &opts,
+            true,
+            false,
+            false,
+            &[],
+            "ph",
+            "提交",
             "<font color='green'>【👍推荐】</font> ",
         );
         let form = form_of(&card);
@@ -544,7 +573,16 @@ mod tests {
     #[test]
     fn build_card_without_options_omits_checkers() {
         let card = build_question_card(
-            "", "随便说点什么", &[], false, false, false, &[], "请输入", "提交", "【👍推荐】 ",
+            "",
+            "随便说点什么",
+            &[],
+            false,
+            false,
+            false,
+            &[],
+            "请输入",
+            "提交",
+            "【👍推荐】 ",
         );
         assert!(card.get("header").is_none());
         let form = form_of(&card);
@@ -562,7 +600,10 @@ mod tests {
     #[test]
     fn finalized_card_disables_form_and_reflects_selection() {
         // 「停止」为推荐项：显示带前缀，但勾选比对仍按原文命中。
-        let opts = vec![OptionItem::new("继续", false), OptionItem::new("停止", true)];
+        let opts = vec![
+            OptionItem::new("继续", false),
+            OptionItem::new("停止", true),
+        ];
         let sel = vec!["停止".to_string()];
         let card = build_finalized_card(&Finalized {
             title: "Question 1/2",

@@ -156,7 +156,9 @@ impl MessagingChannel for SlackSession {
         // 长连接由 Router 独占，这里只需 Web API client（发送/更新）+ 解析 DM 频道。
         let client = SlackClient::new(&self.config).map_err(|e| e.localized(Lang::current()))?;
         if client.user_id().is_empty() {
-            return Err(i18n::tr(Lang::current(), "err.slEmptyConfig").replace("{field}", "User ID"));
+            return Err(
+                i18n::tr(Lang::current(), "err.slEmptyConfig").replace("{field}", "User ID")
+            );
         }
         let dm = client.open_dm().await.map_err(|e| e.to_string())?;
         self.dm_channel = Some(dm);
@@ -301,7 +303,9 @@ impl MessagingChannel for SlackSession {
                         user_input: s.user_input.as_deref(),
                         status: i18n::tr(ctx.lang, "channel.slSubmitted"),
                     });
-                    let _ = client.update_message(dm, &message_ts, Some(&finalized), &notify).await;
+                    let _ = client
+                        .update_message(dm, &message_ts, Some(&finalized), &notify)
+                        .await;
                     // 收尾并发下载。
                     for h in downloads {
                         let _ = h.await;
@@ -348,7 +352,9 @@ impl MessagingChannel for SlackSession {
             user_input: None,
             status: &status,
         });
-        let _ = client.update_message(dm, &message_ts, Some(&finalized), &notify).await;
+        let _ = client
+            .update_message(dm, &message_ts, Some(&finalized), &notify)
+            .await;
         events.clear_active(Some(&message_ts), &user_id);
         None
     }
@@ -509,7 +515,11 @@ async fn message_to_answer(
             }
         }
     }
-    let text = event.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
+    let text = event
+        .get("text")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .trim();
     let (mut selected, user_input) = if text.is_empty() {
         (Vec::new(), None)
     } else {

@@ -40,7 +40,10 @@ fn build_swift_speech(manifest_dir: &str) {
         }
     }
     if sources.is_empty() {
-        panic!("build_swift_speech: 未找到 swift 源文件于 {}", swift_dir.display());
+        panic!(
+            "build_swift_speech: 未找到 swift 源文件于 {}",
+            swift_dir.display()
+        );
     }
     sources.sort();
 
@@ -73,14 +76,18 @@ fn build_swift_speech(manifest_dir: &str) {
     // 编译为静态库。-static -emit-library 产出 .a；autolink 指令(框架/swiftCore)内嵌到对象中。
     let mut cmd = Command::new(swiftc.trim());
     cmd.args([
-        "-target", &triple,
-        "-sdk", sdk_path.trim(),
+        "-target",
+        &triple,
+        "-sdk",
+        sdk_path.trim(),
         // 沿用 demo 的宽松并发检查（桥/引擎用 @unchecked Sendable + Task 捕获）。
-        "-swift-version", "5",
+        "-swift-version",
+        "5",
         "-O",
         "-wmo",
         "-parse-as-library",
-        "-module-name", "ahspeech",
+        "-module-name",
+        "ahspeech",
         "-emit-library",
         "-static",
         "-o",
@@ -97,10 +104,7 @@ fn build_swift_speech(manifest_dir: &str) {
     // 链接：force_load 保证 @objc 类被注册不被裁剪；提供 Swift 运行时 search path；
     // rpath 让运行期从系统 /usr/lib/swift 解析 Swift 运行时(单文件分发)。
     println!("cargo:rustc-link-search=native={out_dir}");
-    println!(
-        "cargo:rustc-link-search=native={}",
-        swift_lib_dir.display()
-    );
+    println!("cargo:rustc-link-search=native={}", swift_lib_dir.display());
     println!(
         "cargo:rustc-link-arg=-Wl,-force_load,{}",
         lib_path.display()

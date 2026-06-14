@@ -290,7 +290,12 @@ pub fn show(app: AppHandle, path: String) {
         if !apps.is_empty() {
             add_separator(submenu);
         }
-        add_item(submenu, tr(lang, "menu.other"), TAG_OPEN_WITH_OTHER, &target);
+        add_item(
+            submenu,
+            tr(lang, "menu.other"),
+            TAG_OPEN_WITH_OTHER,
+            &target,
+        );
         *target.ivars().app_urls.borrow_mut() = apps;
 
         let cls = AnyClass::get(c"NSMenuItem").expect("NSMenuItem");

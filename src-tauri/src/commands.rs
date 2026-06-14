@@ -93,7 +93,10 @@ pub fn preview_attachments(
         let win_ptr = window
             .ns_window()
             .ok()
-            .or_else(|| app.get_webview_window("popup").and_then(|w| w.ns_window().ok()))
+            .or_else(|| {
+                app.get_webview_window("popup")
+                    .and_then(|w| w.ns_window().ok())
+            })
             .map(|p| p as usize)
             .unwrap_or(0);
         let app2 = app.clone();
@@ -194,7 +197,8 @@ fn open_with_system(path: &str) -> Result<(), String> {
         c
     };
     cmd.spawn().map(|_| ()).map_err(|e| {
-        crate::i18n::tr(crate::i18n::Lang::current(), "cmd.openFailed").replace("{e}", &e.to_string())
+        crate::i18n::tr(crate::i18n::Lang::current(), "cmd.openFailed")
+            .replace("{e}", &e.to_string())
     })
 }
 
@@ -487,6 +491,30 @@ pub fn open_test_popup() -> Result<(), String> {
     Ok(())
 }
 
+/// Popup sound platform support for settings UI rendering.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PopupSoundSupport {
+    /// `"named"` (macOS with `names`), `"toggle"` (Linux), or `"none"` (hidden).
+    kind: String,
+    /// Optional sound names, only non-empty for `"named"`.
+    names: Vec<String>,
+}
+
+#[tauri::command]
+pub fn popup_sound_support() -> PopupSoundSupport {
+    PopupSoundSupport {
+        kind: crate::sound::support().to_string(),
+        names: crate::sound::names(),
+    }
+}
+
+/// Settings preview action. Empty string does not play anything.
+#[tauri::command]
+pub fn play_popup_sound(name: String) {
+    crate::sound::play(&name);
+}
+
 /// 实时应用主题到已打开的窗口（system→跟随系统）。
 #[tauri::command]
 pub fn set_theme(app: AppHandle, theme: String) {
@@ -686,8 +714,9 @@ pub struct RuleStatus {
 }
 
 fn parse_agent(agent: &str) -> Result<AgentTarget, String> {
-    AgentTarget::parse(agent)
-        .ok_or_else(|| crate::i18n::tr(crate::i18n::Lang::current(), "cmd.unknownAgent").to_string())
+    AgentTarget::parse(agent).ok_or_else(|| {
+        crate::i18n::tr(crate::i18n::Lang::current(), "cmd.unknownAgent").to_string()
+    })
 }
 
 #[tauri::command]
@@ -739,8 +768,9 @@ use crate::agents::AgentKind;
 use crate::integrations::agent_lifecycle;
 
 fn parse_agent_kind(agent: &str) -> Result<AgentKind, String> {
-    AgentKind::parse(agent)
-        .ok_or_else(|| crate::i18n::tr(crate::i18n::Lang::current(), "cmd.unknownAgent").to_string())
+    AgentKind::parse(agent).ok_or_else(|| {
+        crate::i18n::tr(crate::i18n::Lang::current(), "cmd.unknownAgent").to_string()
+    })
 }
 
 #[tauri::command]
@@ -777,7 +807,10 @@ pub async fn telegram_test(args: TelegramTestArgs) -> Result<String, String> {
     let bot_token = fallback_secret(&args.bot_token, |c| c.channels.telegram.bot_token.clone());
     let client = TelegramClient::new(bot_token, args.chat_id, args.api_base_url)
         .map_err(|e| e.localized(lang))?;
-    client.test_connection(lang).await.map_err(|e| e.localized(lang))
+    client
+        .test_connection(lang)
+        .await
+        .map_err(|e| e.localized(lang))
 }
 
 // ===== 钉钉测试连接 / userId 自动识别 =====
@@ -801,8 +834,9 @@ pub async fn dingtalk_test(args: DingTalkTestArgs) -> Result<String, String> {
     if args.user_id.trim().is_empty() {
         return Err(crate::i18n::tr(lang, "cmd.fillUserId").to_string());
     }
-    let client_secret =
-        fallback_secret(&args.client_secret, |c| c.channels.dingding.client_secret.clone());
+    let client_secret = fallback_secret(&args.client_secret, |c| {
+        c.channels.dingding.client_secret.clone()
+    });
     let cfg = DingTalkChannelConfig {
         enabled: true,
         client_id: args.client_id,
@@ -832,7 +866,9 @@ pub struct DingTalkDetectArgs {
 pub async fn dingtalk_detect_prepare(args: DingTalkDetectArgs) -> Result<String, String> {
     let lang = crate::i18n::Lang::current();
     let client_id = args.client_id.trim();
-    let secret = fallback_secret(&args.client_secret, |c| c.channels.dingding.client_secret.clone());
+    let secret = fallback_secret(&args.client_secret, |c| {
+        c.channels.dingding.client_secret.clone()
+    });
     let client_secret = secret.trim();
     if client_id.is_empty() || client_secret.is_empty() {
         return Err(crate::i18n::tr(lang, "cmd.fillClientIdSecret").to_string());
@@ -859,7 +895,9 @@ pub async fn dingtalk_detect_wait(args: DingTalkWaitArgs) -> Result<String, Stri
     use std::time::Duration;
     let lang = crate::i18n::Lang::current();
     let client_id = args.client_id.trim();
-    let secret = fallback_secret(&args.client_secret, |c| c.channels.dingding.client_secret.clone());
+    let secret = fallback_secret(&args.client_secret, |c| {
+        c.channels.dingding.client_secret.clone()
+    });
     let client_secret = secret.trim();
     if client_id.is_empty() || client_secret.is_empty() {
         return Err(crate::i18n::tr(lang, "cmd.fillClientIdSecret").to_string());
@@ -906,9 +944,7 @@ pub async fn dingtalk_detect_wait(args: DingTalkWaitArgs) -> Result<String, Stri
                     .unwrap_or("")
                     .trim();
                 if content == code {
-                    if let Some(sender) =
-                        data.get("senderStaffId").and_then(|v| v.as_str())
-                    {
+                    if let Some(sender) = data.get("senderStaffId").and_then(|v| v.as_str()) {
                         return Ok(sender.to_string());
                     }
                 }
@@ -1074,7 +1110,10 @@ fn feishu_text_and_sender(event: &serde_json::Value) -> Option<(String, String)>
     if message.get("message_type").and_then(|v| v.as_str()) != Some("text") {
         return None;
     }
-    let content_str = message.get("content").and_then(|v| v.as_str()).unwrap_or("{}");
+    let content_str = message
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("{}");
     let content: serde_json::Value = serde_json::from_str(content_str).ok()?;
     let text = content.get("text").and_then(|v| v.as_str())?.to_string();
     Some((open_id, text))
@@ -1257,7 +1296,10 @@ pub fn set_pushed_update(state: PushedUpdateState) {
 /// 弹窗挂载时拉取「已推送的自更新态」初值（之后变化经事件实时更新）。
 #[tauri::command]
 pub fn popup_update_state() -> PushedUpdateState {
-    pushed_update_slot().lock().map(|s| s.clone()).unwrap_or_default()
+    pushed_update_slot()
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default()
 }
 
 /// 本地当前版本（编译期嵌入）。
@@ -1319,10 +1361,7 @@ pub async fn update_apply(app: AppHandle) -> Result<(), String> {
     let cb: crate::update::ProgressCb = Box::new(move |p| {
         let _ = app_for_cb.emit("update_download_progress", p);
     });
-    updater
-        .apply(Some(cb))
-        .await
-        .map_err(|e| e.to_string())?;
+    updater.apply(Some(cb)).await.map_err(|e| e.to_string())?;
     crate::update::state::set_pending(true);
     let _ = app.emit("update_apply_finished", ());
     Ok(())
@@ -1345,9 +1384,7 @@ pub fn restart_settings(app: AppHandle) -> Result<(), String> {
         .arg("--settings")
         .stdin(Stdio::null())
         .spawn()
-        .map_err(|e| {
-            crate::i18n::tr(lang, "cmd.openFailed").replace("{e}", &e.to_string())
-        })?;
+        .map_err(|e| crate::i18n::tr(lang, "cmd.openFailed").replace("{e}", &e.to_string()))?;
     app.exit(0);
     Ok(())
 }

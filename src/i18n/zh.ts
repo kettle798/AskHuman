@@ -118,6 +118,10 @@ export default {
       effectGlass: "玻璃",
       effectBlur: "模糊",
       appearAnimation: "弹出动画",
+      sound: "提示音",
+      soundOff: "关闭",
+      soundOn: "开启",
+      soundPreview: "试听",
       testPopup: "弹出测试窗口",
     },
     speech: {

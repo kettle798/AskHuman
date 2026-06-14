@@ -129,7 +129,10 @@ pub fn pid_alive(pid: u32) -> bool {
         return true;
     }
     // errno: EPERM(1) 存在但无权限 → 存活；ESRCH(3) → 已死。
-    matches!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPERM))
+    matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EPERM)
+    )
 }
 
 #[cfg(not(unix))]

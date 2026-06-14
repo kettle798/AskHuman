@@ -139,8 +139,13 @@ impl StreamConn {
     async fn reconnect(&mut self) -> bool {
         for attempt in 0..5u32 {
             tokio::time::sleep(std::time::Duration::from_millis(500 * (attempt as u64 + 1))).await;
-            if let Ok(ws) =
-                open_ws(&self.http, &self.client_id, &self.client_secret, &self.topics).await
+            if let Ok(ws) = open_ws(
+                &self.http,
+                &self.client_id,
+                &self.client_secret,
+                &self.topics,
+            )
+            .await
             {
                 self.ws = ws;
                 return true;
