@@ -328,6 +328,34 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "channel.fsImageDownloadFailed" => pick(lang, "failed to download Feishu image: {e}", "飞书图片下载失败: {e}"),
         "channel.fsFileDownloadFailed" => pick(lang, "failed to download Feishu file: {e}", "飞书文件下载失败: {e}"),
 
+        // —— IM 会话期自动激活：入站回执 / 命令 / 状态文本 ——
+        // 激活确认（发 here、或普通消息触发切换时回执；用语中性，无论是否真的切换都贴切）。
+        "autoChannel.activated" => pick(
+            lang,
+            "Questions will now be sent to this channel.",
+            "后续提问将发送到此渠道。",
+        ),
+        // 补推在途后缀（仅当补推了 N(>0) 条在途未答问题时追加到激活回执后）。
+        "autoChannel.pending" => pick(lang, " ({n} pending question(s) delivered)", "（已补推 {n} 条待答问题）"),
+        // 反激活提示（活跃槽切到别处时发给旧渠道；{target} = 新渠道展示名，如「弹窗」「钉钉」）。
+        "autoChannel.deactivated" => pick(
+            lang,
+            "Questions have moved to {target} and will no longer be sent here. Send /here to switch back.",
+            "后续提问已切换到「{target}」，将不在此发送。发送 /here 可切回此渠道。",
+        ),
+        // /status 文本分组标题。
+        "autoChannel.statusWorking" => pick(lang, "Working", "工作中"),
+        "autoChannel.statusIdle" => pick(lang, "Idle", "空闲"),
+        // /status 单行占位（标题 / 项目缺失时）。
+        "autoChannel.noTitle" => pick(lang, "(untitled)", "（未命名）"),
+        "autoChannel.noProject" => pick(lang, "unknown project", "未知项目"),
+        // /status 空状态（无工作中/空闲 agent）：附「需开启生命周期追踪」提示。
+        "autoChannel.statusEmpty" => pick(
+            lang,
+            "No working or idle agents right now.\n(Agent status relies on the experimental Lifecycle Tracking feature; if it is off, enable tracking for the relevant agent under Settings → Experimental.)",
+            "当前没有工作中或空闲的 agent。\n（agent 状态依赖「生命周期追踪」实验功能；如未开启，请在 设置 → 实验 中开启对应 Agent 的追踪。）",
+        ),
+
         // —— Slack 渠道：发给用户的文案 + 本地诊断 ——
         // 静态终态卡片状态行（无 emoji 前缀，与飞书/钉钉一致）。
         "channel.slSubmitted" => pick(lang, "Submitted", "已提交"),

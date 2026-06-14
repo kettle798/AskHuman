@@ -9,6 +9,7 @@
 
 mod agents;
 mod app;
+mod autochannel;
 mod channels;
 mod cli;
 #[cfg(unix)]

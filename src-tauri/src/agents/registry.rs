@@ -211,6 +211,52 @@ impl AgentRegistry {
         }
     }
 
+    /// 「IM 会话期自动激活」无 hook 兜底：提问时把对应 session 标记为「工作中」。
+    /// 不存在则新建；已存在则置为 Working 并刷新活动 / 补 pid（在途提问必然处于「工作中」turn 内）。
+    /// 返回是否有状态变化（供广播）。
+    pub fn upsert_working(
+        &self,
+        kind: AgentKind,
+        session_id: &str,
+        pid: Option<u32>,
+        cwd: Option<String>,
+    ) -> bool {
+        if session_id.is_empty() {
+            return false;
+        }
+        let now = now_secs();
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(r) = inner
+            .active
+            .iter_mut()
+            .find(|r| r.session_id == session_id && r.kind == kind)
+        {
+            let was_working = r.state == AgentState::Working;
+            r.state = AgentState::Working;
+            r.last_activity = now;
+            if r.pid.is_none() && pid.is_some() {
+                r.pid = pid;
+            }
+            if r.cwd.is_none() && cwd.is_some() {
+                r.cwd = cwd;
+            }
+            !was_working
+        } else {
+            inner.active.push(AgentRecord {
+                kind,
+                session_id: session_id.to_string(),
+                pid,
+                title: None,
+                cwd,
+                started_at: now,
+                last_activity: now,
+                state: AgentState::Working,
+                ended_at: None,
+            });
+            true
+        }
+    }
+
     /// 进程存活轮询（spec D5）：有 pid 且已死 → 结束。返回是否有变化。
     pub fn poll_liveness(&self) -> bool {
         let now = now_secs();

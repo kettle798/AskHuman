@@ -255,6 +255,11 @@ pub struct ChannelsConfig {
     pub dingding: DingTalkChannelConfig,
     pub feishu: FeishuChannelConfig,
     pub slack: SlackChannelConfig,
+    /// 「IM 会话期自动激活」开关（默认关 = 旧「每次提问全发所有启用 IM」行为）。
+    /// 开启后：仅当前活跃槽对应的 IM 收提问卡片；在 agent 工作期间于某 IM 发 `/here`（或「这里」）
+    /// 即把该渠道设为活跃槽。UI 入口受实验开关门控，但配置字段独立于 `experimental`，
+    /// 便于将来「转正」时已开启用户无需重开。
+    pub auto_activation: bool,
 }
 
 /// 实验性高级功能（spec D15）：默认隐藏，需在「通用」Tab 底部的隐蔽开关里打开后才显示「实验」Tab。

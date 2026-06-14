@@ -42,6 +42,8 @@ pub struct Coordinator {
     pending: Arc<AtomicUsize>,
     /// 已采纳的终态结果（首个 submit 写入）。
     result: Mutex<Option<ChannelResult>>,
+    /// 赢家渠道 id（首个 submit 写入；与 `result` 不同，`finish` 不会取走，供作答后更新活跃槽读取）。
+    winner: Mutex<Option<String>>,
     /// 是否已进入收尾阶段（首个 submit 后置位）。GUI 据此拦下「关窗即退出」，
     /// 仅放行协调器自身的 `app.exit`，确保结果先输出；收尾前不拦（Cmd+Q 等照常退出）。
     finalizing: AtomicBool,
@@ -116,6 +118,7 @@ impl Coordinator {
             source,
             pending: Arc::new(AtomicUsize::new(0)),
             result: Mutex::new(None),
+            winner: Mutex::new(None),
             finalizing: AtomicBool::new(false),
             emitted: AtomicBool::new(false),
         })
@@ -130,6 +133,16 @@ impl Coordinator {
         self.inner.lock().unwrap().channels.push(channel);
     }
 
+    /// 是否已登记某个渠道（按 id）。用于「补推在途」时避免对同一渠道重复挂接 / 重发卡片。
+    pub fn has_channel(&self, id: &str) -> bool {
+        self.inner.lock().unwrap().channels.iter().any(|c| c.id() == id)
+    }
+
+    /// 赢家渠道 id（终态结果的来源；未作答 / 系统取消时为 None）。供作答后把活跃槽更新为该渠道。
+    pub fn winner_channel_id(&self) -> Option<String> {
+        self.winner.lock().unwrap().clone()
+    }
+
     /// 投递终态结果：仅首个生效；随后取消其余 Channel 并启动收尾窗口，到时输出并退出。
     pub fn submit(self: &Arc<Self>, result: ChannelResult) {
         let (exiter, pending_count) = {
@@ -142,6 +155,7 @@ impl Coordinator {
             self.finalizing.store(true, Ordering::SeqCst);
             let source = result.source_channel_id.clone();
             let action = result.action;
+            *self.winner.lock().unwrap() = Some(source.clone());
             *self.result.lock().unwrap() = Some(result);
 
             let lang = self.lang;

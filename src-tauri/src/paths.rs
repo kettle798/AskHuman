@@ -52,6 +52,17 @@ pub fn agents_file() -> PathBuf {
     config_dir().join("agents.json")
 }
 
+/// 杂项运行时状态目录 `~/.askhuman/state`（daemon 跨重启保留的小状态）。
+pub fn state_dir() -> PathBuf {
+    config_dir().join("state")
+}
+
+/// 「IM 会话期自动激活」当前活跃槽持久化文件 `~/.askhuman/state/auto-channel.json`。
+/// 跨 daemon 重启保留；仅由「用户在某渠道的入站消息」更新。
+pub fn auto_channel_file() -> PathBuf {
+    state_dir().join("auto-channel.json")
+}
+
 /// Cursor 目录 `~/.cursor`。
 pub fn cursor_dir() -> PathBuf {
     home().join(".cursor")

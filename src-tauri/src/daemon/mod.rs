@@ -48,6 +48,7 @@ mod unix_impl {
         TaskRequest,
     };
     use crate::models::{ChannelResult, ChannelAction};
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -165,6 +166,10 @@ mod unix_impl {
         agents: Arc<AgentRegistry>,
         /// 状态窗口订阅者的发送端列表（变化 / 心跳时推 `AgentsState`）。
         agent_subs: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<ServerMsg>>>,
+        /// 「IM 会话期自动激活」当前活跃槽（持久化、跨重启保留，仅由入站消息改变）。
+        active_channel: Mutex<Option<String>>,
+        /// 已启动入站监听器的渠道 id 集合（避免重复 spawn；连接断开时移除以便重建）。
+        inbound_listeners: Mutex<HashSet<String>>,
     }
 
     /// Daemon 维护的「自更新」当前态（广播给弹窗用）。
@@ -302,6 +307,8 @@ mod unix_impl {
             update: Mutex::new(init_update_snapshot()),
             agents: Arc::new(AgentRegistry::load()),
             agent_subs: Mutex::new(Vec::new()),
+            active_channel: Mutex::new(crate::autochannel::load_active()),
+            inbound_listeners: Mutex::new(HashSet::new()),
         });
 
         // 空闲退出检查。
@@ -563,6 +570,9 @@ mod unix_impl {
                             state.agents.persist();
                             broadcast_agents_state(state);
                         }
+                        // turn-start 经此即时上线 IM 入站消费（与开关无关，使 /here、/status 在 agent
+                        // 工作期间随时可用）；幂等。连接随守护进程退出而释放，无需在 turn-end 主动断。
+                        ensure_inbound_listeners(state).await;
                     }
                 }
                 // 状态窗口订阅：接管连接持续推送。
@@ -619,16 +629,26 @@ mod unix_impl {
             .await;
             return;
         }
-        // ask 调用顺带刷新对应 session 的活动 + 重置 TTL（spec D21）：仅刷新已追踪的同家族 session，不新建。
+        // 「自动激活」开启时：每次提问按「工作中」兜底登记会话（无 turn hook 也能驱动入站监听 / 切槽）；
+        // 开关关时保持旧行为（仅刷新已追踪会话的活动，尊重「未装 hook = 不追踪」，不污染注册表）。
+        let auto = AppConfig::load_without_secrets().channels.auto_activation;
         if let (Some(kind), Some(sid)) = (
             task.agent_kind.as_deref().and_then(AgentKind::parse),
             task.agent_session_id.clone(),
         ) {
-            if state.agents.touch_activity(kind, &sid, task.agent_pid) {
+            let cwd = Some(task.project.clone()).filter(|s| !s.trim().is_empty());
+            let changed = if auto {
+                state.agents.upsert_working(kind, &sid, task.agent_pid, cwd)
+            } else {
+                state.agents.touch_activity(kind, &sid, task.agent_pid)
+            };
+            if changed {
                 state.agents.persist();
                 broadcast_agents_state(state);
             }
         }
+        // 确保入站消费在线（自身按「有工作中 agent」自门控；与开关无关，使 /status 等命令独立可用）。
+        ensure_inbound_listeners(state).await;
         let lang = Lang::resolve(&task.lang);
         let (entry, mut final_rx) = state.registry.create(task);
         let request_id = entry.request_id.clone();
@@ -708,6 +728,13 @@ mod unix_impl {
                     exit_code: 3,
                 })
                 .await;
+            }
+        }
+        // 「在哪个渠道作答就用哪个」：把活跃槽更新为本次作答渠道（弹窗作答 → "popup"，即不再发 IM）。
+        // 若由此从某 IM 切走，旧 IM 在 set_active_channel 内收反激活提示。仅自动激活开时生效。
+        if auto {
+            if let Some(winner) = entry.coordinator.winner_channel_id() {
+                set_active_channel(state, &winner).await;
             }
         }
         entry.cancel.notify_waiters();
@@ -979,7 +1006,13 @@ mod unix_impl {
         let sink = entry.coordinator.clone();
         let mut attached = false;
 
-        if crate::app::is_dingding_active(&config) {
+        // 「IM 会话期自动激活」：开关开时，仅当前活跃槽对应的 IM 发卡片（其余 IM 由入站监听器保持连接、
+        // 只监听 here，不发卡片）。开关关时维持旧「全发」行为。
+        let auto = config.channels.auto_activation;
+        let active = state.active_channel.lock().unwrap().clone();
+        let want = |id: &str| -> bool { !auto || active.as_deref() == Some(id) };
+
+        if want("dingding") && crate::app::is_dingding_active(&config) {
             let dd = &config.channels.dingding;
             match ensure_dd_router(state, dd.client_id.trim(), dd.client_secret.trim()).await {
                 Some(router) => {
@@ -1003,7 +1036,7 @@ mod unix_impl {
             }
         }
 
-        if crate::app::is_feishu_active(&config) {
+        if want("feishu") && crate::app::is_feishu_active(&config) {
             let fs = &config.channels.feishu;
             match ensure_fs_router(state, fs).await {
                 Some(router) => {
@@ -1026,7 +1059,7 @@ mod unix_impl {
             }
         }
 
-        if crate::app::is_telegram_active(&config) {
+        if want("telegram") && crate::app::is_telegram_active(&config) {
             let tg = &config.channels.telegram;
             match ensure_tg_router(state, tg).await {
                 Some(router) => {
@@ -1050,7 +1083,7 @@ mod unix_impl {
             }
         }
 
-        if crate::app::is_slack_active(&config) {
+        if want("slack") && crate::app::is_slack_active(&config) {
             let sl = &config.channels.slack;
             match ensure_sl_router(state, sl).await {
                 Some(router) => {
@@ -1074,6 +1107,344 @@ mod unix_impl {
         }
 
         attached
+    }
+
+    // ===== IM 入站消费（命令 /here、/status…）/ 活跃槽 / 补推在途 =====
+
+    /// 确保各已启用 IM 的入站消费任务在线，使守护进程在世期间能收到入站命令（`/here`、`/status`…）。
+    /// 触发条件 = **存在「工作中」agent**：守护进程存活本就由工作 agent 生命周期约束（D18），连接随其
+    /// 退出而释放（serve 收尾丢弃 Router → Drop 关长连接），故无需「反激活式」主动断连。
+    /// **与「自动激活」开关无关**——`/status` 等命令是与开关独立的功能（开关只决定 §3.4 的切槽/发卡行为）。
+    /// 各渠道只提供「连接 Router + 取原始消息观察者 + 抽取 (发送者, 文本) + 期望发送者」这几样传输原语；
+    /// 通用循环与命令分派（`spawn_listener` / `handle_inbound`）一份实现，各渠道复用。幂等：可反复调用。
+    async fn ensure_inbound_listeners(state: &Arc<ServerState>) {
+        if state.agents.working_count() == 0 {
+            return;
+        }
+        let config = AppConfig::load();
+
+        if crate::app::is_feishu_active(&config) && claim_listener(state, "feishu") {
+            match ensure_fs_router(state, &config.channels.feishu).await {
+                Some(r) => spawn_listener(
+                    state,
+                    "feishu",
+                    r.observe_message(),
+                    extract_feishu,
+                    config.channels.feishu.open_id.trim().to_string(),
+                ),
+                None => release_listener(state, "feishu"),
+            }
+        }
+
+        if crate::app::is_dingding_active(&config) && claim_listener(state, "dingding") {
+            let dd = &config.channels.dingding;
+            match ensure_dd_router(state, dd.client_id.trim(), dd.client_secret.trim()).await {
+                Some(r) => spawn_listener(
+                    state,
+                    "dingding",
+                    r.observe_bot(),
+                    extract_dingtalk,
+                    dd.user_id.trim().to_string(),
+                ),
+                None => release_listener(state, "dingding"),
+            }
+        }
+
+        if crate::app::is_slack_active(&config) && claim_listener(state, "slack") {
+            match ensure_sl_router(state, &config.channels.slack).await {
+                Some(r) => spawn_listener(
+                    state,
+                    "slack",
+                    r.observe_message(),
+                    extract_slack,
+                    config.channels.slack.user_id.trim().to_string(),
+                ),
+                None => release_listener(state, "slack"),
+            }
+        }
+
+        if crate::app::is_telegram_active(&config) && claim_listener(state, "telegram") {
+            match ensure_tg_router(state, &config.channels.telegram).await {
+                Some(r) => spawn_listener(
+                    state,
+                    "telegram",
+                    r.observe_message(),
+                    extract_telegram,
+                    config.channels.telegram.chat_id.trim().to_string(),
+                ),
+                None => release_listener(state, "telegram"),
+            }
+        }
+    }
+
+    /// 占用某渠道的监听位（幂等）：未在监听则标记并返回 true，否则 false。
+    fn claim_listener(state: &Arc<ServerState>, id: &str) -> bool {
+        let mut set = state.inbound_listeners.lock().unwrap();
+        if set.contains(id) {
+            false
+        } else {
+            set.insert(id.to_string());
+            true
+        }
+    }
+
+    /// 释放某渠道的监听位（连接断开 / 建连失败时）。
+    fn release_listener(state: &Arc<ServerState>, id: &str) {
+        state.inbound_listeners.lock().unwrap().remove(id);
+    }
+
+    /// 通用入站监听循环（与渠道无关）：从原始消息流抽取 (发送者, 文本)，按期望发送者过滤后交 `handle_inbound`。
+    /// 流结束（连接断开）即释放监听位，下次提问可重建。
+    fn spawn_listener(
+        state: &Arc<ServerState>,
+        channel_id: &'static str,
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+        extract: fn(&serde_json::Value) -> Option<(String, String)>,
+        expected_sender: String,
+    ) {
+        let state = state.clone();
+        tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                if let Some((sender, text)) = extract(&ev) {
+                    // 单聊机器人：仅处理期望发送者发来的消息（期望为空则不过滤）；过滤掉机器人自身回声。
+                    if !expected_sender.is_empty() && sender != expected_sender {
+                        continue;
+                    }
+                    handle_inbound(&state, channel_id, &text).await;
+                }
+            }
+            release_listener(&state, channel_id);
+        });
+    }
+
+    /// 飞书原始消息 → (发送者 open_id, 文本)；非文本返回 None。
+    fn extract_feishu(ev: &serde_json::Value) -> Option<(String, String)> {
+        fs_text_and_sender(ev)
+    }
+
+    /// 钉钉原始 bot 消息 → (senderStaffId, 文本)；非文本返回 None。
+    fn extract_dingtalk(ev: &serde_json::Value) -> Option<(String, String)> {
+        let sender = ev.get("senderStaffId").and_then(|v| v.as_str())?.to_string();
+        let text = ev
+            .get("text")
+            .and_then(|t| t.get("content"))
+            .and_then(|c| c.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?
+            .to_string();
+        Some((sender, text))
+    }
+
+    /// Slack 原始消息事件 → (user, 文本)；非文本 / 机器人自身消息返回 None。
+    fn extract_slack(ev: &serde_json::Value) -> Option<(String, String)> {
+        let user = ev.get("user").and_then(|v| v.as_str())?.to_string();
+        let text = ev
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?
+            .to_string();
+        Some((user, text))
+    }
+
+    /// Telegram 原始 `message` 对象 → (chat id, 文本)；非文本返回 None。
+    fn extract_telegram(ev: &serde_json::Value) -> Option<(String, String)> {
+        let chat = ev
+            .get("chat")
+            .and_then(|c| c.get("id"))
+            .and_then(|v| v.as_i64())?
+            .to_string();
+        let text = ev
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?
+            .to_string();
+        Some((chat, text))
+    }
+
+    /// 统一入站分派（与渠道无关）：`/` 开头按内置命令处理，否则按普通消息。
+    /// - `/status`：**与「自动激活」开关无关**，始终回状态文本（开关开且因此切槽时附激活回执）。
+    /// - `/here` 与「普通消息切槽」：仅「自动激活」开时生效；关时 `/here` 静默忽略、普通文字
+    ///   交由卡片作答（观察者不处理）。切槽细则见设计 §3.4。补推在途已下沉到 `set_active_channel`。
+    async fn handle_inbound(state: &Arc<ServerState>, channel_id: &str, text: &str) {
+        let lang = Lang::current();
+        let config = AppConfig::load();
+        let auto = config.channels.auto_activation;
+        match crate::autochannel::parse_command(text) {
+            Some(crate::autochannel::Command::Status) => {
+                // 状态查询是独立功能：始终响应。仅当开关开、且本次因 /status 切了活跃槽时附激活回执。
+                let (switched, n) =
+                    if auto { set_active_channel(state, channel_id).await } else { (false, 0) };
+                let mut body = String::new();
+                if switched {
+                    body.push_str(&crate::autochannel::activated_receipt(n, lang));
+                    body.push_str("\n\n");
+                }
+                body.push_str(&crate::autochannel::status_text(&state.agents.snapshot(), lang));
+                let _ = reply_channel_text(channel_id, &config, &body).await;
+            }
+            Some(crate::autochannel::Command::Here) => {
+                if !auto {
+                    return; // 关态下「活跃槽」概念不存在：静默忽略。
+                }
+                // 激活 + 补推（在 set_active_channel 内完成）；/here 始终回执（即便已是当前槽，n=0）。
+                let (_switched, n) = set_active_channel(state, channel_id).await;
+                let _ = reply_channel_text(
+                    channel_id,
+                    &config,
+                    &crate::autochannel::activated_receipt(n, lang),
+                )
+                .await;
+            }
+            None => {
+                if !auto {
+                    return; // 关态：普通文字交卡片作答，观察者不切槽、不补推。
+                }
+                // 普通消息：切槽 + 补推（set_active_channel 内）+（仅当发生切换时）回执；文本本身不当答案。
+                let (switched, n) = set_active_channel(state, channel_id).await;
+                if switched {
+                    let _ = reply_channel_text(
+                        channel_id,
+                        &config,
+                        &crate::autochannel::activated_receipt(n, lang),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    /// 把活跃槽切到 `new_id`（IM id 或 "popup"）。统一入口：「在哪个渠道说话 / 作答就用哪个」。
+    /// 切换时：持久化 → 给**旧**渠道（若为 IM）发反激活提示 → 把**在途未答**问题补推给**新**渠道
+    /// （若为 IM）。补推是「渠道激活」的固有行为，与触发方式无关（`/here`、普通消息、`/status`、作答切槽均同）。
+    /// 返回 `(是否切换, 补推条数)`；新渠道激活回执文案由调用方按场景发送（弹窗无需）。
+    async fn set_active_channel(state: &Arc<ServerState>, new_id: &str) -> (bool, usize) {
+        let prev = {
+            let mut guard = state.active_channel.lock().unwrap();
+            if guard.as_deref() == Some(new_id) {
+                return (false, 0);
+            }
+            let prev = guard.take();
+            *guard = Some(new_id.to_string());
+            prev
+        };
+        crate::autochannel::save_active(Some(new_id));
+        log(&format!("auto-channel: active slot -> {}", new_id));
+        let cfg = AppConfig::load();
+        // 旧渠道反激活提示（仅真实 IM；"popup" / None 无收件端，跳过）。
+        if let Some(old) = prev {
+            if old != "popup" && old != new_id {
+                let _ = reply_channel_text(
+                    &old,
+                    &cfg,
+                    &crate::autochannel::deactivated_receipt(new_id, Lang::current()),
+                )
+                .await;
+            }
+        }
+        // 激活即补推在途（仅真实 IM；弹窗无卡片概念）。
+        let backfilled = if new_id != "popup" {
+            backfill_inflight(state, new_id, &cfg).await
+        } else {
+            0
+        };
+        (true, backfilled)
+    }
+
+    /// 把所有「在途未答」问题补推为 `channel_id` 的卡片（已挂接该渠道的请求跳过，避免重发）。返回补推数。
+    async fn backfill_inflight(
+        state: &Arc<ServerState>,
+        channel_id: &str,
+        config: &AppConfig,
+    ) -> usize {
+        let mut n = 0;
+        for entry in state.registry.in_flight_entries() {
+            if entry.coordinator.has_channel(channel_id) {
+                continue;
+            }
+            if let Some(ch) = build_im_channel(channel_id, config, state).await {
+                entry.coordinator.register(ch.clone());
+                ch.start(&entry.show.request, entry.coordinator.clone());
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// 为补推构造一个挂共享 Router 的渠道实例（各渠道仅此处差异：取对应 Router + 构造对应 Channel）。
+    async fn build_im_channel(
+        channel_id: &str,
+        config: &AppConfig,
+        state: &Arc<ServerState>,
+    ) -> Option<Arc<dyn Channel>> {
+        let ch: Arc<dyn Channel> = match channel_id {
+            "feishu" => {
+                let router = ensure_fs_router(state, &config.channels.feishu).await?;
+                Arc::new(FeishuChannel::shared(config.channels.feishu.clone(), router))
+            }
+            "dingding" => {
+                let dd = &config.channels.dingding;
+                let router =
+                    ensure_dd_router(state, dd.client_id.trim(), dd.client_secret.trim()).await?;
+                Arc::new(DingTalkChannel::shared(dd.clone(), router))
+            }
+            "slack" => {
+                let router = ensure_sl_router(state, &config.channels.slack).await?;
+                Arc::new(SlackChannel::shared(config.channels.slack.clone(), router))
+            }
+            "telegram" => {
+                let router = ensure_tg_router(state, &config.channels.telegram).await?;
+                Arc::new(TelegramChannel::shared(config.channels.telegram.clone(), router))
+            }
+            _ => return None,
+        };
+        Some(ch)
+    }
+
+    /// 向某渠道回一条纯文本（回执 / 状态）。各渠道仅此处差异：用对应 OpenAPI client 发文本。
+    async fn reply_channel_text(
+        channel_id: &str,
+        config: &AppConfig,
+        text: &str,
+    ) -> Result<(), String> {
+        match channel_id {
+            "feishu" => {
+                let client = crate::feishu::client::FeishuClient::new(&config.channels.feishu)
+                    .map_err(|e| e.to_string())?;
+                client.send_text(text).await.map(|_| ()).map_err(|e| e.to_string())
+            }
+            "dingding" => {
+                let client = crate::dingtalk::client::DingTalkClient::new(&config.channels.dingding)
+                    .map_err(|e| e.to_string())?;
+                client.send_oto_text(text).await.map_err(|e| e.to_string())
+            }
+            "slack" => {
+                let client = crate::slack::client::SlackClient::new(&config.channels.slack)
+                    .map_err(|e| e.to_string())?;
+                let channel = client.open_dm().await.map_err(|e| e.to_string())?;
+                client
+                    .post_text(&channel, text)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }
+            "telegram" => {
+                let tg = &config.channels.telegram;
+                let client = crate::telegram::TelegramClient::new(
+                    tg.bot_token.clone(),
+                    tg.chat_id.clone(),
+                    tg.api_base_url.clone(),
+                )
+                .map_err(|e| e.to_string())?;
+                client
+                    .send_message(text, None, None)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }
+            _ => Err(format!("reply unsupported for channel: {}", channel_id)),
+        }
     }
 
     /// 当前已建连且存活的 IM 长连接名（供 `daemon status` 展示）。

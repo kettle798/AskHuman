@@ -1667,6 +1667,30 @@ onBeforeUnmount(() => unlistenProgress?.());
 
       <!-- 通信渠道 -->
       <template v-else>
+        <!-- 实验：IM 会话期自动激活（仅实验开关开启且非 Windows 时显示） -->
+        <div
+          v-if="!isWindows && config.experimental.enabled"
+          class="card"
+        >
+          <div class="row">
+            <p class="card-title">
+              {{ t("settings.channels.autoActivationTitle") }}
+            </p>
+            <span class="spacer"></span>
+            <label class="switch">
+              <input
+                type="checkbox"
+                v-model="config.channels.autoActivation"
+                @change="persist"
+              />
+              <span class="track"></span>
+            </label>
+          </div>
+          <p class="card-desc">
+            {{ t("settings.channels.autoActivationDesc") }}
+          </p>
+        </div>
+
         <div class="card">
           <div class="row">
             <p class="card-title">{{ t("settings.channels.popupTitle") }}</p>

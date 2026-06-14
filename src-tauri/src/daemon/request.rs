@@ -129,6 +129,11 @@ impl RequestRegistry {
         self.inner.lock().unwrap().by_id.len()
     }
 
+    /// 当前所有在途请求项的快照（供「补推在途」把已发问题补发到新激活的渠道）。
+    pub fn in_flight_entries(&self) -> Vec<Arc<RequestEntry>> {
+        self.inner.lock().unwrap().by_id.values().cloned().collect()
+    }
+
     /// Cancel every active request (daemon shutdown): interrupt all their channels as a generic
     /// `Cancelled` (no source) so IM cards finalize and popups close, and wake their GUI handlers.
     /// Returns the number of requests affected, so the caller can decide whether to wait for the

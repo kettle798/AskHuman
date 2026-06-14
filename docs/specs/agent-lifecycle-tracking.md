@@ -8,7 +8,7 @@
 
 ## 1. 背景
 
-上一阶段在 `demo/agent-lifecycle/` 实测了 Claude Code / Codex / Cursor 三家 CLI 的生命周期信号，结论已写入 `FINDINGS.md`。本需求把这些结论落到产品里，但**单独成一个可独立测试的功能**，**不含** IM 渠道的「激活 / 反激活」逻辑（那是后续的「IM 渠道激活」需求 `docs/todos/im-channel-activation.md`，将构建在本功能之上）。
+上一阶段在 `demo/agent-lifecycle/` 实测了 Claude Code / Codex / Cursor 三家 CLI 的生命周期信号，结论已写入 `FINDINGS.md`。本需求把这些结论落到产品里，但**单独成一个可独立测试的功能**，**不含** IM 渠道的「激活 / 反激活」逻辑（那是后续的「IM 渠道激活」需求 `docs/plans/im-channel-activation.md`，将构建在本功能之上）。
 
 本功能交付两件事：
 

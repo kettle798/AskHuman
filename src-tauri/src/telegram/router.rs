@@ -44,6 +44,8 @@ struct Routes {
     active: HashMap<u64, ActiveInfo>,
     /// route_id → 会话入站事件发送端。
     sinks: HashMap<u64, UnboundedSender<TgInbound>>,
+    /// 原始文字消息观察者（供 daemon 级入站监听，如「IM 会话期自动激活」收 /here）。
+    observers: Vec<UnboundedSender<Value>>,
 }
 
 /// 进程内 Telegram Router（`Arc` 共享）。
@@ -94,6 +96,14 @@ impl TgRouter {
             seq: self.next_seq.clone(),
             rx,
         }
+    }
+
+    /// 登记一个原始文字消息观察者（用于 daemon 级入站监听）。返回接收端；丢弃即自动注销。
+    /// 每条观察到的事件是本 chat 收到的 `message` 对象（含 `text` / `chat`）。
+    pub fn observe_message(&self) -> UnboundedReceiver<Value> {
+        let (tx, rx) = unbounded_channel();
+        self.routes.lock().unwrap().observers.push(tx);
+        rx
     }
 }
 
@@ -223,6 +233,14 @@ async fn dispatch(client: &TelegramClient, routes: &Arc<Mutex<Routes>>, update: 
             Some(t) => t.to_string(),
             None => return, // 仅处理文字；图片/文件 Telegram 渠道不收
         };
+        // 广播给 daemon 级观察者（如「IM 会话期自动激活」入站监听），与卡片路由并行。
+        let observed = dispatch_observers(routes, message);
+        // 边界（仅 armed=有观察者时）：Telegram 自由文字既是卡片答案、又会被观察者收到。
+        // 斜线前缀文字按约定是「命令」（/here、/status…），不应被当成在途卡片的答案——故仅交观察者，
+        // 不路由到卡片会话。非斜线文字仍正常作答（同时被观察者收到，daemon 端按「普通消息」静默处理）。
+        if observed && text.trim_start().starts_with('/') {
+            return;
+        }
         // 归给该 chat 下「最新活动卡片」的会话（活动序号最大者）。
         let sink = {
             let r = routes.lock().unwrap();
@@ -241,4 +259,15 @@ async fn dispatch(client: &TelegramClient, routes: &Arc<Mutex<Routes>>, update: 
             });
         }
     }
+}
+
+/// 向所有存活的消息观察者广播一条原始 `message` 对象（顺带清理已失效的发送端）。
+/// 返回是否存在至少一个存活观察者（即本渠道当前是否处于「IM 自动激活 armed」态）。
+fn dispatch_observers(routes: &Arc<Mutex<Routes>>, message: &Value) -> bool {
+    let mut r = routes.lock().unwrap();
+    if r.observers.is_empty() {
+        return false;
+    }
+    r.observers.retain(|tx| tx.send(message.clone()).is_ok());
+    !r.observers.is_empty()
 }

@@ -162,6 +162,9 @@ export default {
       windowsUnsupported: "This hook is not supported on Windows",
     },
     channels: {
+      autoActivationTitle: "Session-scoped IM activation",
+      autoActivationDesc:
+        "When on, questions are no longer broadcast to every IM channel; the local popup always receives them. To receive on an IM channel, send /here (or /这里) in that channel while an agent is working; subsequent questions and any pending ones will be routed there.",
       popupTitle: "Local popup",
       rememberSize: "Remember window size",
       defaultWidth: "Default width",
