@@ -165,6 +165,8 @@ export default {
       autoActivationTitle: "Session-scoped IM activation",
       autoActivationDesc:
         "When on, questions are no longer broadcast to every IM channel; the local popup always receives them. To receive on an IM channel, send /here (or /这里) in that channel while an agent is working; subsequent questions and any pending ones will be routed there.",
+      autoActivationLifecycleHint:
+        "Tip: also enable Lifecycle tracking above for more accurate working/idle agent state detection.",
       popupTitle: "Local popup",
       rememberSize: "Remember window size",
       defaultWidth: "Default width",

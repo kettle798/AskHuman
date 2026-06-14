@@ -1,4 +1,9 @@
+pub mod agents_cmd;
 pub mod args;
+pub mod cfgio;
+pub mod channel_cmd;
+pub mod config_cmd;
+pub mod doctor;
 pub mod file_attachment;
 pub mod help;
 pub mod image_writer;
@@ -108,10 +113,22 @@ pub fn dispatch() {
             }
             exit(0);
         }
-        // Agent 生命周期相关子命令组（实验性功能，spec D22）。目前仅 `status`（弹出状态窗口），
-        // 预留扩展（未来可加 list / kill 等）。
+        // Agent 状态 + 集成子命令组（spec：cli-config）：monitor / show / install / uninstall / update。
         "agents" => {
-            agents_dispatch(&argv[2..], lang);
+            agents_cmd::dispatch(&argv[2..], lang);
+        }
+        // IM 渠道配置（headless / 无 GUI）：list / set / enable / disable / test / detect。
+        "channel" => {
+            channel_cmd::dispatch(&argv[2..], lang);
+        }
+        // 通用键值兜底：show / get / set / unset / path。
+        "config" => {
+            config_cmd::dispatch(&argv[2..], lang);
+        }
+        // 一屏体检：daemon / 渠道 / 集成。
+        "doctor" => {
+            doctor::dispatch(&argv[2..], lang);
+            exit(0);
         }
         // 第一题既可用位置参数，也可用 `-q`/`--question`；提问相关 flag 一律进入提问分支，
         // 由 `parse_ask` 给出精确错误（如缺少问题内容、选项需在问题之后）。
@@ -203,33 +220,6 @@ pub fn dispatch() {
                 exit(1);
             }
         },
-    }
-}
-
-/// `AskHuman agents <sub>` 分发（实验性功能，spec D22）。预留扩展空间。
-fn agents_dispatch(args: &[String], lang: Lang) {
-    let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
-    match sub {
-        // 默认 / status：弹出 Agent 状态窗口（订阅 daemon 推送，动态更新）。
-        "status" | "" => {
-            #[cfg(unix)]
-            {
-                crate::app::run_agents(crate::config::AppConfig::load_without_secrets());
-            }
-            #[cfg(not(unix))]
-            {
-                eprintln!("agents status is not supported on this platform");
-                exit(1);
-            }
-        }
-        other => {
-            eprintln!(
-                "{}{}",
-                i18n::err_prefix(lang),
-                i18n::tr(lang, "cli.unknownOption").replace("{opt}", other)
-            );
-            exit(1);
-        }
     }
 }
 

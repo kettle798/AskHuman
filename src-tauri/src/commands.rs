@@ -766,9 +766,9 @@ pub fn agent_lifecycle_uninstall(agent: String) -> Result<String, String> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TelegramTestArgs {
-    bot_token: String,
-    chat_id: String,
-    api_base_url: String,
+    pub bot_token: String,
+    pub chat_id: String,
+    pub api_base_url: String,
 }
 
 #[tauri::command]
@@ -789,9 +789,9 @@ use crate::dingtalk::stream::{StreamConn, StreamEvent, TOPIC_BOT_MESSAGE};
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DingTalkTestArgs {
-    client_id: String,
-    client_secret: String,
-    user_id: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub user_id: String,
 }
 
 /// 测试连接：换 token（校验 ClientId/Secret）+ 向 userId 单聊发一条测试消息。
@@ -822,8 +822,8 @@ pub async fn dingtalk_test(args: DingTalkTestArgs) -> Result<String, String> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DingTalkDetectArgs {
-    client_id: String,
-    client_secret: String,
+    pub client_id: String,
+    pub client_secret: String,
 }
 
 /// 自动识别准备：校验 ClientId/Secret（换 token），通过后返回供用户私聊发送的 4 位识别码。
@@ -847,9 +847,9 @@ pub async fn dingtalk_detect_prepare(args: DingTalkDetectArgs) -> Result<String,
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DingTalkWaitArgs {
-    client_id: String,
-    client_secret: String,
-    code: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub code: String,
 }
 
 /// 自动识别等待：开 Stream（bot 消息 topic），等到内容等于识别码的单聊消息，返回其 senderStaffId。
@@ -929,10 +929,10 @@ use crate::feishu::ws::{FeishuWs, WsEvent};
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeishuTestArgs {
-    app_id: String,
-    app_secret: String,
-    open_id: String,
-    base_url: String,
+    pub app_id: String,
+    pub app_secret: String,
+    pub open_id: String,
+    pub base_url: String,
 }
 
 /// 测试连接：换 token（校验 AppId/Secret）+ 向 open_id 单聊发一条测试消息。
@@ -961,9 +961,9 @@ pub async fn feishu_test(args: FeishuTestArgs) -> Result<String, String> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeishuDetectArgs {
-    app_id: String,
-    app_secret: String,
-    base_url: String,
+    pub app_id: String,
+    pub app_secret: String,
+    pub base_url: String,
 }
 
 /// 自动识别准备：校验 AppId/Secret（换 token），通过后返回供用户私聊发送的 4 位识别码。
@@ -987,10 +987,10 @@ pub async fn feishu_detect_prepare(args: FeishuDetectArgs) -> Result<String, Str
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeishuWaitArgs {
-    app_id: String,
-    app_secret: String,
-    base_url: String,
-    code: String,
+    pub app_id: String,
+    pub app_secret: String,
+    pub base_url: String,
+    pub code: String,
 }
 
 /// 自动识别等待：开长连接，等到内容等于识别码的单聊消息，返回发送者 open_id。120 秒超时报错。
@@ -1089,9 +1089,9 @@ use crate::slack::ws::{self as slack_ws, SlackWs, WsEvent as SlackWsEvent};
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlackTestArgs {
-    bot_token: String,
-    app_token: String,
-    user_id: String,
+    pub bot_token: String,
+    pub app_token: String,
+    pub user_id: String,
 }
 
 /// 测试连接：校验 Bot Token（auth.test + 向 userId 发测试 DM）+ 校验 App Token（apps.connections.open）。
@@ -1127,8 +1127,8 @@ pub async fn slack_test(args: SlackTestArgs) -> Result<String, String> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlackDetectArgs {
-    bot_token: String,
-    app_token: String,
+    pub bot_token: String,
+    pub app_token: String,
 }
 
 /// 自动识别准备：校验双 token（App Token 能开 Socket Mode）后返回供用户私聊发送的 4 位识别码。
@@ -1150,9 +1150,9 @@ pub async fn slack_detect_prepare(args: SlackDetectArgs) -> Result<String, Strin
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlackWaitArgs {
-    bot_token: String,
-    app_token: String,
-    code: String,
+    pub bot_token: String,
+    pub app_token: String,
+    pub code: String,
 }
 
 /// 自动识别等待：开 Socket Mode，等到 DM 文本内容等于识别码的消息，返回发送者 user id。120 秒超时报错。

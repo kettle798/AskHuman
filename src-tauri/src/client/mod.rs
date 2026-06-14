@@ -196,6 +196,30 @@ pub async fn open_for_subscribe() -> std::io::Result<(Reader, OwnedWriteHalf)> {
     connect_split().await
 }
 
+/// 取一次 agent 状态快照（headless `agents monitor` 用）：连接 → 握手 → 订阅 → 读首个
+/// `AgentsState` 即返回（不持续监听）。daemon 不可达或异常返回 None。
+pub async fn request_agents_snapshot() -> Option<serde_json::Value> {
+    ensure_running().await.ok()?;
+    let (mut reader, mut writer) = connect_split().await.ok()?;
+    ipc::write_msg(&mut writer, &ClientMsg::Hello(hello())).await.ok()?;
+    // 等握手 Ok（忽略期间其它消息）。
+    loop {
+        match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
+            Ok(Some(ServerMsg::HelloAck(ack))) if ack.status == HelloStatus::Ok => break,
+            Ok(Some(_)) => continue,
+            _ => return None,
+        }
+    }
+    ipc::write_msg(&mut writer, &ClientMsg::AgentsSubscribe).await.ok()?;
+    loop {
+        match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
+            Ok(Some(ServerMsg::AgentsState { agents })) => return Some(agents),
+            Ok(Some(_)) => continue,
+            _ => return None,
+        }
+    }
+}
+
 /// 瘦客户端 ask 入口：确保 Daemon 在运行 → 握手 → 提交任务 → 流式取回结果 → 按退出码退出（不返回）。
 pub fn run_ask(task: crate::ipc::TaskRequest) -> ! {
     let rt = match tokio::runtime::Builder::new_current_thread()

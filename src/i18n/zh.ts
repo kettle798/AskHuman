@@ -160,6 +160,8 @@ export default {
       autoActivationTitle: "IM 会话期自动激活",
       autoActivationDesc:
         "开启后不再向所有 IM 渠道群发提问；本地弹窗始终会收到。需要某个 IM 渠道接收时，在 agent 工作期间于该渠道发送 /here（或 /这里），之后的提问与当前待答都会改走该渠道。",
+      autoActivationLifecycleHint:
+        "建议同时开启上方的「生命周期追踪」，以提高 agent 工作/空闲状态识别的准确性。",
       popupTitle: "本地弹窗",
       rememberSize: "记住窗口尺寸",
       defaultWidth: "默认宽度",

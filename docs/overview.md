@@ -71,9 +71,16 @@ AskHuman/
       macos_quicklook.rs     (macOS) 原生 QLPreviewPanel 预览 + 文件系统图标(file_icon_png_base64)
       macos_menu.rs          (macOS) -f 附件原生右键菜单（NSMenu，Finder 风格）
       cli/
-        mod.rs               argv 分发（--help/--version/--settings/--history[--all]/--agent-help/--scripting-help/无参/提问）
+        mod.rs               argv 分发（--help/--version/--settings/--history[--all]/--agent-help/--scripting-help/
+                             daemon/agents/channel/config/doctor/无参/提问）
         args.rs              提问参数解析（message / --stdin / -o / -o!(推荐选项) / --no-markdown / -f /
                              --single(单选) / --select-only(严格，须每题有选项) / --output <text|json>）
+        cfgio.rs             CLI 配置公共工具：点号路径 get/set（serde_json::Value）+ 类型强制 + 密钥识别 +
+                             密钥取值(env/file/stdin/隐藏输入) + 脱敏 + 交互输入 + block_on 助手
+        config_cmd.rs        `config show|get|set|unset|path`（通用键值兜底；密钥键自动入钥匙串，值不进 argv）
+        channel_cmd.rs       `channel list|set|enable|disable|test|detect`（向导+脚本；复用 commands 的 test/detect）
+        agents_cmd.rs        `agents monitor|show|install|uninstall|update`（状态文本/json + 集成；复用 integrations）
+        doctor.rs            `doctor [--json]` 一屏体检（daemon/渠道/集成）
         file_attachment.rs   -f 路径解析/校验（~/相对路径 → 绝对路径 + 元信息）
         output.rs            结果格式化：文本区块字段恒英文常量 MARKER_*（[selected_options]/[user_input]/
                              [files]（图片+文件合并）/[status]）+ render_json（D7：snake_case/省空字段）
@@ -213,7 +220,7 @@ AskHuman/
 
 `~/.askhuman/config.json`（新位置缺失时自动回退旧 `~/.humaninloop/config.json`）：`general`(theme, language, alwaysOnTop, appearAnimation, windowEffect, speechLanguage, speechShortcut, historyLimit) + `channels.popup`(enabled,width,height,rememberSize) + `channels.telegram`(enabled,botToken,chatId,apiBaseUrl) + `channels.dingding`(enabled,clientId,clientSecret,userId,cardTemplateId,…) + `channels.feishu`(enabled,appId,appSecret,openId,baseUrl) + `channels.slack`(enabled,botToken,appToken,userId) + `channels.autoActivation`(「IM 会话期自动激活」开关，默认 false) + `experimental`(enabled，实验性功能开关，默认 false)。缺字段走默认、未知字段忽略。用户向配置说明见 `docs/wiki/`。
 
-> IM 会话期自动激活（`channels.autoActivation`，默认关；设计 `docs/plans/im-channel-activation.md`）：开关关＝旧「每次提问全发所有启用 IM」。开关开（UI 入口在「渠道」Tab、受 `experimental.enabled` 门控）后：daemon 在 agent **工作中**才连各启用 IM、默认只监听入站；同一时刻只有「活跃槽」对应的 IM 收提问卡片；在某 IM 发 `/here`（或 `/这里`）把该渠道设为活跃槽，发 `/status`（或 `/状态`）回工作中/空闲 agent 文本，普通消息＝切到此渠道（文本不当答案）。**凡把活跃槽切到某 IM 都会把所有在途未答补推过去**（补推＝渠道激活的固有行为，统一在 `set_active_channel`、与触发方式无关：`/here`/普通消息/`/status` 切槽/作答切槽均同）。活跃槽**持久化**于 `~/.askhuman/state/auto-channel.json`、跨重启保留、仅由入站消息改变。忙/闲/结束判定复用 Agent 生命周期追踪（`agents/registry.rs`）；无 turn hook 时「首次提问起算工作中」（仅开关开时兜底登记）。代码：`autochannel.rs` + `daemon/mod.rs`（`ensure_inbound_listeners`/`spawn_listener` 通用循环 + `handle_inbound`/`backfill_inflight`/`attach_im_channels` 门控）。命令处理一份实现，各渠道只提供传输原语（连 Router + 原始消息观察者 + 抽取 `(发送者,文本)` + 期望发送者 + `build_im_channel`/`reply_channel_text` 分支）。**四家（飞书/钉钉/Slack/Telegram）均已接入并真机端到端验证 OK**。**入站消费随「工作中」起、随守护进程退出而止**：复用 lifecycle turn hook，turn-start/提问即 `ensure_inbound_listeners`（按 `working_count>0` 自门控、与开关无关），使 `/here`、`/status` 在工作期间随时可用；不做主动断连，连接随守护进程空闲退出而释放（D18）。**`/status` 与总开关独立**（开关只管切槽/发卡）；`/here` 在关态静默忽略。Telegram 自由文字既是答案又被观察者收到，斜线前缀文字仅当命令、不路由到在途卡片。**活跃槽统一含 "popup"**：在哪个渠道说话/作答就更新为哪个（弹窗作答 → "popup"，后续只弹窗），切槽时给旧 IM 发反激活提示（点明切到了哪个渠道）、把在途未答补推给新 IM、由调用方给新渠道发激活回执——逻辑统一在 `set_active_channel` 一处（返回 `(是否切换, 补推数)`；`winner_channel_id` 提供作答渠道）。
+> IM 会话期自动激活（`channels.autoActivation`，默认关；设计 `docs/plans/im-channel-activation.md`）：开关关＝旧「每次提问全发所有启用 IM」。开关开（UI 入口在「实验」Tab，随 `experimental.enabled` 显露；旁注「建议同时开启生命周期追踪以提高状态识别准确性」）后：daemon 在 agent **工作中**才连各启用 IM、默认只监听入站；同一时刻只有「活跃槽」对应的 IM 收提问卡片；在某 IM 发 `/here`（或 `/这里`）把该渠道设为活跃槽，发 `/status`（或 `/状态`）回工作中/空闲 agent 文本，普通消息＝切到此渠道（文本不当答案）。**凡把活跃槽切到某 IM 都会把所有在途未答补推过去**（补推＝渠道激活的固有行为，统一在 `set_active_channel`、与触发方式无关：`/here`/普通消息/`/status` 切槽/作答切槽均同）。活跃槽**持久化**于 `~/.askhuman/state/auto-channel.json`、跨重启保留、仅由入站消息改变。忙/闲/结束判定复用 Agent 生命周期追踪（`agents/registry.rs`）；无 turn hook 时「首次提问起算工作中」（仅开关开时兜底登记）。代码：`autochannel.rs` + `daemon/mod.rs`（`ensure_inbound_listeners`/`spawn_listener` 通用循环 + `handle_inbound`/`backfill_inflight`/`attach_im_channels` 门控）。命令处理一份实现，各渠道只提供传输原语（连 Router + 原始消息观察者 + 抽取 `(发送者,文本)` + 期望发送者 + `build_im_channel`/`reply_channel_text` 分支）。**四家（飞书/钉钉/Slack/Telegram）均已接入并真机端到端验证 OK**。**入站消费随「工作中」起、随守护进程退出而止**：复用 lifecycle turn hook，turn-start/提问即 `ensure_inbound_listeners`（按 `working_count>0` 自门控、与开关无关），使 `/here`、`/status` 在工作期间随时可用；不做主动断连，连接随守护进程空闲退出而释放（D18）。**`/status` 与总开关独立**（开关只管切槽/发卡）；`/here` 在关态静默忽略。Telegram 自由文字既是答案又被观察者收到，斜线前缀文字仅当命令、不路由到在途卡片。**活跃槽统一含 "popup"**：在哪个渠道说话/作答就更新为哪个（弹窗作答 → "popup"，后续只弹窗），切槽时给旧 IM 发反激活提示（点明切到了哪个渠道）、把在途未答补推给新 IM、由调用方给新渠道发激活回执——逻辑统一在 `set_active_channel` 一处（返回 `(是否切换, 补推数)`；`winner_channel_id` 提供作答渠道）。
 
 > 回复历史：`general.historyLimit`（默认 200，0=停止新增并清理已有记录）控制 `~/.askhuman/history.jsonl` 全局保留条数（裁剪与「立即清理」对 0 不再特判：`record` 在 limit==0 时不新增、但按与 >0 相同时机把已有记录裁到 0；`trim(0)` 直接清空）。每次提问在 `Coordinator.finish()`（所有渠道/模式唯一汇聚点）旁路记录一条「发送 / 用户主动取消」（系统取消不记）；只存图片/文件路径（best-effort 展示，缺失显示占位）。项目按「从 CLI cwd 向上找首个 .git 根、回退 cwd」识别，经 `TaskRequest`/`ShowPayload` 贯穿 daemon（revisit A11）。历史窗口 `AskHuman --history [--all]` 或弹窗导航栏「历史」按钮打开。详情只读组件 `HistoryDetail.vue` 完整还原：选项框复用 controls.css（选中=蓝底白 ✓）、附件区与弹窗同款交互（单击选中 / 空格 QuickLook 预览 + 方向键切换 / 双击打开 / 右键菜单 / 拖出）。历史窗口创建时 `watch_history_file` 用 notify 监听 `history.jsonl`，任何进程写入后发 `history-updated` 事件令前端重载并保留当前选中条目（跨进程实时刷新）。注：`preview_attachments` 命令把 QuickLook 控制者插入**调用方窗口**响应链（弹窗或历史窗口皆可），不再硬编码 popup。
 
@@ -244,8 +251,19 @@ AskHuman/
 - **事件采集**：hook 命令统一为 `AskHuman __agent-hook <agent> <event>`（`agents/report.rs`）；四类事件 session-start/turn-start/turn-end/session-end（Codex 无 session-end）。reporter 按 env 判真实运行家族做**去重**（Cursor 兼容加载 `~/.claude` 致每事件双触发，env 有 `CURSOR_*`→只认 cursor、跳过 claude 那次），并 walk 进程树定位真实 agent pid、解析 session_id（env 专用变量优先，回退 stdin JSON）。
 - **状态推导**：daemon 内 `AgentRegistry`（`agents/registry.rs`）以 **session_id 为身份**、pid 仅判存活。turn-start/turn-end 切「工作中/空闲」；**进程存活轮询（1s）是权威的「已结束」判据**（关窗/`kill -9` 时事件全丢，靠它）；1h TTL 兜底（任何 hook 事件或 `AskHuman` 提问会刷新**对应 session** 的活动时间）。ended 最多留 10 条。状态持久化 `~/.askhuman/agents.json`，daemon 换新/重启后重载并 kill-0 复核。
 - **闲退守卫**：仅「工作中」agent 或有状态窗口连接才阻止 daemon 闲时退出（空闲 agent 不算）；**graceful drain（版本换新）不受存活 agent 影响**。
-- **状态窗口**：`AskHuman agents status` → daemon 拉起 GUI（`app::run_agents` + `create_agents_window`），订阅 `ServerMsg::AgentsState` 推送、前端 `AgentsView.vue` 跨项目按类型分组、状态优先排序、相对时间动态刷新。`agents` 为子命令组，预留后续扩展。
+- **状态窗口**：`AskHuman agents monitor`（原 `agents status` 改名，spec `cli-config.md` D8）→ 有 GUI 时 daemon 拉起 GUI（`app::run_agents` + `create_agents_window`），订阅 `ServerMsg::AgentsState` 推送、前端 `AgentsView.vue` 跨项目按类型分组、状态优先排序、相对时间动态刷新；headless 或 `--json`/`--text` → 取一次 `AgentsState` 快照（`client::request_agents_snapshot`）渲染文本/JSON（`agents_cmd.rs`）。
 - **IPC 增量**：`TaskRequest` 加 `agent_kind/agent_session_id/agent_pid`（提问顺带刷新活动）；`ClientMsg::AgentEvent`/`AgentsSubscribe`；`ServerMsg::AgentsState`。
+
+## CLI 配置与 Agent 集成（headless / 无 GUI）
+
+> 需求 `docs/specs/cli-config.md` + 计划 `docs/plans/cli-config.md`。让 Linux 服务器 / 容器 / SSH 等无 GUI 环境**纯命令行**完成全部渠道配置与 agent 集成，且**可脚本化一次性执行**。四个顶层子命令组（`channel`/`agents`/`config` + `doctor`），每组及子命令都有 `help`，所有输出经 `cli/cfgio.rs::t` 中英双语本地化。
+
+- **复用而非重写**：渠道连通性 `test` / userId·openId 自动识别 `detect` 直接调 `commands.rs` 既有 `*_test`/`*_detect_prepare`/`*_detect_wait`（参数结构体字段已 `pub`，密钥经 `fallback_secret` 回退已存值）；配置读写走 `config.rs::{load,load_without_secrets,save}`（save 自动把密钥写钥匙串、文件 0600）；集成走 `integrations::{agent_rules,cursor_hook,claude_hook,agent_lifecycle}`；agent 状态走 daemon `AgentsSubscribe`/`AgentsState`。落盘后 daemon `config_watch` 自动热重载。
+- **`channel`**（`channel_cmd.rs`，name ∈ telegram|dingding|feishu|slack）：`list [--json]`（启用/配置齐全/已连接；daemon 未运行时连接态文本显 `—`、JSON 为 `null`）；`set <name>` 二合一——**终端且无 flag → 交互向导**（逐项提示、密钥隐藏输入、留空保留）、**带 flag → 非交互脚本**（`--enable/--disable` + 各非密钥字段 kebab flag）；`enable|disable`；`test`；`detect [--save]`（prepare 取识别码 → 提示发给 bot → wait 经 daemon 单连接捕获 → 可保存；telegram 无 detect）。
+- **密钥输入（D4，脚本安全）**：仅 `--<field>-env <VAR>` / `--<field>-file <path>` / `--<field>-stdin`（或值 `-`）；交互时隐藏输入（Unix termios 关 echo）；**密钥明文不进 argv**（避免泄漏 shell 历史 / `ps`）。
+- **`agents`**（`agents_cmd.rs`，agent ∈ cursor|claude|codex）：`monitor [--json|--text]`（见上节）；`show [<agent>]`（打印 `prompts::cli_reference()` 手动集成提示词 + 各 agent 粘贴位置 + 三类安装状态）；`install/uninstall/update <agent>` **必须显式** `--rules`/`--hook`/`--lifecycle`（无默认捆绑，D6；`--hook` 仅 cursor/claude，codex 跳过；`--lifecycle` 实验性；lifecycle 无独立 update→重装即刷新）。
+- **`config`**（`config_cmd.rs`，兜底）：`show [--json]`（密钥脱敏 `●●●`）/`get`/`set`/`unset`/`path`，点号 camelCase 键。`set` 非密钥键按目标 JSON 类型强制（bool/数字/字符串/枚举）→ 反序列化校验 → save；**密钥键**（5 个，`cfgio::SECRET_KEYS`，与 `secrets::ACCOUNT_*` 一致）自动路由进钥匙串，值仍只从 env/file/stdin 取。`unset` 重置默认（密钥 → `secrets::delete`）。
+- **`doctor [--json]`**（`doctor.rs`）：一屏体检 daemon（运行/版本/在途/IM 连接）+ 各渠道（启用·齐全·连接）+ 各 agent 集成（rules·hook·lifecycle 装没装/需更新）。
 
 ## 构建 / 开发 / 测试
 

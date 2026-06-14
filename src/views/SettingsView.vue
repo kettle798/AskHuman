@@ -1482,6 +1482,30 @@ onBeforeUnmount(() => unlistenProgress?.());
             </div>
           </template>
         </div>
+
+        <!-- IM 会话期自动激活（从「渠道」Tab 迁来，归入实验区） -->
+        <div class="card">
+          <div class="row">
+            <p class="card-title">
+              {{ t("settings.channels.autoActivationTitle") }}
+            </p>
+            <span class="spacer"></span>
+            <label class="switch">
+              <input
+                type="checkbox"
+                v-model="config.channels.autoActivation"
+                @change="persist"
+              />
+              <span class="track"></span>
+            </label>
+          </div>
+          <p class="card-desc">
+            {{ t("settings.channels.autoActivationDesc") }}
+          </p>
+          <p class="card-desc hint">
+            {{ t("settings.channels.autoActivationLifecycleHint") }}
+          </p>
+        </div>
       </template>
 
       <!-- Agent -->
@@ -1667,30 +1691,6 @@ onBeforeUnmount(() => unlistenProgress?.());
 
       <!-- 通信渠道 -->
       <template v-else>
-        <!-- 实验：IM 会话期自动激活（仅实验开关开启且非 Windows 时显示） -->
-        <div
-          v-if="!isWindows && config.experimental.enabled"
-          class="card"
-        >
-          <div class="row">
-            <p class="card-title">
-              {{ t("settings.channels.autoActivationTitle") }}
-            </p>
-            <span class="spacer"></span>
-            <label class="switch">
-              <input
-                type="checkbox"
-                v-model="config.channels.autoActivation"
-                @change="persist"
-              />
-              <span class="track"></span>
-            </label>
-          </div>
-          <p class="card-desc">
-            {{ t("settings.channels.autoActivationDesc") }}
-          </p>
-        </div>
-
         <div class="card">
           <div class="row">
             <p class="card-title">{{ t("settings.channels.popupTitle") }}</p>
@@ -2253,6 +2253,11 @@ onBeforeUnmount(() => unlistenProgress?.());
 }
 .card-desc.warn {
   color: #ff9f0a;
+}
+/* 关联建议：比正文稍弱、与上方说明留出间距 */
+.card-desc.hint {
+  margin-top: 6px;
+  opacity: 0.85;
 }
 /* 关于区：版本值、发布链接、更新日志容器 */
 .row .value {
