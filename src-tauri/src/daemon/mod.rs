@@ -676,22 +676,30 @@ mod unix_impl {
         // 「自动激活」开启时：每次提问按「工作中」兜底登记会话（无 turn hook 也能驱动入站监听 / 切槽）；
         // 开关关时保持旧行为（仅刷新已追踪会话的活动，尊重「未装 hook = 不追踪」，不污染注册表）。
         let auto = AppConfig::load_without_secrets().channels.auto_activation;
-        if let (Some(kind), Some(sid)) = (
+        let changed = match (
             task.agent_kind.as_deref().and_then(AgentKind::parse),
             task.agent_session_id.clone(),
+            task.agent_pid,
         ) {
-            let cwd = Some(task.project.clone()).filter(|s| !s.trim().is_empty());
-            // MCP 模式（`from_mcp`）下 `agent_session_id` 取自长驻 MCP server 的启动 env，可能过期；
-            // 故即便「自动激活」开启也**只刷新已存在的 session、绝不新建**，避免造出幽灵会话。
-            let changed = if auto && !task.from_mcp {
-                state.agents.upsert_working(kind, &sid, task.agent_pid, cwd)
-            } else {
-                state.agents.touch_activity(kind, &sid, task.agent_pid)
-            };
-            if changed {
-                state.agents.persist();
-                broadcast_agents_state(state);
+            // 有 session_id（shell 工具子进程能从 env 拿到）：按 session 刷新。
+            (Some(kind), Some(sid), pid) => {
+                let cwd = Some(task.project.clone()).filter(|s| !s.trim().is_empty());
+                // MCP 模式（`from_mcp`）下 `agent_session_id` 取自长驻 MCP server 的启动 env，可能过期；
+                // 故即便「自动激活」开启也**只刷新已存在的 session、绝不新建**，避免造出幽灵会话。
+                if auto && !task.from_mcp {
+                    state.agents.upsert_working(kind, &sid, pid, cwd)
+                } else {
+                    state.agents.touch_activity(kind, &sid, pid)
+                }
             }
+            // 无 session_id 但有 pid（典型 **MCP 模式**：agent 把 MCP server 的 env 清空，本次仅靠进程树
+            // walk 拿到 `(kind, pid)`）：按 pid 匹配已存在 session 刷新（只更新、绝不新建）。
+            (Some(kind), None, Some(pid)) => state.agents.touch_activity_by_pid(kind, pid),
+            _ => false,
+        };
+        if changed {
+            state.agents.persist();
+            broadcast_agents_state(state);
         }
         // 确保入站消费在线（自身按「有工作中 agent」自门控；与开关无关，使 /status 等命令独立可用）。
         ensure_inbound_listeners(state).await;

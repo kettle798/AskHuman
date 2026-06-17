@@ -200,9 +200,11 @@ AskHuman/
       agents/                (实验性, Unix) Agent 生命周期追踪：mod.rs(AgentKind=claude/codex/cursor +
                              LifecycleEvent=session-start/turn-start/turn-end/session-end) /
                              detect.rs(按 env 判真实运行家族[Cursor 双触发去重] / session_id 解析 /
-                             walk 进程树定位 agent pid / kill-0 存活) /
+                             walk 进程树定位 agent pid / walk_any_agent[env 判不出时按进程树兜底拿
+                             kind+pid，MCP 模式专用] / kill-0 存活) /
                              title.rs(三家会话标题解析：cursor meta.json / codex·claude jsonl) /
                              registry.rs(AgentRecord 注册表：apply_event 推导 工作中/空闲/已结束、
+                             touch_activity[按 session 刷新] / touch_activity_by_pid[MCP 兜底：按 pid 刷新已存在 session]、
                              poll_liveness、ttl_sweep[1h 兜底]、ended 最多留 10 条、persist/load
                              ~/.askhuman/agents.json、snapshot 推送) /
                              report.rs(隐藏子命令 `__agent-hook <agent> <event>` 上报器：去重+解析+发 daemon)
@@ -329,6 +331,7 @@ AskHuman/
 
 - **形态**：`AskHuman mcp` 以 **STDIO** 跑一个 MCP server（rmcp SDK），对外暴露**单一工具 `ask`**（配置中 server 名 `askhuman`）。
 - **薄壳复用**：MCP server 不自己实现 ask 逻辑——每次 `ask` 调用就 `spawn` 一个现有 `AskHuman … --output json` 子进程，**复用全部既有 ask 流程**（弹窗 / IM / 抢答 / 历史 / 落盘 / 排空与自动重连）。子进程带 `ASKHUMAN_FROM_MCP=1`，CLI 据此在 `TaskRequest.from_mcp` 标记来源；daemon 对 MCP 来源的会话活动**仅刷新（touch_activity）而非新建工作会话**，避免长寿 MCP server 携带过期 session_id 造成「幽灵工作会话」。全平台同一套；daemon 换新/重启后下次调用自然重连。
+- **MCP 模式下的生命周期识别（env 清空 → 退用进程树 pid）**：agent 启动 STDIO MCP server 时会 `env_clear()`（实测 Codex：`rmcp-client` 仅注入 `HOME/PATH/...` 约 10 个系统变量），故 ask 子进程**看不到任何 `CODEX_*`/`CURSOR_*`/`CLAUDE*` 变量**——既判不出家族、也**拿不到会话 ID**（`CODEX_THREAD_ID` 本就只注入 codex 的 shell 工具子进程，连 codex 自身进程 env 都没有，配置 `env` 转发也无济于事）。兜底：`detect::walk_any_agent_from_self()` 向上 walk 进程树定位最近的 agent 祖先 → 拿到 `(kind, pid)`（无 session_id，pid 是当次现取、真实存活）；daemon `handle_submit` 据此走 `AgentRegistry::touch_activity_by_pid(kind, pid)`：按 `(kind,pid)` 匹配**已存在**的 session 刷新 `last_activity`，**只更新、绝不新建**（pid 真实存活 → 无幽灵会话）。命中前提是该会话已被 lifecycle hook 追踪（hook 的 turn 事件把同一 codex pid 写进 registry）。三家通用（仅 `from_mcp` 启用兜底，零影响普通 CLI 调用）。
 - **入参（精简）**：`ask` 仅暴露 `message`（**恒按 Markdown 渲染**）/`questions[{question, options[{text, recommended}]}]`/`files[]`；不暴露 `markdown`（恒 on）、`single`、`selectOnly`（属脚本/纯文本场景）。
 - **输出**：`ask` 声明 input/output schema；子进程 JSON 解析为 `AskResult`（**剔除脚本专用的 `selected_indices`**）→ 返回 `structuredContent`（结构化 JSON）+ `content`（序列化 JSON 文本 + 人类回复中的图片读回转 `ImageContent`）。**取消时顶层带 `status` 引导文案**（要求模型重新确认直到用户明确答复，不得当作放行）；该字段由 CLI `--output json` 顶层产出（取消路径才有），薄壳原样透传，脚本侧亦受益。
 - **三态集成**：每家 agent 的「自动集成」改为 **None / Cli / Mcp 互斥三态**（`integrations/agent_mode.rs`）。Cli 绑定 Rule(CLI 版)+超时 Hook；Mcp 绑定 Rule(MCP 版)+MCP 配置（`integrations/mcp_config.rs` 写用户级全局：Cursor `~/.cursor/mcp.json`、Claude `~/.claude.json`、Codex `~/.codex/config.toml`，最小编辑保留用户内容）。提示词分 `prompts::{cli_reference,mcp_reference}` 两版。lifecycle hook（turn 追踪）与三态正交，独立开关。

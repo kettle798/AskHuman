@@ -276,14 +276,21 @@ pub fn dispatch() {
 #[cfg(unix)]
 fn detect_caller_agent() -> (Option<String>, Option<String>, Option<u32>) {
     use crate::agents::detect;
-    match detect::detect_running_agent() {
-        Some(kind) => {
-            let sid = detect::session_id_from_env(kind);
-            let pid = detect::walk_agent_pid_from_self(kind);
-            (Some(kind.as_str().to_string()), sid, pid)
-        }
-        None => (None, None, None),
+    // 首选按 env 判定（shell 工具子进程能拿到家族 + 会话 ID）。
+    if let Some(kind) = detect::detect_running_agent() {
+        let sid = detect::session_id_from_env(kind);
+        let pid = detect::walk_agent_pid_from_self(kind);
+        return (Some(kind.as_str().to_string()), sid, pid);
     }
+    // 兜底：env 判不出（典型为 **MCP 模式**——agent 启动 STDIO MCP server 时 `env_clear()`，本子进程
+    // 看不到任何 agent 变量），但进程树仍可定位 agent 祖先 → 拿到 `(kind, pid)`（**无 session_id**）。
+    // 仅 MCP 来源启用，避免影响普通无 agent 的 CLI 调用。daemon 据此按 pid 匹配已存在 session 刷新。
+    if from_mcp_env() {
+        if let Some((kind, pid)) = detect::walk_any_agent_from_self() {
+            return (Some(kind.as_str().to_string()), None, Some(pid));
+        }
+    }
+    (None, None, None)
 }
 
 /// 是否经 MCP 模式发起（`AskHuman mcp` spawn 子进程时设 env `ASKHUMAN_FROM_MCP`）。

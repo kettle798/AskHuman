@@ -211,6 +211,28 @@ impl AgentRegistry {
         }
     }
 
+    /// 拿不到 `session_id` 时按 **pid** 刷新活动（典型为 **MCP 模式**：agent 把 MCP server 的 env
+    /// 清空，子进程只能靠进程树 walk 拿到 `(kind, pid)`，取不到会话 ID）。在活动记录里按 `(kind, pid)`
+    /// 匹配**已存在**的 session 并刷新 `last_activity`；**只更新、绝不新建**——pid 是当次现取、真实存活的，
+    /// 天然规避长寿 MCP server 旧 `session_id` 造成的「幽灵会话」。返回是否命中（供广播刷新相对时间）。
+    pub fn touch_activity_by_pid(&self, kind: AgentKind, pid: u32) -> bool {
+        if pid == 0 {
+            return false;
+        }
+        let now = now_secs();
+        let mut inner = self.inner.lock().unwrap();
+        let mut hit = false;
+        for r in inner
+            .active
+            .iter_mut()
+            .filter(|r| r.kind == kind && r.pid == Some(pid))
+        {
+            r.last_activity = now;
+            hit = true;
+        }
+        hit
+    }
+
     /// 「IM 会话期自动激活」无 hook 兜底：提问时把对应 session 标记为「工作中」。
     /// 不存在则新建；已存在则置为 Working 并刷新活动 / 补 pid（在途提问必然处于「工作中」turn 内）。
     /// 返回是否有状态变化（供广播）。
@@ -567,5 +589,31 @@ mod tests {
             1,
         );
         assert!(r.touch_activity(AgentKind::Claude, "s1", Some(9)));
+    }
+
+    #[test]
+    fn touch_activity_by_pid_matches_existing_only() {
+        // MCP 模式兜底：拿不到 session_id，按 (kind, pid) 匹配已存在 session 刷新。
+        let r = reg();
+        // 无记录 → 未命中。
+        assert!(!r.touch_activity_by_pid(AgentKind::Codex, 4242));
+        r.apply_event(
+            AgentKind::Codex,
+            LifecycleEvent::TurnStart,
+            "s1",
+            Some(4242),
+            None,
+            1,
+        );
+        // 命中并刷新 last_activity。
+        assert!(r.touch_activity_by_pid(AgentKind::Codex, 4242));
+        // 家族不匹配 → 未命中（不跨家族污染）。
+        assert!(!r.touch_activity_by_pid(AgentKind::Claude, 4242));
+        // pid=0 / 不存在的 pid → 未命中。
+        assert!(!r.touch_activity_by_pid(AgentKind::Codex, 0));
+        assert!(!r.touch_activity_by_pid(AgentKind::Codex, 9999));
+        // 只刷新、不新建 session。
+        let arr = r.snapshot();
+        assert_eq!(arr.as_array().unwrap().len(), 1);
     }
 }

@@ -19,8 +19,12 @@ struct ProcEntry {
     command: String,
 }
 
-/// 本程序自身在进程树里的标记（避免把 reporter / daemon 自身误判成 Agent）。
-const SELF_MARKERS: [&str; 3] = ["askhuman", "__agent-hook", "humaninloop"];
+/// 本程序自身可执行文件名的标记（避免把 reporter / daemon / mcp / ask 子进程误判成 Agent）。
+/// **只按可执行名匹配**（comm + argv0 basename），**不扫描参数**——否则命令行参数里恰好提到
+/// "askhuman" 的 agent（如 `codex exec "用 askhuman 提问…"`）会被误判为自身而被 walk 跳过，
+/// 导致 walk 上溯命中外层 agent 或漏报。我们自己的进程 argv0 恒为 `AskHuman`（含旧名 humaninloop），
+/// 据此即可精准自识别；reporter 的 `__agent-hook` 是参数、其 argv0 同样是 AskHuman，故无需单列。
+const SELF_MARKERS: [&str; 2] = ["askhuman", "humaninloop"];
 
 /// 从一个 env map 判定真实运行的 Agent（去重判据，见 FINDINGS §7.6）。
 ///
@@ -94,8 +98,17 @@ fn matches_agent(entry: &ProcEntry, kind: AgentKind) -> bool {
 }
 
 fn is_self(entry: &ProcEntry) -> bool {
-    let hay = format!("{} {}", entry.comm, entry.command).to_ascii_lowercase();
-    SELF_MARKERS.iter().any(|m| hay.contains(m))
+    let comm = entry.comm.to_ascii_lowercase();
+    let argv0_base = entry
+        .command
+        .split_whitespace()
+        .next()
+        .map(basename)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    SELF_MARKERS
+        .iter()
+        .any(|m| comm.contains(m) || argv0_base.contains(m))
 }
 
 fn basename(p: &str) -> String {
@@ -116,6 +129,31 @@ pub fn walk_agent_pid(kind: AgentKind, start_pid: u32) -> Option<u32> {
 /// 从当前进程向上 walk 定位指定家族的 Agent pid。
 pub fn walk_agent_pid_from_self(kind: AgentKind) -> Option<u32> {
     walk_agent_pid(kind, std::process::id())
+}
+
+/// 从 `start_pid` 向上回溯，返回最近的（非自身）Agent 祖先及其家族。
+///
+/// 用于 **env 判不出家族** 的兜底——典型为 MCP 模式：agent 启动 STDIO MCP server 时
+/// `env_clear()`，子进程看不到任何 `CODEX_*`/`CURSOR_*`/`CLAUDE*` 变量（既判不出家族、也拿不到
+/// 会话 ID），但进程树依旧能定位到 agent 本体。返回的 pid 是当次现取、真实存活的（可用作 registry
+/// 按 pid 匹配的键）；拿不到 `session_id`。
+pub fn walk_any_agent(start_pid: u32) -> Option<(AgentKind, u32)> {
+    const KINDS: [AgentKind; 3] = [AgentKind::Codex, AgentKind::Claude, AgentKind::Cursor];
+    process_chain(start_pid)
+        .into_iter()
+        .filter(|e| !is_self(e))
+        .find_map(|e| {
+            KINDS
+                .iter()
+                .copied()
+                .find(|&k| matches_agent(&e, k))
+                .map(|k| (k, e.pid))
+        })
+}
+
+/// 从当前进程向上 walk 定位最近的任意家族 Agent 祖先（kind + pid）。
+pub fn walk_any_agent_from_self() -> Option<(AgentKind, u32)> {
+    walk_any_agent(std::process::id())
 }
 
 /// 进程是否存活（`kill(pid, 0)`：Ok / EPERM 视为存活，ESRCH 为已死）。
@@ -269,5 +307,27 @@ mod tests {
             command: "AskHuman __agent-hook cursor turn-start".to_string(),
         };
         assert!(is_self(&e));
+        // 完整安装路径作为 comm（detect.rs 的 `ps -o comm=` 取完整路径）同样应识别为自身。
+        let e2 = ProcEntry {
+            pid: 2,
+            ppid: 0,
+            comm: "/Users/u/.local/bin/AskHuman".to_string(),
+            command: "/Users/u/.local/bin/AskHuman mcp".to_string(),
+        };
+        assert!(is_self(&e2));
+    }
+
+    #[test]
+    fn is_self_ignores_marker_in_agent_args() {
+        // codex 命令行**参数**里提到 "askhuman"（如 `codex exec "用 askhuman 提问"`）不应被误判为自身——
+        // 否则 walk 会跳过真正的 codex、上溯命中外层 agent。仅按可执行名（comm/argv0）匹配即可避免。
+        let e = ProcEntry {
+            pid: 1,
+            ppid: 0,
+            comm: "/opt/homebrew/lib/node_modules/@openai/codex/.../bin/codex".to_string(),
+            command: "/opt/homebrew/lib/.../bin/codex exec 用 askhuman 工具向我提问".to_string(),
+        };
+        assert!(!is_self(&e));
+        assert!(matches_agent(&e, AgentKind::Codex));
     }
 }
