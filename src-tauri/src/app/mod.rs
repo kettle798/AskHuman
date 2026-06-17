@@ -1406,47 +1406,72 @@ where
     Ok(())
 }
 
-/// 启动一次 agent 快照订阅（幂等）：由前端在 `agents-updated` 监听就绪后经命令触发，
-/// 确保 daemon 一连上推来的首帧立即快照不会早于监听注册而丢失。重复调用（如窗口重载）只起一次。
+/// 由前端在 `agents-updated` 监听就绪后经命令触发，确保 daemon 一连上推来的首帧立即快照不会
+/// 早于监听注册而丢失。
+///
+/// - **统一 GUI 宿主**（长命进程）：订阅与 agent 窗口生命周期绑定——每次前端挂载都**重启**订阅
+///   （让 daemon 重推一帧立即快照，避免长命进程里复用旧订阅而首屏长时间 Loading），窗口关闭即停
+///   （释放 daemon 连接，不再把 daemon 续命）。详见 `gui_host::restart_agents_subscription`。
+/// - **独立 agents 进程 / 弹窗兜底**（随窗口退出的短命进程）：一次性启动即可（进程退出即停）。
 #[cfg(unix)]
 pub(crate) fn start_agents_subscription(app: tauri::AppHandle) {
+    if app.try_state::<gui_host::HostState>().is_some() {
+        gui_host::restart_agents_subscription(&app);
+        return;
+    }
     static STARTED: AtomicBool = AtomicBool::new(false);
     if STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
-    spawn_agents_subscription(app);
+    spawn_agents_subscription(app, None);
 }
 
 /// 订阅 daemon 的 agent 快照推送，转成前端 `agents-updated` 事件（实验性功能 spec D20）。
-/// 断连后退避重连（必要时 `open_for_subscribe` 会自动拉起 daemon），窗口关闭即随进程退出。
+/// 断连后退避重连（必要时 `open_for_subscribe` 会自动拉起 daemon）。`stop` 为 Some 时（宿主）
+/// 被通知即整体退出（窗口关闭/重启订阅用）；为 None 时随进程退出。
 #[cfg(unix)]
-fn spawn_agents_subscription(app: tauri::AppHandle) {
+pub(crate) fn spawn_agents_subscription(
+    app: tauri::AppHandle,
+    stop: Option<std::sync::Arc<tokio::sync::Notify>>,
+) {
     use crate::ipc::{self, ClientMsg, ServerMsg};
     use tauri::Emitter;
     tauri::async_runtime::spawn(async move {
         loop {
-            match crate::client::open_for_subscribe().await {
-                Ok((mut reader, mut writer)) => {
-                    if ipc::write_msg(&mut writer, &ClientMsg::AgentsSubscribe)
-                        .await
-                        .is_err()
-                    {
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        continue;
-                    }
-                    loop {
-                        match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
-                            Ok(Some(ServerMsg::AgentsState { agents })) => {
-                                let _ = app.emit("agents-updated", agents);
+            // 一轮「连接 → 订阅 → 读到断连」+ 退避；与 stop 竞速，stop 触发即退出整个任务。
+            let cycle = async {
+                match crate::client::open_for_subscribe().await {
+                    Ok((mut reader, mut writer)) => {
+                        if ipc::write_msg(&mut writer, &ClientMsg::AgentsSubscribe)
+                            .await
+                            .is_err()
+                        {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            return;
+                        }
+                        loop {
+                            match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
+                                Ok(Some(ServerMsg::AgentsState { agents })) => {
+                                    let _ = app.emit("agents-updated", agents);
+                                }
+                                Ok(Some(_)) => {}
+                                Ok(None) | Err(_) => break, // 断连 → 跳出去重连。
                             }
-                            Ok(Some(_)) => {}
-                            Ok(None) | Err(_) => break, // 断连 → 跳出去重连。
                         }
                     }
+                    Err(_) => {}
                 }
-                Err(_) => {}
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            };
+            match &stop {
+                Some(s) => {
+                    tokio::select! {
+                        _ = s.notified() => return,
+                        _ = cycle => {}
+                    }
+                }
+                None => cycle.await,
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     });
 }

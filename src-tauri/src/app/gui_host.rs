@@ -103,6 +103,9 @@ pub struct HostState {
     pub menu_sig: Mutex<Option<String>>,
     /// 窗口期续命连接的停止信号（持有即有续命连接在）。
     pub keepalive: Mutex<Option<Arc<Notify>>>,
+    /// Agent 状态订阅的停止信号（与 agent 窗口绑定）：开窗（前端就绪）时重启、关窗时停。
+    /// 长命宿主下若复用旧订阅，daemon 不会重推首帧 → 窗口首屏长时间 Loading，故每次开窗都重启。
+    pub agents_sub: Mutex<Option<Arc<Notify>>>,
     /// 启动时的二进制指纹（盘上内容变化即触发宿主换新）。
     pub startup_fp: Fingerprint,
 }
@@ -147,6 +150,7 @@ pub fn setup(app: &mut tauri::App, config: &AppConfig) -> tauri::Result<()> {
         menu: Mutex::new(None),
         menu_sig: Mutex::new(None),
         keepalive: Mutex::new(None),
+        agents_sub: Mutex::new(None),
         startup_fp: lifecycle::current_fingerprint(),
     });
 
@@ -499,10 +503,9 @@ fn open_window(app: &AppHandle, kind: WindowKind, all: bool, project: Option<Str
         if let Some(w) = app.get_webview_window(label) {
             let _ = w.set_focus();
         }
-        if kind == WindowKind::Agents {
-            // Agent 窗口需 daemon 数据：订阅会按需 ensure_running（唯一允许由窗口启动 daemon 的入口）。
-            crate::app::start_agents_subscription(app.clone());
-        }
+        // Agent 订阅**不在此处启动**：必须等前端注册好 `agents-updated` 监听后再经命令触发
+        // （`start_agents_subscription` → `restart_agents_subscription`），否则 daemon 的首帧
+        // 立即快照会早于监听而丢失，导致窗口长时间停在 Loading。
     }
     recount_windows(app);
 }
@@ -520,8 +523,36 @@ pub fn recount_windows(app: &AppHandle) {
     if n > 0 {
         state.ever_open.store(true, Ordering::SeqCst);
     }
+    // Agent 窗口已关 → 停订阅（释放 daemon 连接，避免长命宿主借订阅一直把 daemon 续命）。
+    if app.get_webview_window("agents").is_none() {
+        stop_agents_subscription(app);
+    }
     update_keepalive(app);
     evaluate_exit(app);
+}
+
+/// （重）启动 agent 状态订阅：停掉旧的，再开一条新订阅。由前端在监听就绪后经命令触发——重启可让
+/// daemon 重推一帧立即快照，从而每次开窗都能立刻拿到数据（长命宿主复用旧订阅则会首屏长 Loading）。
+pub fn restart_agents_subscription(app: &AppHandle) {
+    let Some(state) = app.try_state::<HostState>() else {
+        return;
+    };
+    let mut slot = state.agents_sub.lock().unwrap();
+    if let Some(old) = slot.take() {
+        old.notify_one(); // 停旧订阅任务
+    }
+    let stop = Arc::new(Notify::new());
+    *slot = Some(stop.clone());
+    crate::app::spawn_agents_subscription(app.clone(), Some(stop));
+}
+
+/// 停掉 agent 状态订阅（agent 窗口关闭时调用）。
+pub fn stop_agents_subscription(app: &AppHandle) {
+    if let Some(state) = app.try_state::<HostState>() {
+        if let Some(old) = state.agents_sub.lock().unwrap().take() {
+            old.notify_one();
+        }
+    }
 }
 
 /// 维护「窗口期续命连接」（spec D5）：有窗口且 daemon 在跑 → 持一条普通连接（计入 daemon active）；
