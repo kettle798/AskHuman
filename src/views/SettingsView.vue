@@ -1484,7 +1484,7 @@ onBeforeUnmount(() => unlistenProgress?.());
           </template>
         </div>
 
-        <!-- IM 会话期自动激活（从「渠道」Tab 迁来，归入实验区） -->
+        <!-- IM 渠道按需发送（从「渠道」Tab 迁来，归入实验区；配置键仍为 autoActivation） -->
         <div class="card">
           <div class="row">
             <p class="card-title">

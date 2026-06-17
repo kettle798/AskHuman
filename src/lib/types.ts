@@ -213,7 +213,7 @@ export interface ChannelsConfig {
   dingding: DingTalkChannelConfig;
   feishu: FeishuChannelConfig;
   slack: SlackChannelConfig;
-  /** 「IM 会话期自动激活」开关（默认关 = 旧「全发」行为）。UI 入口受实验开关门控。 */
+  /** 「IM 渠道按需发送」开关（默认关 = 旧「全发」行为）。UI 入口受实验开关门控。 */
   autoActivation: boolean;
 }
 

@@ -189,7 +189,7 @@ export default {
       mcpExampleToml: "Codex (~/.codex/config.toml)",
     },
     channels: {
-      autoActivationTitle: "Session-scoped IM activation",
+      autoActivationTitle: "On-demand IM delivery",
       autoActivationDesc:
         "When on, questions are no longer broadcast to every IM channel; the local popup always receives them. To receive on an IM channel, send /here (or /这里) in that channel while an agent is working; subsequent questions and any pending ones will be routed there.",
       autoActivationLifecycleHint:
