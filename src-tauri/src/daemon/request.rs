@@ -7,10 +7,10 @@ use crate::app::coordinator::Coordinator;
 use crate::app::RenderOutcome;
 use crate::channels::popup::GuiHelperPopupChannel;
 use crate::i18n::Lang;
-use crate::ipc::{ServerMsg, ShowPayload, TaskRequest};
+use crate::ipc::{PendingRequestInfo, ServerMsg, ShowPayload, TaskRequest};
 use crate::models::AskRequest;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Notify;
@@ -21,6 +21,8 @@ pub type GuiSlot = Arc<Mutex<Option<UnboundedSender<ServerMsg>>>>;
 /// 一个活动请求的共享状态。
 pub struct RequestEntry {
     pub request_id: String,
+    /// 单调递增序号（创建顺序）：托盘「待答」子菜单据此稳定按时间排序，不随 HashMap 迭代乱序。
+    pub seq: u64,
     /// 一次性 token：GUI Helper 连回握手出示。
     pub token: String,
     /// 抢答协调器（Ipc 退出，结果经 `final_tx` 回传）。
@@ -46,12 +48,15 @@ struct Inner {
 /// 全局请求登记表（Daemon 内唯一）。
 pub struct RequestRegistry {
     inner: Mutex<Inner>,
+    /// 下一个请求序号（创建顺序，单调递增）。
+    next_seq: AtomicU64,
 }
 
 impl RequestRegistry {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(Inner::default()),
+            next_seq: AtomicU64::new(0),
         })
     }
 
@@ -97,6 +102,7 @@ impl RequestRegistry {
 
         let entry = Arc::new(RequestEntry {
             request_id: request_id.clone(),
+            seq: self.next_seq.fetch_add(1, Ordering::SeqCst),
             token: token.clone(),
             coordinator,
             show,
@@ -135,6 +141,41 @@ impl RequestRegistry {
     /// 当前所有在途请求项的快照（供「补推在途」把已发问题补发到新激活的渠道）。
     pub fn in_flight_entries(&self) -> Vec<Arc<RequestEntry>> {
         self.inner.lock().unwrap().by_id.values().cloned().collect()
+    }
+
+    /// 在途请求摘要（按创建顺序，托盘「待答」子菜单用）：每条 `{id, 预览}`。
+    pub fn pending_infos(&self) -> Vec<PendingRequestInfo> {
+        let mut entries: Vec<Arc<RequestEntry>> = {
+            let inner = self.inner.lock().unwrap();
+            inner.by_id.values().cloned().collect()
+        };
+        entries.sort_by_key(|e| e.seq);
+        entries
+            .iter()
+            .map(|e| PendingRequestInfo {
+                id: e.request_id.clone(),
+                preview: preview_of(&e.show.request),
+            })
+            .collect()
+    }
+
+    /// 聚焦某请求的弹窗：向其 GUI 连接下发 `FocusPopup`。返回是否成功投递（无弹窗连接则 false）。
+    pub fn focus_popup(&self, request_id: &str) -> bool {
+        let inner = self.inner.lock().unwrap();
+        let Some(entry) = inner.by_id.get(request_id) else {
+            return false;
+        };
+        let Ok(slot) = entry.gui.lock() else {
+            return false;
+        };
+        match slot.as_ref() {
+            Some(tx) => tx
+                .send(ServerMsg::FocusPopup {
+                    request_id: request_id.to_string(),
+                })
+                .is_ok(),
+            None => false,
+        }
     }
 
     /// Cancel every active request (daemon shutdown): interrupt all their channels as a generic
@@ -185,4 +226,32 @@ pub fn popup_failed_outcome(lang: Lang) -> RenderOutcome {
 /// 用于 ServerMsg::Show 的便捷封装。
 pub fn show_msg(entry: &RequestEntry) -> ServerMsg {
     ServerMsg::Show(entry.show.clone())
+}
+
+/// 托盘「待答」子菜单预览：取 Message 首个非空行，空则取第一题题干，截断到 24 个字符（超出加 …）。
+const PREVIEW_MAX_CHARS: usize = 24;
+
+pub fn preview_of(req: &AskRequest) -> String {
+    let source = first_nonempty_line(&req.message.text)
+        .or_else(|| req.questions.first().and_then(|q| first_nonempty_line(&q.message)))
+        .unwrap_or_default();
+    truncate_chars(&source, PREVIEW_MAX_CHARS)
+}
+
+fn first_nonempty_line(s: &str) -> Option<String> {
+    s.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| l.to_string())
+}
+
+/// 按 Unicode 字符（而非字节）截断，超出追加省略号。
+fn truncate_chars(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
 }

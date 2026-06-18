@@ -138,6 +138,14 @@ pub struct DetectRequest {
     pub lang: String,
 }
 
+/// 一条在途请求的菜单栏摘要（D→宿主，托盘「待答」子菜单用）：`id` 定位请求（点击回 `FocusRequest`），
+/// `preview` 为该请求 Message 首个非空行（空则第一题题干）的截断预览。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingRequestInfo {
+    pub id: String,
+    pub preview: String,
+}
+
 /// Daemon → GUI Helper 的题目下发（show 是 submit 的子集 + Daemon 分配的 request_id + 上下文）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -207,6 +215,9 @@ pub enum ClientMsg {
     /// 该订阅刻意**不计入 daemon 空闲保活**——图标不得把 daemon 续命（续命只由「有窗口」的
     /// 普通连接承担）。daemon 收到后在 `handle_tray_sub` 中抵消其对 `active` 的占用。
     TraySubscribe,
+    /// 托盘「待答」子菜单点击：请求 daemon 聚焦 / 闪烁对应请求的弹窗（宿主→daemon，即发即走）。
+    /// daemon 找到该请求的弹窗连接转发 `FocusPopup`；无弹窗（如弹窗拉起失败）则静默忽略。
+    FocusRequest { request_id: String },
 }
 
 /// Daemon → 客户端（CLI / GUI Helper）的消息。
@@ -286,7 +297,13 @@ pub enum ServerMsg {
         update_latest: String,
         /// 新二进制已落盘、待 drain 换新生效（宿主据此换新自身）。
         pending: bool,
+        /// 在途请求摘要（托盘「待答」子菜单逐条列出，点击可聚焦对应弹窗）。
+        /// 旧端回包缺此字段 → 空 Vec（仍显示数量、无子菜单项）。
+        #[serde(default)]
+        pending_requests: Vec<PendingRequestInfo>,
     },
+    /// 聚焦并闪烁某请求的弹窗（daemon→该请求的 GUI Helper）。弹窗进程据此 `set_focus` + 通知前端闪烁。
+    FocusPopup { request_id: String },
 }
 
 #[cfg(test)]
@@ -388,11 +405,16 @@ mod tests {
             update_available: true,
             update_latest: "0.8.0".to_string(),
             pending: false,
+            pending_requests: vec![PendingRequestInfo {
+                id: "r1".to_string(),
+                preview: "deploy?".to_string(),
+            }],
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""type":"trayState""#));
         assert!(json.contains(r#""active_requests":1"#));
         assert!(json.contains(r#""agents_working":2"#));
+        assert!(json.contains(r#""preview":"deploy?""#));
         let back: ServerMsg = serde_json::from_str(&json).unwrap();
         match back {
             ServerMsg::TrayState {

@@ -237,12 +237,29 @@ const thumbs = ref<Record<string, string>>({});
 const dragIcons = ref<Record<string, string>>({});
 const attRefs = ref<HTMLElement[]>([]);
 const previewing = ref(false);
+// 托盘「待答」子菜单点击本弹窗时，边框闪烁一次（accent 蓝脉冲）。
+const flashing = ref(false);
+let flashTimer: number | undefined;
 let unlistenIndex: UnlistenFn | null = null;
 let unlistenFocus: UnlistenFn | null = null;
 let unlistenDrop: UnlistenFn | null = null;
 let unlistenSettings: UnlistenFn | null = null;
 let unlistenUpdate: UnlistenFn | null = null;
 let unlistenCloseReq: UnlistenFn | null = null;
+let unlistenFlash: UnlistenFn | null = null;
+
+function triggerFlash() {
+  // 重启动画：先关再于下一帧开，确保连续点击也能重新触发。
+  flashing.value = false;
+  if (flashTimer) window.clearTimeout(flashTimer);
+  requestAnimationFrame(() => {
+    flashing.value = true;
+    // 两次脉冲约 0.6s 后复位。
+    flashTimer = window.setTimeout(() => {
+      flashing.value = false;
+    }, 700);
+  });
+}
 
 function setAttRef(el: Element | null, i: number) {
   if (el) attRefs.value[i] = el as HTMLElement;
@@ -965,6 +982,10 @@ onMounted(async () => {
   unlistenCloseReq = await listen("popup-close-requested", () => {
     requestCancel();
   });
+  // 托盘「待答」子菜单点击本弹窗：后端已聚焦窗口，这里播放边框闪烁。
+  unlistenFlash = await listen("popup-flash", () => {
+    triggerFlash();
+  });
   try {
     const init = await popupInit();
     applyTheme(init.theme);
@@ -1001,6 +1022,8 @@ onBeforeUnmount(() => {
   unlistenSettings?.();
   unlistenUpdate?.();
   unlistenCloseReq?.();
+  unlistenFlash?.();
+  if (flashTimer) window.clearTimeout(flashTimer);
   stopListening();
   unlistenSpeech.forEach((fn) => fn());
   unlistenSpeech = [];
@@ -1023,6 +1046,7 @@ onBeforeUnmount(() => {
     @drop.prevent="onDrop"
     @click="onBackgroundClick"
   >
+    <div v-if="flashing" class="flash-overlay" aria-hidden="true"></div>
     <header class="navbar" :class="{ scrolled }" data-tauri-drag-region>
       <span class="brand">
         <span class="brand-dot"></span>
@@ -1400,6 +1424,24 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* 托盘「待答」子菜单点击本弹窗 → 边框 accent 蓝脉冲 2 次（约 0.6s）。仅视觉，不拦截交互。 */
+.flash-overlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  border-radius: var(--radius-lg, 10px);
+  box-shadow:
+    inset 0 0 0 2px var(--accent),
+    inset 0 0 14px 2px color-mix(in srgb, var(--accent) 55%, transparent);
+  animation: popup-flash 0.3s ease-in-out 2;
+}
+@keyframes popup-flash {
+  0% { opacity: 0; }
+  50% { opacity: 1; }
+  100% { opacity: 0; }
 }
 
 /* 顶部导航栏：整条可拖动；品牌区/动作区透传拖拽，仅按钮可点 */

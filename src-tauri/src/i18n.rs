@@ -503,6 +503,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "tray.uptime" => pick(lang, "Up {d}", "已运行 {d}"),
         "tray.draining" => pick(lang, "Finishing in-flight requests…", "正在完成在途请求…"),
         "tray.pendingQuestions" => pick(lang, "{n} pending question(s)", "{n} 个待答"),
+        "tray.pendingUntitled" => pick(lang, "(no preview)", "（无预览）"),
         "tray.agents" => pick(lang, "Agents: {w} working · {i} idle", "Agent：工作 {w} · 空闲 {i}"),
         "tray.imConnections" => pick(lang, "Channels: {list}", "渠道：{list}"),
         "tray.updateAvailable" => pick(lang, "● Update available ({v})", "● 有可用更新（{v}）"),

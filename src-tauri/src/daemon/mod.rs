@@ -652,6 +652,10 @@ mod unix_impl {
                 ClientMsg::AgentsSubscribe => return Control::AgentsSub,
                 // 菜单栏宿主订阅：接管连接持续推送 TrayState（非保活）。
                 ClientMsg::TraySubscribe => return Control::TraySub,
+                // 托盘「待答」子菜单点击：聚焦/闪烁对应请求的弹窗（即发即走，无回包）。
+                ClientMsg::FocusRequest { request_id } => {
+                    state.registry.focus_popup(&request_id);
+                }
                 // 自动识别（Q6）：就地处理（可能阻塞至多 120s 等用户发码），完成后回结果继续循环。
                 // 排空期拒绝（兜底；正常情况下客户端在 Hello 即被挡住而回退进程内识别）。
                 ClientMsg::Detect(req) => {
@@ -1024,6 +1028,7 @@ mod unix_impl {
             update_available: u.available,
             update_latest: u.latest_version,
             pending: u.pending,
+            pending_requests: state.registry.pending_infos(),
         }
     }
 

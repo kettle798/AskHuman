@@ -874,6 +874,17 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                                             crate::commands::set_pushed_update(payload.clone());
                                             let _ = app_handle.emit("update-state", payload);
                                         }
+                                        // 托盘「待答」子菜单点击：聚焦本弹窗并通知前端闪烁边框。
+                                        Ok(Some(crate::ipc::ServerMsg::FocusPopup { .. })) => {
+                                            use tauri::Emitter;
+                                            let app2 = app_handle.clone();
+                                            let _ = app_handle.run_on_main_thread(move || {
+                                                if let Some(win) = app2.get_webview_window("popup") {
+                                                    let _ = win.set_focus();
+                                                }
+                                                let _ = app2.emit("popup-flash", ());
+                                            });
+                                        }
                                         Ok(Some(_)) => {}
                                         Ok(None) | Err(_) => {
                                             app_handle.exit(0);

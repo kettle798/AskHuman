@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
+use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{AppHandle, Manager};
 use tokio::io::BufReader;
@@ -82,6 +82,8 @@ pub struct TrayData {
     pub update_available: bool,
     pub update_latest: String,
     pub pending: bool,
+    /// 在途请求摘要（托盘「待答」子菜单逐条列出）。
+    pub pending_requests: Vec<ipc::PendingRequestInfo>,
 }
 
 pub struct HostState {
@@ -308,8 +310,15 @@ pub fn refresh_tray(app: &AppHandle) {
 /// 决定菜单/图标渲染结果的全部输入拼成的签名（含语言、在线态、各状态字段；uptime 取分钟级文案，
 /// 避免每次推送都因秒数微变而重建菜单）。相同即无需刷新。
 fn menu_signature(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> String {
+    // 待答子菜单内容（id+预览）也入签名：列表/预览变化即重建菜单。
+    let pending: String = data
+        .pending_requests
+        .iter()
+        .map(|p| format!("{}={}", p.id, p.preview))
+        .collect::<Vec<_>>()
+        .join(";");
     format!(
-        "{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         lang,
         up as u8,
         data.version,
@@ -327,6 +336,7 @@ fn menu_signature(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> 
             ""
         },
         lifecycle_on as u8,
+        pending,
     )
 }
 
@@ -385,10 +395,23 @@ fn populate_menu(
             disabled(i18n::tr(lang, "tray.draining").to_string())?;
         }
         if data.active_requests > 0 {
-            disabled(
-                i18n::tr(lang, "tray.pendingQuestions")
-                    .replace("{n}", &data.active_requests.to_string()),
-            )?;
+            let title = i18n::tr(lang, "tray.pendingQuestions")
+                .replace("{n}", &data.active_requests.to_string());
+            // 有逐条摘要 → 子菜单（点击聚焦对应弹窗）；缺摘要（旧 daemon）→ 退回只读计数行。
+            if data.pending_requests.is_empty() {
+                disabled(title)?;
+            } else {
+                let mut sb = SubmenuBuilder::new(app, title);
+                for p in &data.pending_requests {
+                    let label = if p.preview.is_empty() {
+                        i18n::tr(lang, "tray.pendingUntitled").to_string()
+                    } else {
+                        p.preview.clone()
+                    };
+                    sb = sb.text(format!("focus_req:{}", p.id), label);
+                }
+                menu.append(&sb.build()?)?;
+            }
         }
         // 仅在开启了生命周期追踪时显示忙闲行（未开启时即便有兜底登记也不展示，避免困惑）。
         if lifecycle_on && data.agents_working + data.agents_idle > 0 {
@@ -446,6 +469,17 @@ fn populate_menu(
 
 /// 托盘菜单事件分派（由 launch() 的全局 `on_menu_event` 在宿主进程中调用）。
 pub fn on_menu_event(app: &AppHandle, id: &str) {
+    // 待答子菜单项：聚焦对应弹窗（向 daemon 发 FocusRequest，由 daemon 转发到该请求的弹窗进程）。
+    if let Some(request_id) = id.strip_prefix("focus_req:") {
+        let request_id = request_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            if let Ok(stream) = transport::connect().await {
+                let (_r, mut w) = stream.into_split();
+                let _ = ipc::write_msg(&mut w, &ClientMsg::FocusRequest { request_id }).await;
+            }
+        });
+        return;
+    }
     match id {
         "open_settings" => open_window(app, WindowKind::Settings, false, None),
         // 托盘「历史」无调用方项目上下文 → 默认展示全部项目。
@@ -724,6 +758,7 @@ fn start_status_subscription(app: AppHandle) {
                                     update_available,
                                     update_latest,
                                     pending,
+                                    pending_requests,
                                 })) => {
                                     if let Some(state) = app.try_state::<HostState>() {
                                         *state.data.lock().unwrap() = TrayData {
@@ -738,6 +773,7 @@ fn start_status_subscription(app: AppHandle) {
                                             update_available,
                                             update_latest,
                                             pending,
+                                            pending_requests,
                                         };
                                     }
                                     refresh_on_main(&app);
