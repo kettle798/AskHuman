@@ -384,16 +384,7 @@ fn build_specs(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> Vec
                 false,
             ));
         }
-        // 仅在开启了生命周期追踪时显示忙闲行（未开启时即便有兜底登记也不展示，避免困惑）。
-        if lifecycle_on && data.agents_working + data.agents_idle > 0 {
-            nodes.push(Node::item(
-                "st.agents",
-                i18n::tr(lang, "tray.agents")
-                    .replace("{w}", &data.agents_working.to_string())
-                    .replace("{i}", &data.agents_idle.to_string()),
-                false,
-            ));
-        }
+        // 忙闲数量不再单列只读行——已合并进操作区「Agent 状态」入口的标题（见下方 open_agents）。
         if !data.im_connections.is_empty() {
             nodes.push(Node::item(
                 "st.im",
@@ -454,12 +445,16 @@ fn build_specs(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> Vec
         true,
     ));
     // 「Agent 状态」入口仅在开启了生命周期追踪时显示——否则窗口必为空，徒增困惑。
+    // 忙闲数量直接并入标题（合并了原状态区的只读忙闲行），点击仍是打开窗口。
     if lifecycle_on {
-        nodes.push(Node::item(
-            "open_agents",
-            i18n::tr(lang, "tray.openAgents").to_string(),
-            true,
-        ));
+        let label = if up && data.agents_working + data.agents_idle > 0 {
+            i18n::tr(lang, "tray.openAgentsCounts")
+                .replace("{w}", &data.agents_working.to_string())
+                .replace("{i}", &data.agents_idle.to_string())
+        } else {
+            i18n::tr(lang, "tray.openAgents").to_string()
+        };
+        nodes.push(Node::item("open_agents", label, true));
     }
     nodes.push(Node::separator("sep.update"));
     nodes.push(Node::item(

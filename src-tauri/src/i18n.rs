@@ -504,7 +504,6 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "tray.draining" => pick(lang, "Finishing in-flight requests…", "正在完成在途请求…"),
         "tray.pendingQuestions" => pick(lang, "{n} pending question(s)", "{n} 个待答"),
         "tray.pendingUntitled" => pick(lang, "(no preview)", "（无预览）"),
-        "tray.agents" => pick(lang, "Agents: {w} working · {i} idle", "Agent：工作 {w} · 空闲 {i}"),
         "tray.imConnections" => pick(lang, "Channels: {list}", "渠道：{list}"),
         "tray.updateAvailable" => pick(lang, "● Update available ({v})", "● 有可用更新（{v}）"),
         "tray.updatePending" => pick(
@@ -516,6 +515,11 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "tray.openSettings" => pick(lang, "Settings", "设置"),
         "tray.openHistory" => pick(lang, "History", "历史记录"),
         "tray.openAgents" => pick(lang, "Agent Status", "Agent 状态"),
+        "tray.openAgentsCounts" => pick(
+            lang,
+            "Agent Status ({w} working · {i} idle)",
+            "Agent 状态（工作 {w} · 空闲 {i}）",
+        ),
         "tray.checkUpdate" => pick(lang, "Check for Updates", "检查更新"),
         "tray.applyUpdate" => pick(
             lang,
