@@ -10,6 +10,7 @@
 
 #![cfg(unix)]
 
+use crate::app::tray_menu::{Node, TrayMenu};
 use crate::config::{AppConfig, MenuBarIconMode};
 use crate::daemon::lifecycle::{self, Fingerprint, LockGuard};
 use crate::gui_host::{HostMsg, WindowKind};
@@ -19,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+use tauri::menu::Menu;
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{AppHandle, Manager};
 use tokio::io::BufReader;
@@ -97,11 +98,11 @@ pub struct HostState {
     /// 启动宽限是否已过（覆盖「OpenWindow 始终未到达」的兜底退出）。
     pub grace_over: AtomicBool,
     pub tray: Mutex<Option<TrayIcon>>,
-    /// 托盘菜单对象（**长期持有同一个**）：刷新时只原地增删/改其条目，绝不 `set_menu` 换新对象——
-    /// 替换 `NSStatusItem.menu` 会把用户正展开的菜单关掉，原地改条目则不会（spec 菜单稳定性）。
-    pub menu: Mutex<Option<Menu<tauri::Wry>>>,
-    /// 上次渲染的「菜单/图标内容签名」：与本次相同则整次刷新直接跳过，连菜单条目都不动——
-    /// daemon 持续停止时内容不变 → 不重建菜单 → 展开的菜单不会被挤掉。
+    /// 持久托盘菜单（**长期持有同一个** `Menu` 对象 + 影子树）：刷新时按 `key` 做 diff，只就地改条目
+    /// 文字 / 可用性，结构变化才最小增删——绝不整段重建或 `set_menu` 换对象（spec 菜单稳定性）。
+    pub tray_menu: Mutex<Option<TrayMenu>>,
+    /// 上次渲染的「菜单/图标内容签名」：与本次相同则整次刷新直接跳过（连 diff 都不做）——
+    /// daemon 持续停止时内容不变 → 不触碰菜单 → 展开的菜单不会被挤掉。
     pub menu_sig: Mutex<Option<String>>,
     /// 窗口期续命连接的停止信号（持有即有续命连接在）。
     pub keepalive: Mutex<Option<Arc<Notify>>>,
@@ -149,7 +150,7 @@ pub fn setup(app: &mut tauri::App, config: &AppConfig) -> tauri::Result<()> {
         ever_open: AtomicBool::new(false),
         grace_over: AtomicBool::new(false),
         tray: Mutex::new(None),
-        menu: Mutex::new(None),
+        tray_menu: Mutex::new(None),
         menu_sig: Mutex::new(None),
         keepalive: Mutex::new(None),
         agents_sub: Mutex::new(None),
@@ -236,7 +237,7 @@ fn ensure_tray(app: &AppHandle, present: bool) -> tauri::Result<()> {
     };
     if !present {
         *state.tray.lock().unwrap() = None; // Drop → 移除托盘
-        *state.menu.lock().unwrap() = None; // 菜单随托盘失效；下次重建时再新建并填充
+        *state.tray_menu.lock().unwrap() = None; // 菜单随托盘失效；下次重建时再新建并填充
         *state.menu_sig.lock().unwrap() = None;
         return Ok(());
     }
@@ -244,7 +245,7 @@ fn ensure_tray(app: &AppHandle, present: bool) -> tauri::Result<()> {
         refresh_tray(app);
         return Ok(());
     }
-    // 建一个空菜单挂上托盘并长期持有；条目交给 refresh_tray 原地填充（之后只原地增删，绝不换对象）。
+    // 建一个空菜单挂上托盘并长期持有；条目交给 refresh_tray 经 diff 填充（之后只就地改 / 最小增删）。
     let menu = Menu::new(app)?;
     let mut builder = TrayIconBuilder::with_id("askhuman-tray")
         .icon_as_template(icon_bytes::TEMPLATE)
@@ -255,7 +256,7 @@ fn ensure_tray(app: &AppHandle, present: bool) -> tauri::Result<()> {
     }
     let tray = builder.build(app)?;
     *state.tray.lock().unwrap() = Some(tray);
-    *state.menu.lock().unwrap() = Some(menu);
+    *state.tray_menu.lock().unwrap() = Some(TrayMenu::new(app.clone(), menu));
     // 强制首刷：清掉签名缓存，确保 refresh_tray 一定填充菜单 + 摆正图标/tooltip。
     *state.menu_sig.lock().unwrap() = None;
     refresh_tray(app);
@@ -281,7 +282,7 @@ pub fn refresh_tray(app: &AppHandle) {
     // 是否有任一家开启了生命周期追踪：未开启时隐藏 Agent 状态相关菜单项（入口 + 忙闲行）。
     let lifecycle_on = crate::integrations::agent_lifecycle::any_installed();
 
-    // 内容签名：与上次相同 → 整次跳过，不触碰托盘（避免重建菜单把用户正展开的菜单挤掉）。
+    // 内容签名：与上次相同 → 整次跳过，不触碰托盘（连 diff 都省，确保展开的菜单纹丝不动）。
     let sig = menu_signature(up, lang, &data, lifecycle_on);
     if state.menu_sig.lock().unwrap().as_deref() == Some(sig.as_str()) {
         return;
@@ -292,10 +293,10 @@ pub fn refresh_tray(app: &AppHandle) {
         let _ = tray.set_icon(Some(img));
         let _ = tray.set_icon_as_template(icon_bytes::TEMPLATE);
     }
-    // 菜单：原地清空 + 重新填充**同一个**菜单对象（不 set_menu 换对象）。
-    if let Some(menu) = state.menu.lock().unwrap().as_ref() {
-        clear_menu(menu);
-        let _ = populate_menu(app, menu, up, lang, &data, lifecycle_on);
+    // 菜单：把期望节点列表 diff 应用到**同一个**菜单对象——文字变化只 set_text、结构变化才最小增删，
+    // 绝不整段重建（整段重建会关掉已展开菜单）。
+    if let Some(tm) = state.tray_menu.lock().unwrap().as_mut() {
+        tm.apply(build_specs(up, lang, &data, lifecycle_on));
     }
     let tip = if up {
         i18n::tr(lang, "tray.tooltipRunning").to_string()
@@ -307,10 +308,11 @@ pub fn refresh_tray(app: &AppHandle) {
     *state.menu_sig.lock().unwrap() = Some(sig);
 }
 
-/// 决定菜单/图标渲染结果的全部输入拼成的签名（含语言、在线态、各状态字段；uptime 取分钟级文案，
-/// 避免每次推送都因秒数微变而重建菜单）。相同即无需刷新。
+/// 决定菜单/图标渲染结果的全部输入拼成的签名：与上次相同即「整次跳过」（菜单已是正确状态，连 diff 都省，
+/// 确保展开的菜单纹丝不动）；不同才进入 diff。**必须覆盖 `build_specs` 与图标/tooltip 的每个输入**，
+/// 否则真变化会被误跳过。uptime 取分钟级文案，避免秒级微变把每次推送都判为「有变化」。
 fn menu_signature(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> String {
-    // 待答子菜单内容（id+预览）也入签名：列表/预览变化即重建菜单。
+    // 待答子菜单内容（id+预览）也入签名：列表/预览变化即触发 diff。
     let pending: String = data
         .pending_requests
         .iter()
@@ -318,7 +320,7 @@ fn menu_signature(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> 
         .collect::<Vec<_>>()
         .join(";");
     format!(
-        "{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         lang,
         up as u8,
         data.version,
@@ -329,23 +331,16 @@ fn menu_signature(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> 
         data.agents_idle,
         data.im_connections.join(","),
         data.update_available as u8,
-        // update_latest 仅在 update_available 时入签名，避免无更新时的噪声变化触发重建。
+        // update_latest 仅在 update_available 时入签名，避免无更新时的噪声变化触发刷新。
         if data.update_available {
             data.update_latest.as_str()
         } else {
             ""
         },
         lifecycle_on as u8,
+        data.pending as u8,
         pending,
     )
-}
-
-/// 清空菜单的全部条目（原地操作同一菜单对象，不替换对象）。
-fn clear_menu(menu: &Menu<tauri::Wry>) {
-    let count = menu.items().map(|v| v.len()).unwrap_or(0);
-    for _ in 0..count {
-        let _ = menu.remove_at(0);
-    }
 }
 
 fn fmt_uptime(secs: u64) -> String {
@@ -358,113 +353,157 @@ fn fmt_uptime(secs: u64) -> String {
     }
 }
 
-/// 把状态区（disabled 只读）+ 操作区条目**追加**进给定（已清空的）菜单对象（spec D7）。
-/// 写入既有对象而非新建，以便原地更新（不替换 NSMenu → 展开中的菜单不被关掉）。
-fn populate_menu(
-    app: &AppHandle,
-    menu: &Menu<tauri::Wry>,
-    up: bool,
-    lang: Lang,
-    data: &TrayData,
-    lifecycle_on: bool,
-) -> tauri::Result<()> {
-    let disabled = |text: String| -> tauri::Result<()> {
-        let it = MenuItemBuilder::new(text).enabled(false).build(app)?;
-        menu.append(&it)
-    };
-    let action = |id: &str, text: String| -> tauri::Result<()> {
-        let it = MenuItemBuilder::with_id(id, text).build(app)?;
-        menu.append(&it)
-    };
-    let sep = |menu: &Menu<tauri::Wry>| -> tauri::Result<()> {
-        let s = PredefinedMenuItem::separator(app)?;
-        menu.append(&s)
-    };
+/// 生成「期望的托盘菜单节点列表」（声明式，spec D7）：状态区只读条目 + 操作区可点条目。
+/// 每个节点带稳定 `key`（可点条目的 `key` 即事件路由 id）；由 `TrayMenu::apply` diff 应用——
+/// 文字变化只 `set_text`、结构变化才最小增删，绝不整段重建（整段重建会关掉已展开菜单）。
+fn build_specs(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> Vec<Node> {
+    let mut nodes: Vec<Node> = Vec::new();
 
-    // —— 状态区 ——
+    // —— 状态区（只读）——
     let title = if up {
         i18n::tr(lang, "tray.running").to_string()
     } else {
         i18n::tr(lang, "tray.stopped").to_string()
     };
-    disabled(title)?;
+    nodes.push(Node::item("st.title", title, false));
     if up {
-        disabled(i18n::tr(lang, "tray.version").replace("{v}", &data.version))?;
-        disabled(i18n::tr(lang, "tray.uptime").replace("{d}", &fmt_uptime(data.uptime_secs)))?;
+        nodes.push(Node::item(
+            "st.version",
+            i18n::tr(lang, "tray.version").replace("{v}", &data.version),
+            false,
+        ));
+        nodes.push(Node::item(
+            "st.uptime",
+            i18n::tr(lang, "tray.uptime").replace("{d}", &fmt_uptime(data.uptime_secs)),
+            false,
+        ));
         if data.draining {
-            disabled(i18n::tr(lang, "tray.draining").to_string())?;
+            nodes.push(Node::item(
+                "st.draining",
+                i18n::tr(lang, "tray.draining").to_string(),
+                false,
+            ));
         }
-        if data.active_requests > 0 {
-            let title = i18n::tr(lang, "tray.pendingQuestions")
-                .replace("{n}", &data.active_requests.to_string());
-            // 有逐条摘要 → 子菜单（点击聚焦对应弹窗）；缺摘要（旧 daemon）→ 退回只读计数行。
-            if data.pending_requests.is_empty() {
-                disabled(title)?;
-            } else {
-                let mut sb = SubmenuBuilder::new(app, title);
-                for p in &data.pending_requests {
+        // 仅在开启了生命周期追踪时显示忙闲行（未开启时即便有兜底登记也不展示，避免困惑）。
+        if lifecycle_on && data.agents_working + data.agents_idle > 0 {
+            nodes.push(Node::item(
+                "st.agents",
+                i18n::tr(lang, "tray.agents")
+                    .replace("{w}", &data.agents_working.to_string())
+                    .replace("{i}", &data.agents_idle.to_string()),
+                false,
+            ));
+        }
+        if !data.im_connections.is_empty() {
+            nodes.push(Node::item(
+                "st.im",
+                i18n::tr(lang, "tray.imConnections").replace("{list}", &data.im_connections.join(", ")),
+                false,
+            ));
+        }
+    }
+    if data.update_available {
+        nodes.push(Node::item(
+            "st.update_avail",
+            i18n::tr(lang, "tray.updateAvailable").replace("{v}", &data.update_latest),
+            false,
+        ));
+    }
+    if data.pending {
+        nodes.push(Node::item(
+            "st.update_pending",
+            i18n::tr(lang, "tray.updatePending").to_string(),
+            false,
+        ));
+    }
+
+    // —— 操作区 ——
+    nodes.push(Node::separator("sep.actions"));
+    // 「待答」放在操作区最前、独立一段——它是唯一可点的状态项，混在上方一堆灰色只读行里显得乱。
+    if up && data.active_requests > 0 {
+        let title =
+            i18n::tr(lang, "tray.pendingQuestions").replace("{n}", &data.active_requests.to_string());
+        // 有逐条摘要 → 子菜单（点击聚焦对应弹窗）；缺摘要（旧 daemon）→ 退回只读计数行。
+        if data.pending_requests.is_empty() {
+            nodes.push(Node::item("st.pending_count", title, false));
+        } else {
+            let children = data
+                .pending_requests
+                .iter()
+                .map(|p| {
                     let label = if p.preview.is_empty() {
                         i18n::tr(lang, "tray.pendingUntitled").to_string()
                     } else {
                         p.preview.clone()
                     };
-                    sb = sb.text(format!("focus_req:{}", p.id), label);
-                }
-                menu.append(&sb.build()?)?;
-            }
+                    Node::item(format!("focus_req:{}", p.id), label, true)
+                })
+                .collect();
+            nodes.push(Node::submenu("st.pending_menu", title, true, children));
         }
-        // 仅在开启了生命周期追踪时显示忙闲行（未开启时即便有兜底登记也不展示，避免困惑）。
-        if lifecycle_on && data.agents_working + data.agents_idle > 0 {
-            disabled(
-                i18n::tr(lang, "tray.agents")
-                    .replace("{w}", &data.agents_working.to_string())
-                    .replace("{i}", &data.agents_idle.to_string()),
-            )?;
-        }
-        if !data.im_connections.is_empty() {
-            disabled(
-                i18n::tr(lang, "tray.imConnections")
-                    .replace("{list}", &data.im_connections.join(", ")),
-            )?;
-        }
+        nodes.push(Node::separator("sep.pending"));
     }
-    if data.update_available {
-        disabled(i18n::tr(lang, "tray.updateAvailable").replace("{v}", &data.update_latest))?;
-    }
-    if data.pending {
-        disabled(i18n::tr(lang, "tray.updatePending").to_string())?;
-    }
-
-    // —— 操作区 ——
-    sep(menu)?;
-    action("open_settings", i18n::tr(lang, "tray.openSettings").to_string())?;
-    action("open_history", i18n::tr(lang, "tray.openHistory").to_string())?;
+    nodes.push(Node::item(
+        "open_settings",
+        i18n::tr(lang, "tray.openSettings").to_string(),
+        true,
+    ));
+    nodes.push(Node::item(
+        "open_history",
+        i18n::tr(lang, "tray.openHistory").to_string(),
+        true,
+    ));
     // 「Agent 状态」入口仅在开启了生命周期追踪时显示——否则窗口必为空，徒增困惑。
     if lifecycle_on {
-        action("open_agents", i18n::tr(lang, "tray.openAgents").to_string())?;
+        nodes.push(Node::item(
+            "open_agents",
+            i18n::tr(lang, "tray.openAgents").to_string(),
+            true,
+        ));
     }
-    sep(menu)?;
-    action("check_update", i18n::tr(lang, "tray.checkUpdate").to_string())?;
+    nodes.push(Node::separator("sep.update"));
+    nodes.push(Node::item(
+        "check_update",
+        i18n::tr(lang, "tray.checkUpdate").to_string(),
+        true,
+    ));
     if data.update_available {
-        action(
+        nodes.push(Node::item(
             "apply_update",
             i18n::tr(lang, "tray.applyUpdate").replace("{v}", &data.update_latest),
-        )?;
+            true,
+        ));
     }
-    sep(menu)?;
+    nodes.push(Node::separator("sep.daemon"));
     if up {
-        action("restart_daemon", i18n::tr(lang, "tray.restartDaemon").to_string())?;
+        nodes.push(Node::item(
+            "restart_daemon",
+            i18n::tr(lang, "tray.restartDaemon").to_string(),
+            true,
+        ));
         // 有「工作中」agent 时「停止」无意义：daemon 一停，agent 的生命周期 hook（report_agent_event
         // → ensure_running）或下次 ask 会几秒内把它重新拉起。故隐藏停止项，仅留一行灰色说明。
         if data.agents_working > 0 {
-            disabled(i18n::tr(lang, "tray.stopDaemonBlocked").to_string())?;
+            nodes.push(Node::item(
+                "st.stop_blocked",
+                i18n::tr(lang, "tray.stopDaemonBlocked").to_string(),
+                false,
+            ));
         } else {
-            action("stop_daemon", i18n::tr(lang, "tray.stopDaemon").to_string())?;
+            nodes.push(Node::item(
+                "stop_daemon",
+                i18n::tr(lang, "tray.stopDaemon").to_string(),
+                true,
+            ));
         }
     } else {
-        action("start_daemon", i18n::tr(lang, "tray.startDaemon").to_string())?;
+        nodes.push(Node::item(
+            "start_daemon",
+            i18n::tr(lang, "tray.startDaemon").to_string(),
+            true,
+        ));
     }
-    Ok(())
+    nodes
 }
 
 /// 托盘菜单事件分派（由 launch() 的全局 `on_menu_event` 在宿主进程中调用）。

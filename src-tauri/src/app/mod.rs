@@ -3,6 +3,8 @@
 pub mod coordinator;
 #[cfg(unix)]
 pub mod gui_host;
+#[cfg(unix)]
+pub mod tray_menu;
 
 use crate::channels::dingding::DingTalkChannel;
 use crate::channels::feishu::FeishuChannel;
