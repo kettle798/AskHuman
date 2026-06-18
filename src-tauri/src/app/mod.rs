@@ -35,6 +35,10 @@ pub struct AppState {
     /// 当前项目 key（回复历史归类 / 历史窗口默认过滤）。Daemon 模式由调用方上送；
     /// 单进程 / 独立窗口在本进程计算（向上找 .git 根、回退 cwd）。
     pub project: String,
+    /// 发起本次提问的 agent 家族（claude/codex/cursor），仅弹窗（Daemon 上送）有值；其它窗口为 None。
+    pub agent_kind: Option<String>,
+    /// 发起本次提问的 agent 进程 pid，仅弹窗（Daemon 上送）有值；用于「聚焦终端」与终端可激活性判断。
+    pub agent_pid: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -223,6 +227,8 @@ fn run_gui_ask(request: AskRequest, config: AppConfig, messaging_active: bool) -
         config: config.clone(),
         source: crate::models::source_name(),
         project: crate::project::detect(),
+        agent_kind: None,
+        agent_pid: None,
     };
     match launch(state, View::Popup, None) {
         Ok(()) => std::process::exit(0), // 成功路径已在 launch 内退出，此处不可达
@@ -446,6 +452,8 @@ pub fn run_settings(config: AppConfig) -> ! {
         config,
         source: crate::models::source_name(),
         project: crate::project::detect(),
+        agent_kind: None,
+        agent_pid: None,
     };
     if let Err(e) = launch(state, View::Settings, None) {
         stderr_redirect::eprintln_real(&format!(
@@ -467,6 +475,8 @@ pub fn run_history(project: String, all: bool, config: AppConfig) -> ! {
         config,
         source: crate::models::source_name(),
         project,
+        agent_kind: None,
+        agent_pid: None,
     };
     if let Err(e) = launch(state, View::History { all }, None) {
         stderr_redirect::eprintln_real(&format!(
@@ -489,6 +499,8 @@ pub fn run_agents(config: AppConfig) -> ! {
         config,
         source: crate::models::source_name(),
         project: crate::project::detect(),
+        agent_kind: None,
+        agent_pid: None,
     };
     if let Err(e) = launch(state, View::Agents, None) {
         stderr_redirect::eprintln_real(&format!(
@@ -516,6 +528,8 @@ pub fn run_gui_host(config: AppConfig) -> ! {
         config,
         source: crate::models::source_name(),
         project: crate::project::detect(),
+        agent_kind: None,
+        agent_pid: None,
     };
     if let Err(e) = launch(state, View::GuiHost, None) {
         stderr_redirect::eprintln_real(&format!("askhuman gui-host failed: {}", e));
@@ -580,6 +594,8 @@ pub fn run_gui_helper(_endpoint: String, token: String) -> ! {
         config: AppConfig::load_without_secrets(),
         source: show.source,
         project: show.project,
+        agent_kind: show.agent_kind,
+        agent_pid: show.agent_pid,
     };
     let popup_ipc = PopupIpc {
         gui_tx,

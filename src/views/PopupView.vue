@@ -25,7 +25,9 @@ import {
   popupUpdateState,
   updateApply,
   updateGetNotes,
+  focusAgentTerminal,
 } from "../lib/ipc";
+import { isFocusableTerminal } from "../lib/terminals";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import { formatShortcut, matchShortcut } from "../lib/shortcut";
 import { applyLanguage } from "../i18n";
@@ -147,6 +149,41 @@ const sourceName = ref("the Loop");
 // 来源 workspace：名称用于标题区展示，完整路径用于 hover 提示。空则隐藏该元素。
 const projectName = ref("");
 const projectPath = ref("");
+// 来源 agent：家族标识 + pid + 所在终端类型（决定 badge 是否可点击激活 tab）。
+const agentKind = ref("");
+const agentPid = ref<number | null>(null);
+const agentTerminal = ref<string | null>(null);
+// agent badge 文案：本地化家族名（Claude Code / Codex / Cursor）；未知家族回退原始标识。
+const agentLabel = computed(() => {
+  const k = agentKind.value;
+  if (!k) return "";
+  const label = t(`agents.kind.${k}`);
+  return label === `agents.kind.${k}` ? k : label;
+});
+// agent badge 是否可点击：所在终端可激活 tab 且有 pid。
+const agentFocusable = computed(
+  () => !!agentPid.value && isFocusableTerminal(agentTerminal.value)
+);
+
+// 点击 agent badge：聚焦该 agent 所在终端的 tab（失败静默，仅日志）。
+async function onFocusAgentTerminal() {
+  if (!agentFocusable.value || agentPid.value == null) return;
+  try {
+    await focusAgentTerminal(agentPid.value);
+  } catch (err) {
+    console.warn("focus agent terminal failed", err);
+  }
+}
+
+// 点击 workspace badge：在文件管理器打开该目录。
+async function onOpenWorkspace() {
+  if (!projectPath.value) return;
+  try {
+    await openPath(projectPath.value);
+  } catch (err) {
+    console.warn("open workspace failed", err);
+  }
+}
 
 const questions = computed<Question[]>(() => request.value?.questions ?? []);
 const total = computed(() => questions.value.length);
@@ -997,6 +1034,9 @@ onMounted(async () => {
     sourceName.value = init.sourceName;
     projectName.value = init.projectName;
     projectPath.value = init.project;
+    agentKind.value = init.agentKind ?? "";
+    agentPid.value = init.agentPid ?? null;
+    agentTerminal.value = init.agentTerminal ?? null;
     request.value = init.request;
     const n = init.request.questions.length;
     chosenByQ.value = Array.from({ length: n }, () => []);
@@ -1056,12 +1096,51 @@ onBeforeUnmount(() => {
       <span class="brand">
         <span class="brand-dot"></span>
         <span class="brand-title">{{ headerTitle }}</span>
-        <span
-          v-if="projectName"
-          class="brand-workspace"
-          :title="projectPath"
-          >{{ projectName }}</span
+        <component
+          :is="agentFocusable ? 'button' : 'span'"
+          v-if="agentLabel"
+          class="brand-chip brand-agent"
+          :class="{ clickable: agentFocusable }"
+          :type="agentFocusable ? 'button' : undefined"
+          :title="agentFocusable ? t('agents.focusTerminal') : undefined"
+          @click="onFocusAgentTerminal"
         >
+          <span class="chip-text">{{ agentLabel }}</span>
+          <svg
+            v-if="agentFocusable"
+            class="chip-arrow"
+            viewBox="0 0 10 10"
+            aria-hidden="true"
+          >
+            <path
+              d="M3 7 L7 3 M4 3 H7 V6"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </component>
+        <button
+          v-if="projectName"
+          type="button"
+          class="brand-chip brand-workspace clickable"
+          :title="projectPath"
+          @click="onOpenWorkspace"
+        >
+          <span class="chip-text">{{ projectName }}</span>
+          <svg class="chip-arrow" viewBox="0 0 10 10" aria-hidden="true">
+            <path
+              d="M3 7 L7 3 M4 3 H7 V6"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
       </span>
       <span class="nav-actions">
         <div v-if="updateAvailable" class="update-wrap">
@@ -1539,23 +1618,45 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 来源 workspace：浅灰底圆角矩形纯文字；需 pointer-events:auto 才能 hover 出原生 title 提示。 */
-.brand-workspace {
+/* 标题旁的来源胶囊（agent / workspace）：浅灰底圆角矩形纯文字。
+   需 pointer-events:auto 才能 hover 出原生 title / 接收点击（导航栏其余可拖拽）。
+   标题先截断、胶囊尽量保留完整：胶囊不参与收缩（flex:0 0 auto）。 */
+.brand-chip {
   pointer-events: auto;
-  cursor: default;
-  /* 标题先截断，workspace 尽量保留完整：不参与收缩。 */
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 2px 8px;
+  padding: 2px 7px;
+  border: none;
   border-radius: 6px;
   background: color-mix(in srgb, var(--text-primary) 8%, transparent);
   font-size: 12px;
   font-weight: 500;
   color: var(--text-secondary);
   letter-spacing: 0.1px;
+  font-family: inherit;
+  cursor: default;
+}
+.brand-chip .chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.brand-chip.clickable {
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.brand-chip.clickable:hover {
+  background: color-mix(in srgb, var(--text-primary) 14%, transparent);
+  color: var(--text-primary);
+}
+.chip-arrow {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  opacity: 0.65;
 }
 .brand-counter {
   font-size: 12px;

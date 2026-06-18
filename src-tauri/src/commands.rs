@@ -23,10 +23,21 @@ pub struct PopupInit {
     project: String,
     /// workspace 目录名（`project` 的 basename），标题区展示用。
     project_name: String,
+    /// 发起本次提问的 agent 家族（claude/codex/cursor）；None 则不显示 agent badge。
+    agent_kind: Option<String>,
+    /// 发起本次提问的 agent 进程 pid；前端「聚焦终端」用。
+    agent_pid: Option<u32>,
+    /// 该 agent 所在终端类型（`apple-terminal`/`iterm2`/…/`other`）；前端据此判断是否可激活 tab。
+    agent_terminal: Option<String>,
 }
 
 #[tauri::command]
 pub fn popup_init(state: State<AppState>) -> PopupInit {
+    // 终端类型在弹窗进程现取：terminal_kind 走的是「给定 pid」的进程链，与弹窗自身进程树无关。
+    let agent_terminal = state
+        .agent_pid
+        .and_then(|pid| crate::agents::detect::terminal_kind(pid))
+        .map(|s| s.to_string());
     PopupInit {
         request: state.request.clone(),
         theme: theme_str(state.config.general.theme),
@@ -35,6 +46,9 @@ pub fn popup_init(state: State<AppState>) -> PopupInit {
         source_name: state.source.clone(),
         project: state.project.clone(),
         project_name: crate::project::display_name(&state.project),
+        agent_kind: state.agent_kind.clone(),
+        agent_pid: state.agent_pid,
+        agent_terminal,
     }
 }
 

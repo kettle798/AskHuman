@@ -249,7 +249,12 @@ AskHuman/
 
 窗口拖拽用 `data-tauri-drag-region`（导航栏/底部空白/设置 tab 栏）；置顶用前端 `@tauri-apps/api/window` setAlwaysOnTop。
 文件拖入用 `onDragDropEvent`（原生路径）；`-f` 附件拖出用 `tauri-plugin-drag` 的 `startDrag`。
-来源名（弹窗标题 / Telegram 消息头「Question from {名称}」）由环境变量 `ASKHUMAN_ENV_SOURCE_NAME` 定制，缺省「the Loop」。弹窗导航栏标题旁还显示**来源 workspace**（浅灰圆角矩形纯文字、无图标，`title` hover 出完整路径）：取 `AppState.project`（git 仓库根 / 回退 cwd 的绝对路径）经 `project::display_name` 得目录名，随 `PopupInit{project, projectName}` 上送（`commands::popup_init`）；`project` 为空则前端隐藏该元素。该胶囊 `pointer-events:auto`（导航栏其余可拖拽）以便 hover 触发原生 title 提示。
+来源名（弹窗标题 / Telegram 消息头「Question from {名称}」）由环境变量 `ASKHUMAN_ENV_SOURCE_NAME` 定制，缺省「the Loop」。弹窗导航栏标题旁还显示两枚浅灰圆角胶囊（`.brand-chip`，`pointer-events:auto` 以便 hover/点击，导航栏其余可拖拽；窄窗时标题先截断、胶囊尽量保留完整）：
+
+- **来源 agent badge**（在 workspace 之前）：取 `AppState.agent_kind`（提问时 CLI `detect_caller_agent` 探到的家族，随 `TaskRequest→ShowPayload→AppState` 贯穿），前端显示本地化家族名（Claude Code/Codex/Cursor）；识别不到则不显示。若该 agent 终端可激活 tab（`PopupInit.agentTerminal` = `terminal_kind(agent_pid)` ∈ 共享集 `lib/terminals.ts`）则 badge 变可点按钮 + ↗ 箭头，点击 → `focus_agent_terminal(agentPid)`。
+- **来源 workspace**：取 `AppState.project`（git 仓库根 / 回退 cwd 绝对路径）经 `project::display_name` 得目录名，`title` hover 出完整路径；带 ↗ 箭头、整块可点 → `open_path(项目路径)` 在文件管理器打开。`project` 为空则隐藏。
+
+以上字段经 `PopupInit{project, projectName, agentKind, agentPid, agentTerminal}` 上送（`commands::popup_init`，终端类型在弹窗进程对给定 pid 现取）。
 
 > 推荐选项（`-o!` / `--option!`，见 `docs/specs/recommended-option.md`）：语义同 `-o` 且标记该选项为 AI 推荐答案（一题可多个，不预选中）。弹窗/历史详情在选项文本流开头内联显示「大拇指 SVG +『推荐』」绿色 Badge（`controls.css`：外层 `.rec-badge` 为与 `.label` 行高等高的透明对齐外框、内层 `.rec-badge-pill` 为绿色胶囊；使其与勾选框中线对齐、跨平台稳定，且换行后文本可铺满整行）；IM 渠道显示文本加本地化「👍推荐 」前缀（`channel.recommendedPrefix` + `conversation::display_text`），提交值恒为原文——其中钉钉卡片模板回传显示文本，由 `dingding::restore_selected` 还原原文，其余渠道按下标天然回原文。
 

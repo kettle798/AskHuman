@@ -57,6 +57,12 @@ export interface PopupInit {
   project: string;
   /** workspace 目录名（标题区展示）。 */
   projectName: string;
+  /** 发起本次提问的 agent 家族（claude/codex/cursor）；空表示未识别，不显示 agent badge。 */
+  agentKind?: string | null;
+  /** 发起本次提问的 agent 进程 pid；「聚焦终端」用。 */
+  agentPid?: number | null;
+  /** 该 agent 所在终端类型；用于判断 agent badge 是否可点击激活。 */
+  agentTerminal?: string | null;
 }
 
 export interface QuestionAnswer {

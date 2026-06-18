@@ -160,6 +160,12 @@ pub struct ShowPayload {
     /// 当前项目 key（供历史窗口默认过滤当前项目）。
     #[serde(default)]
     pub project: String,
+    /// 发起本次提问的 agent 家族（claude/codex/cursor），探测不到为 None。弹窗据此显示来源 agent badge。
+    #[serde(default)]
+    pub agent_kind: Option<String>,
+    /// 发起本次提问的 agent 进程 pid（进程树 walk 得到），探测不到为 None。弹窗据此判断 / 执行「聚焦终端」。
+    #[serde(default)]
+    pub agent_pid: Option<u32>,
 }
 
 /// 客户端（CLI / GUI Helper）→ Daemon 的消息。

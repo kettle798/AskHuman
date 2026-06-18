@@ -98,6 +98,8 @@ impl RequestRegistry {
             source: task.source,
             lang: task.lang,
             project: task.project,
+            agent_kind: task.agent_kind,
+            agent_pid: task.agent_pid,
         };
 
         let entry = Arc::new(RequestEntry {
