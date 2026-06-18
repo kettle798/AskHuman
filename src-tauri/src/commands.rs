@@ -19,6 +19,10 @@ pub struct PopupInit {
     always_on_top: bool,
     /// 标题来源名：「Question from {source_name}」。可经环境变量定制。
     source_name: String,
+    /// 来源 workspace 完整路径（git 仓库根 / 回退 cwd）；hover 标题区显示用。空则前端隐藏该元素。
+    project: String,
+    /// workspace 目录名（`project` 的 basename），标题区展示用。
+    project_name: String,
 }
 
 #[tauri::command]
@@ -29,6 +33,8 @@ pub fn popup_init(state: State<AppState>) -> PopupInit {
         always_on_top: state.config.general.always_on_top,
         // GUI Helper 模式下来源名由 Daemon 上送（A11）；单进程 / 设置回退取本进程环境。
         source_name: state.source.clone(),
+        project: state.project.clone(),
+        project_name: crate::project::display_name(&state.project),
     }
 }
 

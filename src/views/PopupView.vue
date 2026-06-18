@@ -144,6 +144,9 @@ function onScroll(e: Event) {
 const pinned = ref(false);
 const theme = ref<ThemeMode>("system");
 const sourceName = ref("the Loop");
+// 来源 workspace：名称用于标题区展示，完整路径用于 hover 提示。空则隐藏该元素。
+const projectName = ref("");
+const projectPath = ref("");
 
 const questions = computed<Question[]>(() => request.value?.questions ?? []);
 const total = computed(() => questions.value.length);
@@ -992,6 +995,8 @@ onMounted(async () => {
     theme.value = init.theme;
     pinned.value = init.alwaysOnTop;
     sourceName.value = init.sourceName;
+    projectName.value = init.projectName;
+    projectPath.value = init.project;
     request.value = init.request;
     const n = init.request.questions.length;
     chosenByQ.value = Array.from({ length: n }, () => []);
@@ -1051,6 +1056,12 @@ onBeforeUnmount(() => {
       <span class="brand">
         <span class="brand-dot"></span>
         <span class="brand-title">{{ headerTitle }}</span>
+        <span
+          v-if="projectName"
+          class="brand-workspace"
+          :title="projectPath"
+          >{{ projectName }}</span
+        >
       </span>
       <span class="nav-actions">
         <div v-if="updateAvailable" class="update-wrap">
@@ -1464,6 +1475,9 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   pointer-events: none;
+  /* 允许在窄窗内收缩，让标题/workspace 省略而非换行。 */
+  min-width: 0;
+  flex: 0 1 auto;
 }
 .brand-dot {
   position: relative;
@@ -1517,6 +1531,30 @@ onBeforeUnmount(() => {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
+  letter-spacing: 0.1px;
+  /* 窄窗时省略而非换行（如「Message from the Loop」），且优先于 workspace 被截断。 */
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 来源 workspace：浅灰底圆角矩形纯文字；需 pointer-events:auto 才能 hover 出原生 title 提示。 */
+.brand-workspace {
+  pointer-events: auto;
+  cursor: default;
+  /* 标题先截断，workspace 尽量保留完整：不参与收缩。 */
+  flex: 0 0 auto;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
   letter-spacing: 0.1px;
 }
 .brand-counter {

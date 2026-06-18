@@ -53,6 +53,10 @@ export interface PopupInit {
   theme: ThemeMode;
   alwaysOnTop: boolean;
   sourceName: string;
+  /** 来源 workspace 完整路径（hover 显示）；空表示未知，前端隐藏该元素。 */
+  project: string;
+  /** workspace 目录名（标题区展示）。 */
+  projectName: string;
 }
 
 export interface QuestionAnswer {
