@@ -2,7 +2,7 @@
 
 按具体任务 / 需求记录待办与当前进展。任务 / 需求完成后删除其 section（历史留在 git）。
 
-## 弹窗启动延迟性能优化（埋点 + harness + 基线 + 首轮 + 次轮已落地 → 余方案6/8/markdown-it，远期）
+## 弹窗启动延迟性能优化（埋点 + harness + 基线 + 首轮 + 次轮 + 方案6 已落地；性能已暂停 → 远期余方案8/markdown-it）
 
 文档：`docs/specs/popup-launch-performance.md`（调用链、等待点、优化方案、度量方法论 §7）。
 harness 计划：`docs/plans/perf-harness-deterministic-mock-im.md`。
@@ -28,39 +28,19 @@ Settings/History/Agents 异步组件、popup_init 作弹窗唯一非钥匙串配
 - WARM 端到端 p90 ≈ **520ms**（首轮后 ~583）：大头仍是 `GUI total show→painted` ≈496（window visible ~250 + page boot ~435），即 WebView/页面加载固有冷成本。
 - CLI `detect` 两路均 ~1ms（方案5：原 COLD ~39 / WARM ~27ms 的 ps 游走已离开 CLI）。
 
-**余下**：方案8 延后 show/骨架屏（改观感不减时长，热路径已并入方案6）、markdown-it 仅 `isMarkdown` 时按需懒加载（见 spec §4/§6）。
+**余下（性能已暂停，远期）**：方案8 延后 show/骨架屏（改观感不减时长，热路径已并入方案6）、markdown-it 仅 `isMarkdown`
+时按需懒加载（见 spec §4/§6）。
 
-### 进行中：方案6 弹窗预热（进程池）—— 代码已落地+编译/装机/机制验证通过；待解锁采基线 + 真机视觉 sanity + 提交
+**已完成：方案6 弹窗预热（进程池）** —— daemon 预热 1 个 `--popup --warm` helper 隐藏待命，`dispatch_popup` 领用喂
+`Show` 直接上屏、用后后台重建；默认开可关、非实验；并发第 2+/无显示/未就绪/drain 透明回退冷 spawn；热连接非保活、
+idle/换新 `recycle_warm` 重补。关键修正：隐藏窗（ordered-out）rAF 不回调 → 改「领用时 `nextTick` 等正文进 DOM 后直接
+后端 `popup_show_window` 上屏」（不依赖 rAF，息屏/锁屏也上屏）。macOS：待命期 helper 设 `Accessory`（不占 Dock/Cmd-Tab），
+领用切 `Regular` 并**补设内置图标**（否则 Dock 显通用命令行图标）。三档基线（`docs/perf/baseline.json`）：**hot e2e p90 ≈161ms
+vs warm 505（-68%）**、`show→painted` 476→135（-72%），cold/warm 无回归。视觉（无闪现/主题/回退）+ Dock 图标人眼确认 OK。
+详见 `docs/specs/popup-prewarm.md`、`docs/plans/popup-prewarm.md`。
 
-需求 `docs/specs/popup-prewarm.md` + 计划 `docs/plans/popup-prewarm.md`。
-形态：daemon 预热 1 个 `--popup --warm` helper（已挂载、无请求隐藏待命），来请求由 `dispatch_popup` 领用喂
-`Show` 直接上屏、用后后台重建；**默认开**可关、非实验；并发第 2+/无显示/未就绪/drain 透明回退现有冷 spawn；
-热连接非保活、idle/换新回收重补。
-
-**已落地（编译 + install 通过）**
-- 阶段1 config `general.popupPrewarm`（默认开）+ 设置页开关 + i18n。
-- 阶段2 helper `--warm` 角色；前端待命/`popup-show` 领用注入/渲染；窗口 `background_throttling(Disabled)`。
-- 阶段3 daemon 热池（`warm_pool`/`WarmSlot`）+ `handle_gui_warm` + `serve_gui`（冷热共用尾段）+ `dispatch_popup` 领用 + 冷 spawn 完整回退。
-- 阶段4 补热 `maybe_topup_warm`（启动/领用后/死亡后/开关开）+ `has_display`（headless 不预热）+ 生命周期
-  （热连接非保活、idle/排空/换新 `recycle_warm` 重补）。
-- 阶段5 perf 透传：`ShowPayload` 带 `perf_id`/`perf_autodismiss`，热 helper 领用时 `perf::set_runtime` 开埋点
-  （无 env 也能量化）；harness 增 **`hot`** 档（prewarm 开、热路径 only 聚合、`daemon recv→assigned` 行）；
-  cold/warm 档显式 `popupPrewarm=false` 保持与旧基线可比。
-
-**关键修正（验证中发现）**：原设计「隐藏窗双 rAF 绘制完成才 show」**不可行**——窗口 ordered-out 无 display link，
-rAF 根本不回调（`background_throttling(Disabled)` 只防节流、不为隐藏窗驱动帧）。改为**领用时 `nextTick` 等 DOM
-更新好正文后直接后端 `popup_show_window` 上屏**（show 不再依赖 rAF），rAF/打点放到 show 之后。实测：**息屏/锁屏下
-弹窗照常上屏**（`gui.win_show` 触发），仅 show 后的 `fe.painted`/harness autodismiss 因无刷新而暂停（只影响 harness，
-其本就拒绝锁屏运行）。无「加载中→正文」闪现（show 时 DOM 已是正文）。
-
-**已验证 + 已提交（`87fa55e`，未 push）**：
-- daemon 日志 `preheating popup helper`/`warm popup ready`；GUI-free 生命周期（开→1 热进程、关→回收 0、再开→重补 1、停 daemon→自杀 0）。
-- 三档基线已采（`docs/perf/baseline.json`）：**hot e2e p90 ≈ 161ms vs warm 505ms（-68%）**、`show→painted` 476→135ms（-72%）；cold/warm 无回归。
-- 锁屏/息屏：弹窗照常上屏（`gui.win_show` 触发，show 不依赖 rAF）；仅 show 后 `fe.painted`/autodismiss 暂停（只影响 harness）。
-- 并发：2 并发 = 1 hot(`dmn.assigned`) + 1 cold(`dmn.spawned`)，均绘制+退出（透明回退 OK）。
-
-**待办（需真机/人眼）**：① 视觉确认无闪现/空白/旧内容（阶段1 问题待答）；② 改主题后热弹窗取新主题；
-③ drain 换新回收+重补（toggle/stop 已验，drain 同走 `recycle_warm`，待真机确认）；④ headless（仅 Linux）；⑤ `git push`（待你确认）。
+**待办**：`git push`（未 push commits：`87fa55e` feature+docs+baseline / `baf1c8c` progress / `2cb7b43` shutdown 重补泄漏 /
+`a28144e` Dock 待命 accessory / `6b120e3` Dock 领用图标）；headless 预热仅 Linux 可验（mac N/A）。
 
 ## 待办：daemon 二进制变化检测 —— 轮询 vs filewatch（后续评估，优先级低）
 
