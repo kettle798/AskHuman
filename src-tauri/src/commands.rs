@@ -27,6 +27,13 @@ pub struct PopupInit {
     agent_kind: Option<String>,
     /// 发起本次提问的 agent 进程 pid；前端「聚焦终端」用。
     agent_pid: Option<u32>,
+    /// 界面语言原始值（`auto`/`en`/`zh`）。让弹窗直接据此 `applyLanguage`，免去前端再走 `get_settings()`
+    /// （钥匙串）。`auto` 由前端解析为系统语言。
+    language: String,
+    /// 语音识别语言（BCP-47，如 `zh-CN`；`auto` 跟随系统）。来自内存态配置，无钥匙串。
+    speech_language: String,
+    /// 语音输入快捷键（规范串如 `cmd+d`；空串=关闭）。来自内存态配置，无钥匙串。
+    speech_shortcut: String,
     /// 性能埋点是否开启（helper 进程收到了 `ASKHUMAN_PERF_ID`）；前端据此决定是否上报 perf 标记。
     perf: bool,
     /// 性能测试：画完首帧后自动取消弹窗（仅 harness 用）。
@@ -45,6 +52,9 @@ pub fn popup_init(state: State<AppState>) -> PopupInit {
         project_name: crate::project::display_name(&state.project),
         agent_kind: state.agent_kind.clone(),
         agent_pid: state.agent_pid,
+        language: state.config.general.language.clone(),
+        speech_language: state.config.general.speech_language.clone(),
+        speech_shortcut: state.config.general.speech_shortcut.clone(),
         perf: !crate::perf::env_id().is_empty(),
         perf_autodismiss: crate::perf::autodismiss(),
     }
@@ -271,11 +281,14 @@ fn theme_str(theme: ThemeMode) -> String {
 
 // ===== 回复历史 =====
 
-/// 历史窗口初始化负载：当前主题 + 当前项目（用于默认过滤）。
+/// 历史窗口初始化负载：当前主题 + 语言 + 当前项目（用于默认过滤）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryInit {
     theme: String,
+    /// 界面语言（已解析为 `en`/`zh`）。历史窗口据此 `applyLanguage`，使 `main.ts` 无需读配置
+    /// （与 `agents_init` 同模式）。
+    lang: String,
     /// 当前项目 key（可空）。
     project: String,
     /// 当前项目显示名（basename；可空）。
@@ -286,6 +299,9 @@ pub struct HistoryInit {
 pub fn history_init(state: State<AppState>) -> HistoryInit {
     HistoryInit {
         theme: theme_str(state.config.general.theme),
+        lang: crate::i18n::Lang::resolve(&state.config.general.language)
+            .code()
+            .to_string(),
         project: state.project.clone(),
         project_name: crate::project::display_name(&state.project),
     }

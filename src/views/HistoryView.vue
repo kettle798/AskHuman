@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { applyTheme } from "../lib/theme";
+import { applyLanguage } from "../i18n";
 import {
   clearHistory,
   getHistory,
@@ -142,6 +143,8 @@ let unlistenUpdated: UnlistenFn | null = null;
 onMounted(async () => {
   const init = await historyInit();
   applyTheme(init.theme);
+  // 精确语言来自 history_init（main.ts 只做 auto 兜底，不再读配置）。
+  applyLanguage(init.lang);
   projects.value = await getHistoryProjects();
 
   const params = new URLSearchParams(window.location.search);

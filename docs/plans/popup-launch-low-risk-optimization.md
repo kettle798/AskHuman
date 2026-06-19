@@ -1,5 +1,10 @@
 # 计划：弹窗启动延迟 —— 低风险优化首轮（方案7 + 方案2 + 方案1）
 
+> 状态：**已实现并量化（2026-06）**。同机 compare（mock IM，冷热双跑）相对基线两闸均 OK 无回归：
+> WARM 端到端 p90 −5.9%（`frontend boot→painted` −37%、`popup_init` −51%）；COLD 端到端 −0.3%
+> （冷启动被 ~463ms IM 建连主导，属方案3/6），但 `frontend boot→painted` −16%、`popup_init` −85%。
+> 附带：`HistoryView` 改由 `history_init.lang` 应用语言（计划外补丁，见下「影响文件」），`main.ts` 自此零 IPC。
+
 需求与方法论见 `docs/specs/popup-launch-performance.md`。本计划只覆盖**首轮低风险组合**，目标是压缩「页面加载 + 前端 boot→painted」两段，不动架构。
 
 ## 目标与范围
@@ -36,11 +41,19 @@
 - 效果：Vite 自动分块，弹窗入口 chunk 不再含另三个 view 及其依赖，减少解析/执行（落在 `page boot` 与 `frontend boot` 段）。
 
 ## 影响文件
-- `src-tauri/src/commands.rs`（`PopupInit` + `popup_init`）
-- `src/lib/types.ts`（`PopupInit` 类型）
+- `src-tauri/src/commands.rs`（`PopupInit` + `popup_init`；并补 `HistoryInit` + `history_init` 的 `lang`）
+- `src/lib/types.ts`（`PopupInit` + `HistoryInit` 类型）
 - `src/main.ts`（方案1）
-- `src/views/PopupView.vue`（方案2 + 消费 `init` 新字段）
+- `src/views/PopupView.vue`（方案2 + 消费 `init` 新字段，新增 `initAfterPaint`）
+- `src/views/HistoryView.vue`（计划外补丁：消费 `history_init.lang` 应用语言，详见下）
 - `src/App.vue`（方案7）
+
+### 计划外补丁：HistoryView 语言来源
+`main.ts` 被所有窗口共用；去掉其挂载前的 `get_settings()` 后，`SettingsView`/`AgentsView` 各自 init
+里仍 `applyLanguage`（不受影响），唯独 `HistoryView` 只读 `history_init`（原只返回 theme/project），
+会回退系统语言 → 对设置了非 `auto` 语言的用户算轻微回归。补法（已与用户确认）：`history_init` 增 `lang`
+（后端 `Lang::resolve` 为 `en`/`zh`，与 `agents_init` 同模式），`HistoryView` 拿到后 `applyLanguage(init.lang)`。
+自此 `main.ts` 彻底零 IPC（仅 `auto` 兜底 + 立即挂载），各窗口语言均由各自 init 命令承担。
 
 ## 风险与兼容
 - 语言短暂为 `auto`：仅在 `popup_init` 返回前的极短窗口；`auto` = 系统语言，通常与配置一致，肉眼基本无感。
@@ -49,10 +62,10 @@
 - 协议/IPC：`PopupInit` 仅增字段，旧前端忽略未知字段；`popup_init` 为进程内命令，无跨版本兼容问题。
 
 ## 验证
-1. `./scripts/install.sh` 编译安装。
-2. `node scripts/perf-popup.mjs --runs 20 --baseline docs/perf/baseline.json`（隔离 daemon）。预期 `frontend boot→painted` 与 `page boot` 下降，端到端 p90 不回归（回归闸不报红）。
-3. 人工 sanity：正常 `AskHuman` 弹窗内容/语言/主题/语音/附件交互正常；设置/历史/Agents 窗口可正常打开。
-4. 三项确认有效后，`--save-baseline docs/perf/baseline.json` 刷新为优化后新基线。
+1. `./scripts/install.sh` 编译安装（`vue-tsc` 已通过；Vite 已把 Settings/History/Agents 拆为独立 chunk，弹窗入口包不再含此三者约 69 kB JS + 各自 CSS）。
+2. `node scripts/perf-popup.mjs`（无脑 compare，隔离 daemon + mock IM + 冷热双跑，对比 `docs/perf/baseline.json`）。实测 `frontend boot→painted` / `popup_init` / `page boot` 均下降，端到端 p90 不回归（两闸 OK）。
+3. 人工 sanity：正常 `AskHuman` 弹窗内容/语言/主题/语音/附件交互正常；设置/历史/Agents 窗口可正常打开（异步组件首次加载）。
+4. 确认有效后 `node scripts/perf-popup.mjs --update-baseline` 把基线刷新为优化后新数（如此后续方案才以此为新起点防回归）。
 
 ## 不在本轮（留待后续，见 spec §4/§5/§6）
 方案6 预热复用（大头、架构级）、方案5 detect 移 daemon、方案4 attach 省钥匙串、方案8 延后 show/骨架屏。

@@ -17,7 +17,6 @@ import {
   readImageDataUrl,
   fileIconDataUrl,
   showAttachmentMenu,
-  getSettings,
   startSpeech,
   stopSpeech,
   flushSpeech,
@@ -39,6 +38,7 @@ import type {
   AskRequest,
   FileAttachment,
   ImageAttachment,
+  PopupInit,
   Question,
   QuestionAnswer,
   ThemeMode,
@@ -943,9 +943,64 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 onMounted(async () => {
+  // 同步窗口监听（开销极小）：放最前，保证粘贴 / 快捷键 / Esc 从首帧即可用。
   window.addEventListener("paste", onPaste);
   window.addEventListener("keydown", onKeydown);
   document.addEventListener("mouseup", onDocMouseUp);
+  // 关键路径：第一步即取请求内容并渲染，尽快上屏；其余初始化全部移到渲染之后（见 initAfterPaint）。
+  try {
+    const init = await popupInit();
+    // 后端在 helper 进程收到 ASKHUMAN_PERF_ID 时置 perf=true：开启前端埋点并冲刷此前缓存的标记。
+    if (init.perf) perfEnableFe();
+    perfMarkFe("fe.popup_init_done");
+    applyTheme(init.theme);
+    theme.value = init.theme;
+    // 精确语言来自 popup_init（零钥匙串）；main.ts 只做 auto 兜底，故此处校正。
+    if (typeof init.language === "string") applyLanguage(init.language);
+    pinned.value = init.alwaysOnTop;
+    sourceName.value = init.sourceName;
+    projectName.value = init.projectName;
+    projectPath.value = init.project;
+    agentKind.value = init.agentKind ?? "";
+    agentPid.value = init.agentPid ?? null;
+    // 语音设置改取自 popup_init（不再走 get_settings / 钥匙串）。
+    speechLang.value = init.speechLanguage || "auto";
+    speechShortcut.value = init.speechShortcut || "cmd+d";
+    request.value = init.request;
+    const n = init.request.questions.length;
+    chosenByQ.value = Array.from({ length: n }, () => []);
+    inputByQ.value = Array.from({ length: n }, () => "");
+    imagesByQ.value = Array.from({ length: n }, () => []);
+    replyFilesByQ.value = Array.from({ length: n }, () => []);
+    visited.value = Array.from({ length: n }, () => false);
+    if (n > 0) visited.value[0] = true;
+    loadThumbs();
+    loadDragIcons();
+    requestAnimationFrame(() => {
+      inputRef.value?.focus({ preventScroll: true });
+      autoGrow();
+      // 双 rAF：第一帧让正文进入 DOM 并即将绘制，第二帧回调时该帧已真正合成上屏，
+      // 此刻打点更贴近用户真正看到内容的时刻（比单 rAF 晚约 1 帧）。
+      requestAnimationFrame(() => {
+        perfMarkFe("fe.painted");
+        // harness 模式：内容已上屏即自动取消，免人工点按。
+        if (init.perfAutodismiss) {
+          cancelPopup().catch(() => {});
+        }
+      });
+    });
+    // 内容已渲染：把其余初始化（事件监听 / 语音 / 自更新 / 终端探测）放到首帧之后，不阻塞首屏。
+    void initAfterPaint(init);
+  } catch (err) {
+    console.error("popup_init 失败", err);
+    loadError.value = String(err);
+  }
+});
+
+// 首帧渲染后再执行的非关键初始化。这些监听对应的事件都由 daemon 在 show 之后才可能发来，
+// 或为用户 / 托盘触发，略晚于首帧注册无碍（自更新态另用 popupUpdateState() 拉初值兜底）。
+// 放此处是为了不阻塞弹窗首屏（原先这些 await 串在 popupInit 之前，正是「加载中」停留的来源）。
+async function initAfterPaint(init: PopupInit) {
   unlistenIndex = await listen<number>("preview-index", (e) => {
     const i = e.payload;
     if (i >= 0 && i < attachments.value.length) {
@@ -970,14 +1025,6 @@ onMounted(async () => {
     }
     addDroppedPaths(event.payload.paths);
   });
-  // 读取识别语言 / 快捷键设置 + 探测语音是否可用（macOS 26+）。
-  try {
-    const s = await getSettings();
-    speechLang.value = s.config.general.speechLanguage || "auto";
-    speechShortcut.value = s.config.general.speechShortcut ?? "cmd+d";
-  } catch {
-    /* 读取失败：保持默认 */
-  }
   // 设置变更实时生效（同进程内设置窗口保存后广播 general 配置）。
   unlistenSettings = await listen<{
     theme?: ThemeMode;
@@ -996,6 +1043,7 @@ onMounted(async () => {
     if (typeof e.payload.speechShortcut === "string")
       speechShortcut.value = e.payload.speechShortcut;
   });
+  // 探测语音是否可用（macOS 26+）+ 订阅 speech-* 事件。
   try {
     speechSupported.value = await speechAvailable();
   } catch {
@@ -1028,56 +1076,16 @@ onMounted(async () => {
   unlistenFlash = await listen("popup-flash", () => {
     triggerFlash();
   });
-  try {
-    const init = await popupInit();
-    // 后端在 helper 进程收到 ASKHUMAN_PERF_ID 时置 perf=true：开启前端埋点并冲刷此前缓存的标记。
-    if (init.perf) perfEnableFe();
-    perfMarkFe("fe.popup_init_done");
-    applyTheme(init.theme);
-    theme.value = init.theme;
-    pinned.value = init.alwaysOnTop;
-    sourceName.value = init.sourceName;
-    projectName.value = init.projectName;
-    projectPath.value = init.project;
-    agentKind.value = init.agentKind ?? "";
-    agentPid.value = init.agentPid ?? null;
-    request.value = init.request;
-    // 终端类型探测要跑进程链 ps（数十毫秒），故移出 popup_init、弹窗渲染后再异步解析——
-    // 拿到后 agent badge 才升级成「可点 + ↗」（先显示纯文字 badge，不阻塞首屏）。
-    if (agentPid.value != null) {
-      popupAgentTerminal()
-        .then((kind) => {
-          agentTerminal.value = kind ?? null;
-        })
-        .catch(() => {});
-    }
-    const n = init.request.questions.length;
-    chosenByQ.value = Array.from({ length: n }, () => []);
-    inputByQ.value = Array.from({ length: n }, () => "");
-    imagesByQ.value = Array.from({ length: n }, () => []);
-    replyFilesByQ.value = Array.from({ length: n }, () => []);
-    visited.value = Array.from({ length: n }, () => false);
-    if (n > 0) visited.value[0] = true;
-    loadThumbs();
-    loadDragIcons();
-    requestAnimationFrame(() => {
-      inputRef.value?.focus({ preventScroll: true });
-      autoGrow();
-      // 双 rAF：第一帧让正文进入 DOM 并即将绘制，第二帧回调时该帧已真正合成上屏，
-      // 此刻打点更贴近用户真正看到内容的时刻（比单 rAF 晚约 1 帧）。
-      requestAnimationFrame(() => {
-        perfMarkFe("fe.painted");
-        // harness 模式：内容已上屏即自动取消，免人工点按。
-        if (init.perfAutodismiss) {
-          cancelPopup().catch(() => {});
-        }
-      });
-    });
-  } catch (err) {
-    console.error("popup_init 失败", err);
-    loadError.value = String(err);
+  // 终端类型探测要跑进程链 ps（数十毫秒），故渲染后再异步解析——拿到后 agent badge 才升级成
+  // 「可点 + ↗」（先显示纯文字 badge，不阻塞首屏）。
+  if (init.agentPid != null) {
+    popupAgentTerminal()
+      .then((kind) => {
+        agentTerminal.value = kind ?? null;
+      })
+      .catch(() => {});
   }
-});
+}
 
 onBeforeUnmount(() => {
   window.removeEventListener("paste", onPaste);

@@ -61,6 +61,12 @@ export interface PopupInit {
   agentKind?: string | null;
   /** 发起本次提问的 agent 进程 pid；「聚焦终端」用。 */
   agentPid?: number | null;
+  /** 界面语言原始值（auto/en/zh）；弹窗据此 applyLanguage，免再走 get_settings()。 */
+  language?: string;
+  /** 语音识别语言（BCP-47，如 zh-CN；auto 跟随系统）。 */
+  speechLanguage?: string;
+  /** 语音输入快捷键（规范串如 cmd+d；空串=关闭）。 */
+  speechShortcut?: string;
   /** 性能埋点是否开启（helper 收到 ASKHUMAN_PERF_ID）；前端据此决定是否上报 perf 标记。 */
   perf?: boolean;
   /** 性能测试：画完首帧后自动取消弹窗（仅 harness 用）。 */
@@ -116,6 +122,8 @@ export interface ProjectInfo {
 /** History window init payload. */
 export interface HistoryInit {
   theme: ThemeMode;
+  /** 界面语言（已解析为 en/zh）；历史窗口据此 applyLanguage。 */
+  lang: string;
   project: string;
   projectName: string;
 }

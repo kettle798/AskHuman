@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-06-19T04:12:12.813Z",
+  "generatedAt": "2026-06-19T04:24:45.746Z",
   "thresholdPct": 20,
   "mockDelayMs": 150,
   "cold": {
@@ -7,66 +7,66 @@
     "metrics": {
       "e2e+spawn (spawn->painted)": {
         "count": 10,
-        "min": 1048,
-        "median": 1065,
-        "p90": 1092.4,
-        "max": 1105
+        "min": 1096,
+        "median": 1144.5,
+        "p90": 1187.8,
+        "max": 1258
       },
       "  proc spawn (->cli.start)": {
         "count": 10,
-        "min": 21,
-        "median": 22,
-        "p90": 24.1,
-        "max": 25
+        "min": 24,
+        "median": 26,
+        "p90": 28.299999999999997,
+        "max": 31
       },
       "e2e (cli.start->fe.painted)": {
         "count": 10,
-        "min": 1026,
-        "median": 1043,
-        "p90": 1068.6,
-        "max": 1083
+        "min": 1068,
+        "median": 1119,
+        "p90": 1163.8,
+        "max": 1234
       },
       "cli (start->submit)": {
         "count": 10,
-        "min": 85,
-        "median": 87,
-        "p90": 88.1,
-        "max": 89
+        "min": 77,
+        "median": 87.5,
+        "p90": 92.7,
+        "max": 99
       },
       "  detect": {
         "count": 10,
-        "min": 32,
-        "median": 33.5,
-        "p90": 34.1,
-        "max": 35
+        "min": 23,
+        "median": 34,
+        "p90": 38.699999999999996,
+        "max": 45
       },
       "ipc (submit->dmn.recv)": {
         "count": 10,
         "min": 0,
         "median": 0,
-        "p90": 0.09999999999999964,
-        "max": 1
+        "p90": 0,
+        "max": 0
       },
       "daemon (recv->spawned)": {
         "count": 10,
         "min": 461,
-        "median": 463,
-        "p90": 464.1,
-        "max": 465
+        "median": 462.5,
+        "p90": 466,
+        "max": 466
       },
       "  im_attach": {
         "count": 10,
         "min": 460,
         "median": 461.5,
-        "p90": 463,
-        "max": 463
+        "p90": 464,
+        "max": 464
       },
       "spawn->gui proc start": {
         "count": 10,
-        "min": 18,
-        "median": 20.5,
-        "p90": 22.1,
-        "max": 23
+        "min": 20,
+        "median": 23,
+        "p90": 25,
+        "max": 25
       },
       "gui connect (start->show)": {
         "count": 10,
@@ -77,45 +77,45 @@
       },
       "GUI total (show->painted)": {
         "count": 10,
-        "min": 459,
-        "median": 470.5,
-        "p90": 494.4,
-        "max": 516
+        "min": 491,
+        "median": 553.5,
+        "p90": 599.4,
+        "max": 648
       },
       "  tauri build()": {
         "count": 10,
-        "min": 37,
-        "median": 40,
-        "p90": 53,
+        "min": 36,
+        "median": 41,
+        "p90": 52.1,
         "max": 53
       },
       "  window visible": {
         "count": 10,
-        "min": 228,
-        "median": 239.5,
-        "p90": 266.3,
-        "max": 278
+        "min": 233,
+        "median": 271,
+        "p90": 304.79999999999995,
+        "max": 357
       },
       "  page boot (->fe boot)": {
         "count": 10,
-        "min": 347,
-        "median": 409.5,
-        "p90": 439.6,
-        "max": 454
+        "min": 370,
+        "median": 484,
+        "p90": 524.5,
+        "max": 583
       },
       "  frontend (boot->painted)": {
         "count": 10,
-        "min": 54,
-        "median": 59,
-        "p90": 68.69999999999997,
-        "max": 120
+        "min": 57,
+        "median": 65,
+        "p90": 80.59999999999998,
+        "max": 122
       },
       "    popup_init": {
         "count": 10,
-        "min": 8,
-        "median": 12.5,
-        "p90": 13.2,
-        "max": 15
+        "min": 1,
+        "median": 2,
+        "p90": 8.39999999999998,
+        "max": 57
       }
     }
   },
@@ -124,50 +124,50 @@
     "metrics": {
       "e2e+spawn (spawn->painted)": {
         "count": 20,
-        "min": 463,
-        "median": 487.5,
-        "p90": 527.9,
-        "max": 538
+        "min": 534,
+        "median": 557.5,
+        "p90": 582.9,
+        "max": 594
       },
       "  proc spawn (->cli.start)": {
         "count": 20,
-        "min": 9,
+        "min": 10,
         "median": 12,
-        "p90": 14,
-        "max": 14
+        "p90": 13,
+        "max": 13
       },
       "e2e (cli.start->fe.painted)": {
         "count": 20,
-        "min": 450,
-        "median": 474,
-        "p90": 514.8,
-        "max": 526
+        "min": 523,
+        "median": 546.5,
+        "p90": 571.8,
+        "max": 582
       },
       "cli (start->submit)": {
         "count": 20,
-        "min": 22,
-        "median": 24,
-        "p90": 26.1,
-        "max": 31
+        "min": 23,
+        "median": 26,
+        "p90": 27,
+        "max": 45
       },
       "  detect": {
         "count": 20,
-        "min": 21,
-        "median": 24,
-        "p90": 26.1,
-        "max": 30
+        "min": 22,
+        "median": 25.5,
+        "p90": 27,
+        "max": 45
       },
       "ipc (submit->dmn.recv)": {
         "count": 20,
         "min": 0,
         "median": 0,
-        "p90": 0.10000000000000142,
+        "p90": 0,
         "max": 1
       },
       "daemon (recv->spawned)": {
         "count": 20,
         "min": 0,
-        "median": 0,
+        "median": 1,
         "p90": 1,
         "max": 1
       },
@@ -180,59 +180,59 @@
       },
       "spawn->gui proc start": {
         "count": 20,
-        "min": 9,
+        "min": 8,
         "median": 9,
-        "p90": 10,
-        "max": 10
+        "p90": 9,
+        "max": 9
       },
       "gui connect (start->show)": {
         "count": 20,
         "min": 0,
-        "median": 0,
+        "median": 1,
         "p90": 1,
         "max": 1
       },
       "GUI total (show->painted)": {
         "count": 20,
-        "min": 417,
-        "median": 440.5,
-        "p90": 474.3,
-        "max": 489
+        "min": 487,
+        "median": 509,
+        "p90": 535,
+        "max": 545
       },
       "  tauri build()": {
         "count": 20,
-        "min": 24,
-        "median": 28,
-        "p90": 35.1,
-        "max": 44
+        "min": 32,
+        "median": 39,
+        "p90": 44,
+        "max": 45
       },
       "  window visible": {
         "count": 20,
-        "min": 193,
-        "median": 208.5,
-        "p90": 233.4,
-        "max": 244
+        "min": 226,
+        "median": 248.5,
+        "p90": 262.6,
+        "max": 277
       },
       "  page boot (->fe boot)": {
         "count": 20,
-        "min": 321,
-        "median": 372,
-        "p90": 410.70000000000005,
-        "max": 434
+        "min": 366,
+        "median": 444,
+        "p90": 472.7,
+        "max": 483
       },
       "  frontend (boot->painted)": {
         "count": 20,
-        "min": 54,
+        "min": 55,
         "median": 61,
-        "p90": 119.1,
-        "max": 128
+        "p90": 120.1,
+        "max": 121
       },
       "    popup_init": {
         "count": 20,
-        "min": 7,
-        "median": 13.5,
-        "p90": 17.1,
-        "max": 18
+        "min": 1,
+        "median": 2,
+        "p90": 56.1,
+        "max": 58
       }
     }
   }

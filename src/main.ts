@@ -4,19 +4,14 @@ import "./styles/tokens.css";
 import "./styles/base.css";
 import "./styles/controls.css";
 import { i18n, applyLanguage } from "./i18n";
-import { getSettings } from "./lib/ipc";
 import { mark as perfMarkFe } from "./lib/perf";
 
-async function bootstrap() {
+function bootstrap() {
   perfMarkFe("fe.bootstrap");
-  // 先按系统/浏览器语言兜底，再读配置校正（auto/en/zh）。
+  // 立即挂载，不阻塞首帧：先按系统语言（auto）兜底，精确语言由各视图从自己的 init 命令
+  // （弹窗走 popup_init，零钥匙串）拿到后再 applyLanguage 校正。极少数情况下 init 返回前
+  // 文本短暂为系统语言，肉眼基本无感。
   applyLanguage("auto");
-  try {
-    const s = await getSettings();
-    applyLanguage(s.config.general.language);
-  } catch {
-    /* 读取失败：保持兜底语言 */
-  }
   createApp(App).use(i18n).mount("#app");
   perfMarkFe("fe.mounted");
 }
