@@ -500,7 +500,10 @@ mod unix_impl {
             tokio::time::sleep(Duration::from_millis(2000)).await;
         }
 
-        // 方案6：关停前回收热实例（drop 连接 → 热进程收 EOF 自杀，不悬挂）。
+        // 方案6：关停前回收热实例（drop 连接 → 热进程收 EOF 自杀，不悬挂）。先置 `draining` 再回收，
+        // 否则被回收的热实例走死亡分支会 `maybe_topup_warm` 又拉起一个新热进程（孤儿，daemon 已停）。
+        // `begin_drain` 走的是同一道门（先 `draining=true` 再 `recycle_warm`）；plain stop/restart 此前漏了。
+        state.draining.store(true, Ordering::SeqCst);
         recycle_warm(&state);
 
         // 退出前持久化 agent 注册表（spec D18：换新 / 闲退后由新 daemon 重载复核）。
