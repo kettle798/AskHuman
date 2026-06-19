@@ -159,6 +159,9 @@ pub(crate) fn finalize_popup_show(app: &tauri::AppHandle) {
     {
         // 方案6：领用上屏 → 切回 Regular，让弹窗入坞（待命期为 accessory，不占 Dock/Cmd-Tab）。
         let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+        // 待命期（accessory）设的 applicationIconImage 在切回 Regular 后会被 AppKit 用默认图标覆盖
+        // （裸二进制 → 通用命令行图标），故此刻在 Regular 下重设一次内置图标，确保 Dock 显示正确图标。
+        crate::macos_dock_icon::set_dock_icon();
         if let Ok(ns) = win.ns_window() {
             crate::macos_window_anim::set_appear_animation(
                 ns,
