@@ -13,9 +13,13 @@
   存/比基线、端到端 p90 超阈（默认 20%）退出码 1。
 - 已 `install.sh` 装好并实测：端到端热路径 ~0.55s，GUI/页面加载占 ~90%（基线样例见文档「附」）。
 
-下一步（优化方案，尚未动手；需先写 plan / 确认再改）：方案1（`main.ts` 取消挂载前 `await getSettings`）、
-方案2（`onMounted` 先 `popupInit`）、方案3（daemon 提前 spawn helper）、§5（detect 移到 daemon 侧）。
-用 `node scripts/perf-popup.mjs --save-baseline docs/perf/baseline.json` 先固化正式基线再逐方案对比防回归。
+harness 改进：改用**隔离 daemon**（临时 HOME，绝不碰真实 daemon / 在途提问），支持 `--cold`；
+新增 spawn 起点（含进程创建）+ 终点双 rAF。隔离基线已刷新到 `docs/perf/baseline.json`
+（端到端含 spawn p90 ≈474ms，page boot ~357ms 是大头）。
+
+计划：`docs/plans/popup-launch-low-risk-optimization.md`（首轮低风险组合 = 方案7 代码分割 + 方案2
+popupInit 提前 + 方案1 main.ts 不阻塞 + 支撑改动「popup_init 作为弹窗唯一非钥匙串配置源」）。
+**待用户确认计划后再改优化代码。** 后续：方案6 预热（大头）、方案5 detect 移 daemon 等见 spec §4-6。
 
 ## 待办：daemon 二进制变化检测 —— 轮询 vs filewatch（后续评估，优先级低）
 

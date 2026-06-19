@@ -9,6 +9,12 @@
 // Each popup auto-cancels right after first paint (ASKHUMAN_PERF_AUTODISMISS=1), so no human is
 // needed. Run `./scripts/install.sh` first so the on-disk binary carries the instrumentation.
 //
+// Isolation: the harness runs its own daemon under a throwaway HOME (a temp dir), so it never
+// touches the user's real ~/.askhuman daemon or any in-flight asks. All paths (daemon.sock, lock,
+// perf.log, agents.json, ...) live under $HOME/.askhuman, so redirecting HOME for the spawned
+// CLI/daemon/helper fully isolates them. This also makes --cold (stop the daemon before each run)
+// safe, since only the isolated daemon is stopped.
+//
 // Usage:
 //   node scripts/perf-popup.mjs [options]
 //     --runs N            iterations (default 20)
@@ -17,14 +23,15 @@
 //     --save-baseline F   write current aggregate to F (as the new baseline)
 //     --threshold P       regression threshold in percent on e2e p90 (default 20)
 //     --timeout MS        per-run timeout before killing the invocation (default 30000)
-//     --no-restart        do not restart the daemon before measuring
+//     --cold              stop the isolated daemon before each run (measure daemon cold start)
 //     --json FILE         also dump the full aggregate JSON to FILE
 //     --warmup N          discard the first N runs from aggregation (default 1)
+//     --keep-home         keep the temp HOME dir after exit (for debugging)
 //     -h, --help          show this help
 
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { homedir } from "node:os";
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 // ---- arg parsing -----------------------------------------------------------
@@ -37,9 +44,10 @@ function parseArgs(argv) {
     saveBaseline: null,
     threshold: 20,
     timeout: 30000,
-    restart: true,
+    cold: false,
     json: null,
     warmup: 1,
+    keepHome: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -51,9 +59,10 @@ function parseArgs(argv) {
       case "--save-baseline": o.saveBaseline = next(); break;
       case "--threshold": o.threshold = parseFloat(next()); break;
       case "--timeout": o.timeout = parseInt(next(), 10); break;
-      case "--no-restart": o.restart = false; break;
+      case "--cold": o.cold = true; break;
       case "--json": o.json = next(); break;
       case "--warmup": o.warmup = parseInt(next(), 10); break;
+      case "--keep-home": o.keepHome = true; break;
       case "-h": case "--help": printHelp(); process.exit(0); break;
       default:
         console.error(`unknown option: ${a}`);
@@ -100,14 +109,20 @@ function resolveBin(explicit) {
 
 // ---- run helpers -----------------------------------------------------------
 
-const PERF_LOG = join(homedir(), ".askhuman", "perf.log");
-
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Spawn one AskHuman ask; resolves when the process exits (popup auto-cancels). */
-function runOnce(bin, timeoutMs) {
+/** Run a daemon control subcommand against the isolated HOME (blocking). */
+function daemonCmd(bin, home, args) {
+  return spawnSync(bin, ["daemon", ...args], {
+    stdio: "ignore",
+    env: { ...process.env, HOME: home },
+  });
+}
+
+/** Spawn one AskHuman ask against the isolated HOME; resolves when the process exits. */
+function runOnce(bin, home, timeoutMs) {
   return new Promise((resolve) => {
     // Stamp the spawn instant and inject it so the CLI records it under this run's perf_id;
     // this yields a true end-to-end (spawn->painted) that includes OS process creation + load.
@@ -119,6 +134,7 @@ function runOnce(bin, timeoutMs) {
         stdio: "ignore",
         env: {
           ...process.env,
+          HOME: home,
           ASKHUMAN_PERF: "1",
           ASKHUMAN_PERF_AUTODISMISS: "1",
           ASKHUMAN_PERF_SPAWN_TS: String(spawnTs),
@@ -285,35 +301,62 @@ function printTable(agg, baseline, threshold) {
 async function main() {
   const o = parseArgs(process.argv.slice(2));
   const bin = resolveBin(o.bin);
+
+  // Isolated throwaway HOME → its own daemon/socket/perf.log; never touches the real daemon.
+  const home = mkdtempSync(join(tmpdir(), "askhuman-perf-"));
+  const perfLog = join(home, ".askhuman", "perf.log");
   console.log(`AskHuman: ${bin}`);
-  console.log(`perf.log: ${PERF_LOG}`);
+  console.log(`isolated HOME: ${home}`);
+  console.log(`perf.log: ${perfLog}`);
 
-  if (o.restart) {
-    console.log("restarting daemon (so the instrumented binary serves requests)...");
-    const r = spawnSync(bin, ["daemon", "restart", "--force"], { stdio: "ignore" });
-    if (r.status !== 0) console.warn("warning: daemon restart returned non-zero; continuing");
-    await sleep(500);
+  let exitCode = 0;
+  try {
+    if (!o.cold) {
+      // Warm: bring the isolated daemon up once and keep it across runs.
+      console.log("starting isolated daemon...");
+      daemonCmd(bin, home, ["start"]);
+      await sleep(500);
+    }
+
+    // Everything appended at/after this instant belongs to this harness run.
+    const floor = Date.now();
+    await sleep(5);
+
+    console.log(`running ${o.runs} iterations${o.cold ? " (cold: stop daemon each run)" : ""}...`);
+    let timeouts = 0;
+    for (let i = 0; i < o.runs; i++) {
+      if (o.cold) {
+        // Stop the isolated daemon so this run pays a full daemon cold start.
+        daemonCmd(bin, home, ["stop", "--force"]);
+        await sleep(200);
+      }
+      const how = await runOnce(bin, home, o.timeout);
+      if (how !== "exit") timeouts++;
+      process.stdout.write(`\r  ${i + 1}/${o.runs} (${how})    `);
+      await sleep(150);
+    }
+    process.stdout.write("\n");
+    if (timeouts > 0) console.warn(`warning: ${timeouts} run(s) did not exit cleanly`);
+
+    // Give the last frontend marks (flushed via async IPC) a moment to hit disk.
+    await sleep(400);
+
+    exitCode = report(o, perfLog, floor);
+  } finally {
+    // Always tear down the isolated daemon and temp HOME.
+    daemonCmd(bin, home, ["stop", "--force"]);
+    if (!o.keepHome) {
+      try { rmSync(home, { recursive: true, force: true }); } catch { /* ignore */ }
+    } else {
+      console.log(`kept isolated HOME: ${home}`);
+    }
   }
+  process.exit(exitCode);
+}
 
-  // Everything appended at/after this instant belongs to this harness run.
-  const floor = Date.now();
-  await sleep(5);
-
-  console.log(`running ${o.runs} iterations...`);
-  let timeouts = 0;
-  for (let i = 0; i < o.runs; i++) {
-    const how = await runOnce(bin, o.timeout);
-    if (how !== "exit") timeouts++;
-    process.stdout.write(`\r  ${i + 1}/${o.runs} (${how})    `);
-    await sleep(150);
-  }
-  process.stdout.write("\n");
-  if (timeouts > 0) console.warn(`warning: ${timeouts} run(s) did not exit cleanly`);
-
-  // Give the last frontend marks (flushed via async IPC) a moment to hit disk.
-  await sleep(400);
-
-  let groups = parsePerfLog(PERF_LOG, floor);
+/** Parse, aggregate, print and (optionally) gate against baseline. Returns the process exit code. */
+function report(o, perfLog, floor) {
+  let groups = parsePerfLog(perfLog, floor);
   // Drop warmup invocations (earliest by cli.start) to avoid cold-start skew.
   if (o.warmup > 0) {
     const ordered = Object.entries(groups)
@@ -346,7 +389,7 @@ async function main() {
 
   if (agg.complete === 0) {
     console.error("error: no complete invocations were captured (is the installed binary instrumented?)");
-    process.exit(1);
+    return 1;
   }
 
   // Regression gate: end-to-end p90 vs baseline.
@@ -364,7 +407,7 @@ async function main() {
           `REGRESSION: e2e p90 ${cur.toFixed(1)}ms vs baseline ${base.toFixed(1)}ms ` +
             `(+${deltaPct.toFixed(1)}% > ${o.threshold}% threshold)`,
         );
-        process.exit(1);
+        return 1;
       }
       console.log(
         `OK: e2e p90 ${cur.toFixed(1)}ms vs baseline ${base.toFixed(1)}ms ` +
@@ -372,6 +415,7 @@ async function main() {
       );
     }
   }
+  return 0;
 }
 
 main().catch((e) => {
