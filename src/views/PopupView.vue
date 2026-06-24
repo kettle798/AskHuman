@@ -247,6 +247,37 @@ const headerTitle = computed(() => {
     ? t(key, named, { locale: "en" })
     : t(key, named);
 });
+// 标题内联 agent 胶囊：探测到 agent 且未定制来源名时，把「the Loop」文字替换为 agent 胶囊本身
+// （后端未定制时已把来源名解析为 agent 名，故 sourceName 可能等于 agentLabel；MCP 下后端回退
+// "the Loop" 但前端经 AgentResolved 拿到 agentKind，故再判默认值）。
+const agentInline = computed(
+  () =>
+    !!agentLabel.value &&
+    (sourceName.value === DEFAULT_SOURCE_NAME ||
+      sourceName.value === agentLabel.value)
+);
+// 内联模式把「Message from {source}」按 {source} 占位切成前后两段，胶囊嵌入中间。
+// 文案强制英文（与默认 "the Loop" 一致）：英文 source 在句尾，故前缀「Message from」、后缀为空，
+// 渲染为「Message from [Cursor] [Project]」，规避中文「来自 [胶囊] 的消息」夹在句中的观感。
+const SOURCE_SLOT = "\u0000";
+const headerParts = computed(() => {
+  const key = showQuestionHeader.value ? "popup.messageFrom" : "popup.questionFrom";
+  const full = t(key, { source: SOURCE_SLOT }, { locale: "en" });
+  const idx = full.indexOf(SOURCE_SLOT);
+  if (idx < 0) return { prefix: full, suffix: "" };
+  // 去掉占位两侧空白，由 .brand 的 flex gap 统一提供胶囊间距，避免空格叠加。
+  return {
+    prefix: full.slice(0, idx).trimEnd(),
+    suffix: full.slice(idx + SOURCE_SLOT.length).trimStart(),
+  };
+});
+// 统一渲染：非内联 → 前缀=完整标题、后缀空；内联 → 拆分后的前后缀（胶囊夹在中间）。
+const headerPrefix = computed(() =>
+  agentInline.value ? headerParts.value.prefix : headerTitle.value
+);
+const headerSuffix = computed(() =>
+  agentInline.value ? headerParts.value.suffix : ""
+);
 // 多题显示「Question i/n」；单题（仅在有 Message 时显示头部）只显示「Question」。
 const questionHeaderLabel = computed(() =>
   isMulti.value
@@ -1247,9 +1278,9 @@ onBeforeUnmount(() => {
   >
     <div v-if="flashing" class="flash-overlay" aria-hidden="true"></div>
     <header class="navbar" :class="{ scrolled }" data-tauri-drag-region>
-      <span class="brand">
+      <span class="brand" :class="{ inline: agentInline }">
         <span class="brand-dot"></span>
-        <span class="brand-title">{{ headerTitle }}</span>
+        <span class="brand-title">{{ headerPrefix }}</span>
         <component
           :is="agentFocusable ? 'button' : 'span'"
           v-if="agentLabel"
@@ -1295,6 +1326,9 @@ onBeforeUnmount(() => {
             />
           </svg>
         </button>
+        <span v-if="headerSuffix" class="brand-title brand-suffix">{{
+          headerSuffix
+        }}</span>
       </span>
       <span class="nav-actions">
         <div v-if="updateAvailable" class="update-wrap">
@@ -1797,6 +1831,19 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 内联模式（标题中嵌 agent/project 胶囊，如「来自 [Cursor] [Project] 的消息」）：
+   文字先于胶囊截断，优先级 后缀 > 前缀 > 项目名（agent 品牌名不缩）。
+   用 flex-shrink 权重近似分级：后缀 1000 ≫ 前缀 50 ≫ 项目名 1。 */
+.brand.inline .brand-title {
+  flex: 0 50 auto;
+}
+.brand.inline .brand-suffix {
+  flex: 0 1000 auto;
+}
+.brand.inline .brand-workspace {
+  flex-shrink: 1;
+  min-width: 0;
 }
 /* 标题旁的来源胶囊（agent / workspace）：浅灰底圆角矩形纯文字。
    需 pointer-events:auto 才能 hover 出原生 title / 接收点击（导航栏其余可拖拽）。

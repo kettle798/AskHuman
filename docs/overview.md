@@ -253,7 +253,9 @@ AskHuman/
 
 窗口拖拽用 `data-tauri-drag-region`（导航栏/底部空白/设置 tab 栏）；置顶用前端 `@tauri-apps/api/window` setAlwaysOnTop。
 文件拖入用 `onDragDropEvent`（原生路径）；`-f` 附件拖出用 `tauri-plugin-drag` 的 `startDrag`。
-来源名（弹窗标题 / Telegram 消息头「Question from {名称}」）由环境变量 `ASKHUMAN_ENV_SOURCE_NAME` 定制，缺省「the Loop」。弹窗导航栏标题旁还显示两枚浅灰圆角胶囊（`.brand-chip`，`pointer-events:auto` 以便 hover/点击，导航栏其余可拖拽；窄窗时标题先截断、胶囊尽量保留完整）：
+来源名（弹窗标题 / Telegram 消息头「Question from {名称}」）的解析优先级为 **自定义环境变量 `ASKHUMAN_ENV_SOURCE_NAME` > 探测到的发起 Agent 展示名（Claude Code/Codex/Cursor）> 默认「the Loop」**（后端 `models::source_name_for_agent`，CLI 构造 `TaskRequest` 时以 `detect_caller_agent` 的家族解析；供渠道消息头 + 历史共用。MCP 模式 env 判不出家族 → 回退「the Loop」）。弹窗导航栏标题旁还显示两枚浅灰圆角胶囊（`.brand-chip`，`pointer-events:auto` 以便 hover/点击，导航栏其余可拖拽；窄窗时标题先截断、胶囊尽量保留完整）：
+
+> 标题「胶囊内联」（前端 `PopupView`）：当探测到 agent 且未定制来源名时（`sourceName` 等于默认或等于 `agentLabel`），把标题里的来源文字替换为 **agent 胶囊本身**——按 `popup.messageFrom/questionFrom` 的 `{source}` 占位把文案切成前后两段，胶囊（agent + workspace）夹在中间，故中文渲染为「来自 [Cursor] [Project] 的消息」、英文为「Message from [Cursor] [Project]」。`.brand.inline` 下截断优先级为 **后缀 > 前缀 > 项目名**（agent 品牌名不缩，靠 flex-shrink 权重 1000≫50≫1 近似分级）。未探测到 agent → 仍「Message from the Loop」；设了自定义来源名 → 标题用自定义名文本、胶囊照旧跟随其后。
 
 - **来源 agent badge**（在 workspace 之前）：取 `AppState.agent_kind`（提问时 CLI `detect_caller_agent` 探到的家族，随 `TaskRequest→ShowPayload→AppState` 贯穿），前端显示本地化家族名（Claude Code/Codex/Cursor）；识别不到则不显示。若该 agent 终端可激活 tab（`PopupInit.agentTerminal` = `terminal_kind(agent_pid)` ∈ 共享集 `lib/terminals.ts`）则 badge 变可点按钮 + ↗ 箭头，点击 → `focus_agent_terminal(agentPid)`。
 - **来源 workspace**：取 `AppState.project`（git 仓库根 / 回退 cwd 绝对路径）经 `project::display_name` 得目录名，`title` hover 出完整路径；带 ↗ 箭头、整块可点 → `open_path(项目路径)` 在文件管理器打开。`project` 为空则隐藏。

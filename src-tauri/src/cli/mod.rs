@@ -251,12 +251,18 @@ pub fn dispatch() {
                     // 方案5(b)：进程树 walk（数十 ms 的 ps 游走）移到 daemon 异步进行——这里只带 CLI 自身 pid。
                     let (agent_kind, agent_session_id) = detect_caller_agent();
                     crate::perf::mark(&perf_id, "cli.detect_done");
+                    // 来源名解析：未定制 `ASKHUMAN_ENV_SOURCE_NAME` 时，用探测到的 Agent 名
+                    // （Claude Code / Codex / Cursor）替代默认 "the Loop"；供渠道消息头 + 历史共用
+                    // （弹窗标题另由前端按胶囊内联渲染）。MCP 模式 env 判不出家族 → 回退 "the Loop"。
+                    let resolved_agent_kind = agent_kind
+                        .as_deref()
+                        .and_then(crate::agents::AgentKind::parse);
                     let task = crate::ipc::TaskRequest {
                         message,
                         questions,
                         // Markdown 渲染恒开（`--no-markdown` 已移除）；弹窗内可临时切换为源码视图。
                         is_markdown: true,
-                        source: crate::models::source_name(),
+                        source: crate::models::source_name_for_agent(resolved_agent_kind),
                         lang: lang.code().to_string(),
                         project: crate::project::detect(),
                         select_only: parsed.select_only,

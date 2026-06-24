@@ -16,6 +16,29 @@ pub fn source_name() -> String {
         .unwrap_or_else(|| DEFAULT_SOURCE_NAME.to_string())
 }
 
+/// 解析来源名（考虑探测到的调用方 Agent）。
+///
+/// 优先级：自定义环境变量来源名 > 探测到的 Agent 展示名（Claude Code / Codex / Cursor）
+/// > 默认 "the Loop"。供弹窗标题与各渠道消息头共用，使「未定制来源名时显示发起 Agent」。
+pub fn source_name_for_agent(agent: Option<crate::agents::AgentKind>) -> String {
+    let custom = std::env::var(SOURCE_NAME_ENV)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    resolve_source(custom.as_deref(), agent)
+}
+
+/// 来源名解析的纯逻辑（不读 env，便于测试）。`custom` 为已 trim 的非空自定义来源名。
+fn resolve_source(custom: Option<&str>, agent: Option<crate::agents::AgentKind>) -> String {
+    if let Some(name) = custom.filter(|s| !s.is_empty()) {
+        return name.to_string();
+    }
+    if let Some(kind) = agent {
+        return kind.label().to_string();
+    }
+    DEFAULT_SOURCE_NAME.to_string()
+}
+
 /// 结果输出格式（全局，对所有问题生效）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -224,6 +247,29 @@ impl ChannelResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::AgentKind;
+
+    #[test]
+    fn resolve_source_prefers_custom_over_agent() {
+        assert_eq!(
+            resolve_source(Some("MyAgent"), Some(AgentKind::Cursor)),
+            "MyAgent"
+        );
+    }
+
+    #[test]
+    fn resolve_source_falls_back_to_agent_label() {
+        assert_eq!(resolve_source(None, Some(AgentKind::Cursor)), "Cursor");
+        assert_eq!(resolve_source(None, Some(AgentKind::Codex)), "Codex");
+        assert_eq!(resolve_source(None, Some(AgentKind::Claude)), "Claude Code");
+    }
+
+    #[test]
+    fn resolve_source_defaults_to_the_loop() {
+        assert_eq!(resolve_source(None, None), DEFAULT_SOURCE_NAME);
+        // 空自定义名视同未设置，回退 Agent / 默认。
+        assert_eq!(resolve_source(Some(""), Some(AgentKind::Cursor)), "Cursor");
+    }
 
     #[test]
     fn option_item_deserializes_legacy_string() {
