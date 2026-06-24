@@ -197,7 +197,6 @@ pub fn dispatch() {
                         | "--option!"
                         | "-f"
                         | "--file"
-                        | "--no-markdown"
                         | "--stdin"
                         | "--select-only"
                         | "--single"
@@ -255,7 +254,8 @@ pub fn dispatch() {
                     let task = crate::ipc::TaskRequest {
                         message,
                         questions,
-                        is_markdown: parsed.is_markdown,
+                        // Markdown 渲染恒开（`--no-markdown` 已移除）；弹窗内可临时切换为源码视图。
+                        is_markdown: true,
                         source: crate::models::source_name(),
                         lang: lang.code().to_string(),
                         project: crate::project::detect(),
@@ -276,7 +276,7 @@ pub fn dispatch() {
                 #[cfg(not(unix))]
                 {
                     let mut request =
-                        crate::models::AskRequest::new(message, questions, parsed.is_markdown);
+                        crate::models::AskRequest::new(message, questions, true);
                     request.select_only = parsed.select_only;
                     request.single = parsed.single;
                     request.output_format = parsed.output_format;

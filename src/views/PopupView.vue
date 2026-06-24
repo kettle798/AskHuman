@@ -58,6 +58,23 @@ const codeCopyLabels = computed(() => ({
 const request = ref<AskRequest | null>(null);
 const loadError = ref<string | null>(null);
 
+// 视图态：false=Markdown 预览（默认），true=源码（原始文本）。作用于整篇（message + 所有问题）。
+const viewSource = ref(false);
+// 复制 message 反馈（短暂显示对勾）。
+const copiedMessage = ref(false);
+let copiedTimer: number | undefined;
+
+async function copyMessage() {
+  try {
+    await navigator.clipboard.writeText(messageText.value);
+  } catch {
+    /* 剪贴板不可用：静默忽略 */
+  }
+  copiedMessage.value = true;
+  if (copiedTimer) window.clearTimeout(copiedTimer);
+  copiedTimer = window.setTimeout(() => (copiedMessage.value = false), 1500);
+}
+
 // ===== 版本自更新（弹窗入口 / 浮层 / 待生效横条） =====
 const updateAvailable = ref(false);
 const updatePending = ref(false);
@@ -211,7 +228,7 @@ const currentQuestion = computed<Question | null>(
 // 共享 Message（描述 + 附件）。无 -q 时 text 为空（第一个参数已提升为问题）。
 const messageText = computed(() => request.value?.message.text ?? "");
 const messageHtml = computed(() =>
-  request.value?.isMarkdown
+  request.value?.isMarkdown && !viewSource.value
     ? renderMarkdown(messageText.value, codeCopyLabels.value)
     : ""
 );
@@ -471,7 +488,7 @@ function openHistoryWindow() {
 }
 
 const renderedHtml = computed(() =>
-  request.value?.isMarkdown && currentQuestion.value
+  request.value?.isMarkdown && !viewSource.value && currentQuestion.value
     ? renderMarkdown(currentQuestion.value.message, codeCopyLabels.value)
     : ""
 );
@@ -1205,6 +1222,7 @@ onBeforeUnmount(() => {
   unlistenAgent?.();
   unlistenShow?.();
   if (flashTimer) window.clearTimeout(flashTimer);
+  if (copiedTimer) window.clearTimeout(copiedTimer);
   stopListening();
   unlistenSpeech.forEach((fn) => fn());
   unlistenSpeech = [];
@@ -1395,7 +1413,7 @@ onBeforeUnmount(() => {
       <!-- 共享 Message 区（描述 + 附件），仅在有内容时展示，顶部常驻 -->
       <template v-if="showDescription">
         <div
-          v-if="messageText && request.isMarkdown"
+          v-if="messageText && request.isMarkdown && !viewSource"
           class="markdown-body"
           v-html="messageHtml"
           @click="onContentClick"
@@ -1440,6 +1458,32 @@ onBeforeUnmount(() => {
       </div>
       </template>
 
+      <!-- message 下方右对齐工具条：复制 Message + Markdown/源码切换（切换作用于整篇） -->
+      <div class="msg-tools">
+        <button
+          v-if="messageText.trim()"
+          class="mt-btn"
+          :class="{ done: copiedMessage }"
+          type="button"
+          :title="copiedMessage ? t('common.copied') : t('popup.view.copyMessage')"
+          :aria-label="t('popup.view.copyMessage')"
+          @click="copyMessage"
+        >
+          <svg class="mt-ico mt-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+          <svg class="mt-ico mt-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+        </button>
+        <button
+          class="mt-btn"
+          :class="{ active: viewSource }"
+          type="button"
+          :title="viewSource ? t('popup.view.viewRendered') : t('popup.view.viewSource')"
+          :aria-label="viewSource ? t('popup.view.viewRendered') : t('popup.view.viewSource')"
+          @click="viewSource = !viewSource"
+        >
+          <svg class="mt-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 16 22 12 18 8" /><polyline points="6 8 2 12 6 16" /><line x1="14.5" y1="4" x2="9.5" y2="20" /></svg>
+        </button>
+      </div>
+
       <!-- 问题头部：间距 + 分割线 + 问号图标 + 「Question i/n」 -->
       <div
         v-if="showQuestionHeader"
@@ -1459,7 +1503,7 @@ onBeforeUnmount(() => {
       <Transition :name="transitionName" mode="out-in" @after-enter="onQuestionEntered">
         <div class="question-pane" :key="current">
           <div
-            v-if="request.isMarkdown && currentQuestion?.message"
+            v-if="request.isMarkdown && !viewSource && currentQuestion?.message"
             class="markdown-body"
             v-html="renderedHtml"
             @click="onContentClick"
@@ -1943,6 +1987,59 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+}
+/* message 下方右对齐的小工具条（复制 message + Markdown/源码切换）。
+   独立一行、不与正文重叠；按钮矮而非方形，常态淡显、hover/激活时加亮。 */
+.msg-tools {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 4px;
+  margin-top: calc(-1 * var(--space-2));
+  margin-bottom: calc(-1 * var(--space-2));
+}
+.mt-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+.mt-btn:hover {
+  opacity: 1;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-primary) 8%, var(--bg-elevated));
+}
+.mt-btn.active {
+  opacity: 1;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.mt-btn.done {
+  opacity: 1;
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.mt-ico {
+  width: 13px;
+  height: 13px;
+}
+.mt-check {
+  display: none;
+}
+.mt-btn.done .mt-copy {
+  display: none;
+}
+.mt-btn.done .mt-check {
+  display: inline;
 }
 /* 附件区 */
 .attachments {

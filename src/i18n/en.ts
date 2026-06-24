@@ -16,6 +16,11 @@ export default {
     inputPlaceholder: "Type your reply…",
     addImage: "Add image",
     recommended: "Recommended",
+    view: {
+      copyMessage: "Copy message",
+      viewSource: "View source",
+      viewRendered: "Rendered preview",
+    },
     send: "Send",
     prev: "Previous",
     next: "Next",

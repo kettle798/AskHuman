@@ -27,8 +27,6 @@ pub struct AskArgs {
     pub message_files: Vec<String>,
     /// 问题列表（解析+归一化后恒 ≥1）。
     pub questions: Vec<QuestionArgs>,
-    /// 是否按 Markdown 渲染（全局，对所有问题生效）。
-    pub is_markdown: bool,
     /// 严格选择：禁用自由文本 / 回复附件，只能勾选预设项（全局）。
     pub select_only: bool,
     /// 单选：每题恰好一个选择（默认多选，全局）。
@@ -37,14 +35,13 @@ pub struct AskArgs {
     pub output_format: crate::models::OutputFormat,
 }
 
-/// 解析 `AskHuman <Message> [-f <path>] [-q <text> [-o <opt>] ...] [--no-markdown]`。
+/// 解析 `AskHuman <Message> [-f <path>] [-q <text> [-o <opt>] ...]`。
 ///
 /// 规则：
 /// - 第一个位置参数 = Message 文本；无任何 `-q` 时它被提升为唯一问题。
 /// - `-o` 归「最近声明的问题」；存在 `-q` 时不能出现在第一个 `-q` 之前。
 ///   `-o!` / `--option!` 同 `-o`，且把该选项标记为推荐（一题可多个）。
 /// - `-f` 始终归 Message（位置不限）。
-/// - `--no-markdown` 全局。
 /// - `--stdin`：Message 文本取自 `stdin_message`（由调用方从 stdin 读好后注入，
 ///   保持本函数无 IO 副作用），等价于位置参数 Message，但可出现在任意位置；
 ///   与位置参数 `<Message>` 互斥。
@@ -64,7 +61,6 @@ pub fn parse_ask(
     let mut questions: Vec<QuestionArgs> = Vec::new();
     // 无 `-q` 时，位于第一个参数之后的 `-o` 暂存于此，归一化时挂到被提升的问题。
     let mut lead_options: Vec<OptArg> = Vec::new();
-    let mut is_markdown = true;
     let mut select_only = false;
     let mut single = false;
     let mut output_format = crate::models::OutputFormat::Text;
@@ -116,10 +112,6 @@ pub fn parse_ask(
                 }
                 message_files.push(args[i + 1].clone());
                 i += 2;
-            }
-            "--no-markdown" => {
-                is_markdown = false;
-                i += 1;
             }
             "--select-only" => {
                 select_only = true;
@@ -191,7 +183,6 @@ pub fn parse_ask(
         message_text,
         message_files,
         questions,
-        is_markdown,
         select_only,
         single,
         output_format,
@@ -243,7 +234,6 @@ mod tests {
         );
         assert_eq!(a.questions, b.questions);
         assert_eq!(b.message_text, "");
-        assert!(a.is_markdown);
     }
 
     #[test]
@@ -389,10 +379,9 @@ mod tests {
     }
 
     #[test]
-    fn no_markdown_is_global() {
-        let p = pa(&v(&["M", "-q", "Q1", "--no-markdown"])).unwrap();
-        assert!(!p.is_markdown);
-        assert_eq!(p.questions.len(), 1);
+    fn no_markdown_flag_is_rejected() {
+        // `--no-markdown` 已移除：现作为未知选项被拒绝。
+        assert!(pa(&v(&["M", "-q", "Q1", "--no-markdown"])).is_err());
     }
 
     #[test]
@@ -419,7 +408,6 @@ mod tests {
 
     #[test]
     fn requires_some_content() {
-        assert!(pa(&v(&["--no-markdown"])).is_err());
         assert!(pa(&v(&[])).is_err());
     }
 

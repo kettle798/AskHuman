@@ -44,7 +44,6 @@ pub fn help_text(lang: Lang) -> String {
             "  -o!, --option! <text>   Same as -o, marks it as your recommended answer".to_string(),
             "  -f, --file <path>       Attach a file/image to the message; repeatable".to_string(),
             "  --stdin                 Read the message from stdin".to_string(),
-            "  --no-markdown           Disable Markdown rendering".to_string(),
             "  --single                Single choice (default: multiple choice)".to_string(),
             "  --select-only           Choice only: forbid free text/attachments (each question must have options)".to_string(),
             "  --output <text|json>    Output format (default: text)".to_string(),
@@ -78,7 +77,6 @@ pub fn help_text(lang: Lang) -> String {
             "  -o!, --option! <text>   同 -o，并标记为你的推荐答案".to_string(),
             "  -f, --file <path>       为消息附带文件/图片，可多次出现".to_string(),
             "  --stdin                 从标准输入读取消息".to_string(),
-            "  --no-markdown           关闭 Markdown 渲染".to_string(),
             "  --single                单选（默认多选）".to_string(),
             "  --select-only           严格选择：禁用自由文本/附件（每题必须有选项）".to_string(),
             "  --output <text|json>    输出格式（默认 text）".to_string(),
@@ -113,7 +111,6 @@ fn ask_arg_lines(lang: Lang) -> Vec<String> {
             "  -q, --question <text> Ask a question; repeatable".to_string(),
             "  -o, --option <text>   Add a predefined answer option after a question".to_string(),
             "  -o!, --option! <text> Same as -o, and marks that option as your recommended answer".to_string(),
-            "  --no-markdown         Disable Markdown rendering (applies to all descriptions/questions)".to_string(),
         ],
         Lang::Zh => vec![
             "  <Message>             所有问题的共享描述（可选）".to_string(),
@@ -122,7 +119,6 @@ fn ask_arg_lines(lang: Lang) -> Vec<String> {
             "  -q, --question <text> 提出问题，可多次出现".to_string(),
             "  -o, --option <text>   跟随在问题后，添加预定义回答选项".to_string(),
             "  -o!, --option! <text> 同 -o，并把该选项标记为你的推荐答案".to_string(),
-            "  --no-markdown         关闭 Markdown 渲染（对所有描述/问题生效）".to_string(),
         ],
     }
 }
@@ -189,7 +185,7 @@ pub fn agent_help_text(lang: Lang) -> String {
             out.push(format!("{prog} — ask a human and collect their response."));
             out.push(String::new());
             out.push("Invocation:".to_string());
-            out.push(format!("  {prog} \"<Message>\" [-f \"<file>\" ...] [-q \"<question>\" [-o \"<option>\" ...] ...] [--no-markdown]"));
+            out.push(format!("  {prog} \"<Message>\" [-f \"<file>\" ...] [-q \"<question>\" [-o \"<option>\" ...] ...]"));
             out.push(String::new());
             out.push("Arguments:".to_string());
             out.extend(ask_arg_lines(lang));
@@ -221,7 +217,7 @@ pub fn agent_help_text(lang: Lang) -> String {
             out.push(format!("{prog} —— 向人类发起提问并收集回应。"));
             out.push(String::new());
             out.push("调用方式:".to_string());
-            out.push(format!("  {prog} \"<Message>\" [-f \"<文件>\" ...] [-q \"<问题>\" [-o \"<选项>\" ...] ...] [--no-markdown]"));
+            out.push(format!("  {prog} \"<Message>\" [-f \"<文件>\" ...] [-q \"<问题>\" [-o \"<选项>\" ...] ...]"));
             out.push(String::new());
             out.push("参数说明:".to_string());
             out.extend(ask_arg_lines(lang));

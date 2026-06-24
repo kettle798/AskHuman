@@ -16,6 +16,11 @@ export default {
     inputPlaceholder: "输入你的回复…",
     addImage: "添加图片",
     recommended: "推荐",
+    view: {
+      copyMessage: "复制 Message",
+      viewSource: "查看源码",
+      viewRendered: "Markdown 预览",
+    },
     send: "发送",
     prev: "上一个",
     next: "下一个",

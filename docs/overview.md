@@ -48,7 +48,8 @@ AskHuman/
     main.ts                  挂载 App，引入三套样式
     App.vue                  按 URL ?view=popup|settings|history 路由
     views/PopupView.vue      弹窗：顶部导航栏（含「历史」按钮）+ Markdown/选项/文本/图片 + -f 附件区
-                             (选中/打开/预览/拖出/右键) + 拖入回复文件胶囊 + 底部操作条
+                             (选中/打开/预览/拖出/右键) + 拖入回复文件胶囊 + 底部操作条；
+                             message 下方右对齐小工具条（复制 Message + Markdown/源码切换，切换作用于整篇 message+所有问题，默认 Markdown、纯前端视图态不回传）
     views/AgentsView.vue     (实验性) Agent 状态窗口：按类型(Claude/Codex/Cursor)分组、状态优先排序
                              (工作中>空闲>已结束)、相对时间动态刷新；订阅 daemon 推送的 agents-updated
     views/SettingsView.vue   设置：通用（含「回复历史」保留条数 + 超额「立即清理」+ 底部隐蔽开关「实验性功能」）
@@ -78,8 +79,9 @@ AskHuman/
                              --scripting-help/daemon/agents/channel/config/doctor/mcp/无参/提问；Unix 下
                              --settings/--history 彻底路由到 GUI 宿主[host_open]、失败兜底本进程建窗；提问请求据
                              `ASKHUMAN_FROM_MCP` 置 `from_mcp`，让 daemon 对 MCP 来源仅刷新活动、不新建会话）
-        args.rs              提问参数解析（message / --stdin / -o / -o!(推荐选项) / --no-markdown / -f /
-                             --single(单选) / --select-only(严格，须每题有选项) / --output <text|json>）
+        args.rs              提问参数解析（message / --stdin / -o / -o!(推荐选项) / -f /
+                             --single(单选) / --select-only(严格，须每题有选项) / --output <text|json>）。
+                             Markdown 渲染恒开（`--no-markdown` 已移除，is_markdown 恒 true，弹窗内可临时切源码视图）
         cfgio.rs             CLI 配置公共工具：点号路径 get/set（serde_json::Value）+ 类型强制 + 密钥识别 +
                              密钥取值(env/file/stdin/隐藏输入) + 脱敏 + 交互输入 + block_on 助手
         config_cmd.rs        `config show|get|set|unset|path`（通用键值兜底；密钥键自动入钥匙串，值不进 argv）
