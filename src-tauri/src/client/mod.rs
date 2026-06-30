@@ -201,6 +201,11 @@ pub fn report_agent_event(msg: ClientMsg) {
     });
 }
 
+/// 状态窗口手动把某 agent 置空闲（纠正漏 hook 卡「工作中」）：即发即走，best-effort。
+pub fn force_agent_idle(session_id: String) {
+    report_agent_event(ClientMsg::AgentForceIdle { session_id });
+}
+
 /// 打开一条到 daemon 的连接（订阅状态窗口用，spec D20）：确保在跑后连接并拆分读写半。
 pub async fn open_for_subscribe() -> std::io::Result<(Reader, OwnedWriteHalf)> {
     ensure_running().await?;

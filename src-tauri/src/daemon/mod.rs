@@ -721,6 +721,13 @@ mod unix_impl {
                 ClientMsg::FocusRequest { request_id } => {
                     state.registry.focus_popup(&request_id);
                 }
+                // 状态窗口手动把某 agent 置空闲（纠正漏 hook 卡「工作中」）：变化则持久化 + 推订阅窗口。
+                ClientMsg::AgentForceIdle { session_id } => {
+                    if state.agents.force_idle(&session_id) {
+                        state.agents.persist();
+                        broadcast_agents_state(state);
+                    }
+                }
                 // 自动识别（Q6）：就地处理（可能阻塞至多 120s 等用户发码），完成后回结果继续循环。
                 // 排空期拒绝（兜底；正常情况下客户端在 Hello 即被挡住而回退进程内识别）。
                 ClientMsg::Detect(req) => {

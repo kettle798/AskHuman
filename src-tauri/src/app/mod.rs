@@ -827,6 +827,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::agent_lifecycle_install,
             crate::commands::agent_lifecycle_uninstall,
             crate::commands::focus_agent_terminal,
+            crate::commands::agent_force_idle,
             crate::commands::telegram_test,
             crate::commands::dingtalk_test,
             crate::commands::dingtalk_detect_prepare,

@@ -345,6 +345,10 @@ export default {
     untitled: "（未命名）",
     unknownProject: "未知项目",
     focusTerminal: "聚焦终端",
+    markIdle: "置为空闲",
+    markIdleConfirm: "确认把此 Agent 置为空闲？",
+    confirmOk: "置为空闲",
+    confirmCancel: "取消",
     view: {
       status: "状态",
       type: "类型",

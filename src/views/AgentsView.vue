@@ -5,6 +5,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { applyTheme } from "../lib/theme";
 import { applyLanguage } from "../i18n";
 import {
+  agentForceIdle,
   agentsInit,
   agentsStartSubscription,
   focusAgentTerminal,
@@ -194,6 +195,31 @@ async function onFocusTerminal(a: AgentRecord): Promise<void> {
   }
 }
 
+// 「手动置空闲」：仅对「工作中」的 agent 显示（纠正漏 hook 卡死，如 Claude 被打断）。
+// 点击需二次确认（行内确认条），确认后发命令给 daemon；daemon 改状态后会推回新快照。
+const confirmIdleSession = ref<string | null>(null);
+
+function canForceIdle(a: AgentRecord): boolean {
+  return a.state === "working";
+}
+
+function requestForceIdle(a: AgentRecord): void {
+  confirmIdleSession.value = a.sessionId;
+}
+
+function cancelForceIdle(): void {
+  confirmIdleSession.value = null;
+}
+
+async function confirmForceIdle(a: AgentRecord): Promise<void> {
+  confirmIdleSession.value = null;
+  try {
+    await agentForceIdle(a.sessionId);
+  } catch (err) {
+    console.warn("force idle failed", err);
+  }
+}
+
 // 绝对时间（hover 提示用）：保留简洁的相对显示，同时可悬停看到精确时间。
 function absoluteTime(secs?: number | null): string {
   if (!secs) return "";
@@ -324,6 +350,36 @@ onBeforeUnmount(() => {
                       stroke-linecap="round" />
                   </svg>
                 </button>
+                <button
+                  v-if="canForceIdle(a) && confirmIdleSession !== a.sessionId"
+                  type="button"
+                  class="focus-btn idle-btn"
+                  :title="t('agents.markIdle')"
+                  :aria-label="t('agents.markIdle')"
+                  @click="requestForceIdle(a)"
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor"
+                      stroke-width="1.3" />
+                    <path d="M6 5.6 V10.4 M10 5.6 V10.4" stroke="currentColor"
+                      stroke-width="1.3" stroke-linecap="round" />
+                  </svg>
+                </button>
+              </div>
+
+              <div
+                v-if="canForceIdle(a) && confirmIdleSession === a.sessionId"
+                class="idle-confirm"
+              >
+                <span class="idle-confirm-text">{{ t("agents.markIdleConfirm") }}</span>
+                <span class="idle-confirm-actions">
+                  <button type="button" class="ic-btn" @click="cancelForceIdle">
+                    {{ t("agents.confirmCancel") }}
+                  </button>
+                  <button type="button" class="ic-btn ic-ok" @click="confirmForceIdle(a)">
+                    {{ t("agents.confirmOk") }}
+                  </button>
+                </span>
               </div>
 
               <div v-if="showProject(a) || a.pid" class="meta">
@@ -625,6 +681,53 @@ onBeforeUnmount(() => {
 .focus-btn svg {
   width: 15px;
   height: 15px;
+}
+.idle-btn:hover {
+  background: color-mix(in srgb, #ff9f0a 18%, transparent);
+  color: #c77700;
+}
+.idle-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, #ff9f0a 12%, transparent);
+}
+.idle-confirm-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-primary);
+}
+.idle-confirm-actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 6px;
+}
+.ic-btn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.ic-btn:hover {
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+.ic-ok {
+  border-color: transparent;
+  background: #ff9f0a;
+  color: #fff;
+}
+.ic-ok:hover {
+  background: #f59300;
 }
 .meta {
   display: flex;

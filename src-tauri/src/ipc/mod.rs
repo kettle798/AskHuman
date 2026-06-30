@@ -247,6 +247,9 @@ pub enum ClientMsg {
     /// 托盘「待答」子菜单点击：请求 daemon 聚焦 / 闪烁对应请求的弹窗（宿主→daemon，即发即走）。
     /// daemon 找到该请求的弹窗连接转发 `FocusPopup`；无弹窗（如弹窗拉起失败）则静默忽略。
     FocusRequest { request_id: String },
+    /// 手动把某 agent 置为「空闲」（状态窗口→daemon，即发即走）：用户发现某 agent 因漏 hook
+    /// （如 Claude 被打断）卡在「工作中」时，可在状态窗口手动纠正。仅改状态、不结束会话。
+    AgentForceIdle { session_id: String },
 }
 
 /// Daemon → 客户端（CLI / GUI Helper）的消息。

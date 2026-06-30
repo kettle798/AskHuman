@@ -377,6 +377,23 @@ impl AgentRegistry {
         changed
     }
 
+    /// 手动把指定 session 的「工作中」记录置为「空闲」（状态窗口用户纠正漏 hook 卡死场景）。
+    /// 仅当该记录存在且为「工作中」时生效；置空闲后刷新活动时间（避免下个 tick 立即被兜底重扫，
+    /// 行为上即「已纠正」）。不动 pid/会话、不结束。返回是否有变化（供广播）。
+    pub fn force_idle(&self, session_id: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(r) = inner
+            .active
+            .iter_mut()
+            .find(|r| r.session_id == session_id && r.state == AgentState::Working)
+        {
+            r.state = AgentState::Idle;
+            r.last_activity = now_secs();
+            return true;
+        }
+        false
+    }
+
     /// 工作中 agent 数（spec D18：仅它与窗口连接阻止 daemon 空闲退出；空闲 agent 不算）。
     pub fn working_count(&self) -> usize {
         let inner = self.inner.lock().unwrap();
@@ -559,6 +576,27 @@ mod tests {
         assert_eq!(r.idle_count(), 1);
         // 再扫一次无变化（已是空闲）。
         assert!(!r.working_backstop_sweep(10));
+    }
+
+    #[test]
+    fn force_idle_demotes_only_working() {
+        let r = reg();
+        r.apply_event(
+            AgentKind::Claude,
+            LifecycleEvent::TurnStart,
+            "s1",
+            Some(111),
+            None,
+            1,
+        );
+        assert_eq!(r.working_count(), 1);
+        // 命中工作中 → 置空闲。
+        assert!(r.force_idle("s1"));
+        assert_eq!(r.working_count(), 0);
+        assert_eq!(r.idle_count(), 1);
+        // 已空闲再置无变化；未知 session 无变化。
+        assert!(!r.force_idle("s1"));
+        assert!(!r.force_idle("nope"));
     }
 
     #[test]

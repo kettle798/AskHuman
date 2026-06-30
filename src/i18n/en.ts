@@ -359,6 +359,10 @@ export default {
     untitled: "(untitled)",
     unknownProject: "Unknown project",
     focusTerminal: "Focus terminal",
+    markIdle: "Mark idle",
+    markIdleConfirm: "Mark this agent as idle?",
+    confirmOk: "Mark idle",
+    confirmCancel: "Cancel",
     view: {
       status: "Status",
       type: "Type",

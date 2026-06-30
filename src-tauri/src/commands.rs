@@ -1158,6 +1158,16 @@ pub fn focus_agent_terminal(pid: u32) -> Result<(), String> {
     crate::integrations::terminal_focus::focus_agent_terminal(pid)
 }
 
+/// 手动把某 agent 置为「空闲」（状态窗口纠正漏 hook 卡「工作中」场景）：向 daemon 发一条
+/// `AgentForceIdle`，daemon 改状态后会经订阅推回新快照刷新窗口。即发即走、best-effort。
+#[tauri::command]
+pub fn agent_force_idle(session_id: String) {
+    #[cfg(unix)]
+    crate::client::force_agent_idle(session_id);
+    #[cfg(not(unix))]
+    let _ = session_id;
+}
+
 /// 生命周期 hook 装/卸后刷新托盘菜单，使「Agent 状态」入口随之显隐。仅在统一 GUI 宿主进程内
 /// （持有 `HostState`）实际生效；其它进程自动 no-op。
 fn refresh_host_tray(app: &AppHandle) {

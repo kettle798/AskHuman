@@ -215,6 +215,10 @@ export const agentLifecycleUninstall = (agent: AgentKind) =>
 export const focusAgentTerminal = (pid: number) =>
   invoke<void>("focus_agent_terminal", { pid });
 
+/** 手动把某 agent 置为「空闲」（纠正漏 hook 卡「工作中」）。即发即走，daemon 改后推回新快照。 */
+export const agentForceIdle = (sessionId: string) =>
+  invoke<void>("agent_force_idle", { sessionId });
+
 export const telegramTest = (args: TelegramTestArgs) =>
   invoke<string>("telegram_test", { args });
 
