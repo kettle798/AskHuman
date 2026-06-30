@@ -52,6 +52,16 @@
         ]
       }
     ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/homebrew/bin/node \"/Users/wutian/Developer/HumanInLoop/demo/agent-lifecycle/harness/hooklog.cjs\" claude StopFailure"
+          }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "hooks": [

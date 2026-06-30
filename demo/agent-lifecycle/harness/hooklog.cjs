@@ -69,6 +69,10 @@ function main() {
     prompt: hook && typeof hook.prompt === 'string' ? hook.prompt.slice(0, 200) : undefined,
     tool_name: hook && hook.tool_name, // Pre/PostToolUse
     stop_hook_active: hook && hook.stop_hook_active, // Stop
+    notification_type: hook && hook.notification_type, // Notification（permission_prompt/idle_prompt/…）
+    message:
+      hook && typeof hook.message === 'string' ? hook.message.slice(0, 200) : undefined, // Notification
+    error: hook && hook.error, // StopFailure（rate_limit/server_error/…）
     // 进程视角
     hook_pid: process.pid,
     hook_ppid: process.ppid,
