@@ -59,9 +59,54 @@ pub fn mcp_reference() -> String {
         .to_string()
 }
 
+/// Grok skill 正文：装进 `~/.grok/skills/interaction-protocol/SKILL.md` 的 Markdown 主体（不含 YAML
+/// frontmatter，由 `grok_skill.rs` 拼接）。
+///
+/// **复用 [`mcp_reference`] + 追加一小段 Grok 说明**（单一来源，避免协议措辞漂移）：正文 = MCP 版参考
+/// 提示词原样 + 末尾一段「在 Grok 里怎么联系我」。为何还要那段：Grok 默认模型 Composer **不读**
+/// `~/.grok/AGENTS.md` 全局 rules（调研证实），交互协议只能经 skill 承载；且 Grok 把 MCP 工具的暴露/发现
+/// 方式做得与「直接可见工具」不同，需点明「工具没列出时先搜再调」。
+///
+/// **刻意保持通用、不写死具体 harness / 工具名**（如 Composer / Grok Build / `CallMcpTool` / `search_tool` /
+/// `use_tool`）：Grok 后续版本会改这些名字与机制，写死会过时误导。故只声明一条「联系人类」的降级阶梯：
+/// 1）**优先** MCP `ask` 工具（P2 定案：MCP 优先于 shell/CLI，仅限「联系人类」这一动作，**不禁止**一般
+/// shell 用法）；2）若 `ask` **未列在**当前可用工具里，先用工具搜索/发现机制找到它；3）**仍**够不到 MCP 时，
+/// **退回其它可用的提问渠道**（如 CLI 版 `AskHuman` 命令）——**绝不**把给人类的内容写进普通输出（人类看不见）
+/// 或直接结束回合。始终英文（面向 AI 的契约）。
+pub fn grok_skill_body() -> String {
+    format!(
+        "{}\n\n{}",
+        mcp_reference(),
+        r#"<contacting_me_from_grok>
+- To contact me (the human), prefer the AskHuman `ask` MCP tool above any other channel: the MCP tool takes priority over any shell/CLI command line. This priority applies ONLY to reaching me — running other shell commands for your actual work stays fine and unrestricted.
+- If the AskHuman `ask` MCP tool is not listed among your currently available tools, first use your tool-search/discovery mechanism to find it.
+- If you still cannot reach the MCP tool, do NOT answer into your normal output (I cannot see it) and do NOT just end the turn. Instead, fall back to any other available way of contacting me — for example an `AskHuman`/`askhuman` command line if one is available.
+</contacting_me_from_grok>"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grok_skill_body_reuses_mcp_reference_and_appends_grok_note() {
+        let p = grok_skill_body();
+        // 单一来源:正文须原样包含 MCP 版参考(协议措辞不漂移)。
+        assert!(p.contains(&mcp_reference()));
+        // 追加的 Grok 段:MCP 优先 → 没列出先搜 → 仍够不到则退回其它提问渠道(不退化为普通输出)。
+        assert!(p.contains("takes priority"));
+        assert!(p.contains("unrestricted"));
+        assert!(p.contains("not listed among your currently available tools"));
+        assert!(p.contains("fall back to any other available way of contacting me"));
+        assert!(p.contains("the AskHuman `ask` tool"));
+        // 刻意不写死具体 harness / 工具名(Grok 后续会变)。
+        assert!(!p.contains("Composer"));
+        assert!(!p.contains("Grok Build"));
+        assert!(!p.contains("search_tool"));
+        assert!(!p.contains("use_tool"));
+        assert!(!p.contains("CallMcpTool"));
+    }
 
     #[test]
     fn mcp_reference_uses_ask_tool() {

@@ -139,7 +139,7 @@ export interface AgentsInit {
   lang: string;
 }
 
-export type AgentKind = "claude" | "codex" | "cursor";
+export type AgentKind = "claude" | "codex" | "cursor" | "grok";
 
 /** 生命周期 hook 安装状态（实验区开关据此渲染）。 */
 export interface LifecycleStatus {
@@ -302,7 +302,7 @@ export interface ClaudeHookStatus {
   supported: boolean;
 }
 
-export type AgentId = "cursor" | "claude" | "codex";
+export type AgentId = "cursor" | "claude" | "codex" | "grok";
 
 export interface UpdateInfo {
   available: boolean;

@@ -154,3 +154,38 @@ pub fn codex_config_toml() -> PathBuf {
 pub fn codex_hooks_json() -> PathBuf {
     codex_dir().join("hooks.json")
 }
+
+/// Grok 配置目录 `~/.grok`。
+pub fn grok_dir() -> PathBuf {
+    home().join(".grok")
+}
+
+/// Grok 用户级配置文件 `~/.grok/config.toml`（`[mcp_servers.askhuman]` 写于此）。
+pub fn grok_config_toml() -> PathBuf {
+    grok_dir().join("config.toml")
+}
+
+/// 本应用独占的 Grok skill 目录 `~/.grok/skills/interaction-protocol`。
+pub fn grok_skill_dir() -> PathBuf {
+    grok_dir().join("skills").join("interaction-protocol")
+}
+
+/// 本应用独占的 Grok skill 文件 `~/.grok/skills/interaction-protocol/SKILL.md`（必读交互协议载体）。
+pub fn grok_skill_md() -> PathBuf {
+    grok_skill_dir().join("SKILL.md")
+}
+
+/// Grok 用户级 hook 目录 `~/.grok/hooks`（全局 hook 恒受信任，无需 trust 哈希）。
+pub fn grok_hooks_dir() -> PathBuf {
+    grok_dir().join("hooks")
+}
+
+/// 本应用独占的 Grok 生命周期 hook 定义文件 `~/.grok/hooks/askhuman-lifecycle.json`。
+pub fn grok_hooks_json() -> PathBuf {
+    grok_hooks_dir().join("askhuman-lifecycle.json")
+}
+
+/// Grok 会话目录 `~/.grok/sessions`（子目录为 URL 编码的 cwd，再下一层为 `<session_id>/`）。
+pub fn grok_sessions_dir() -> PathBuf {
+    grok_dir().join("sessions")
+}

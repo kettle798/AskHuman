@@ -2,6 +2,57 @@
 
 按具体任务 / 需求记录待办与当前进展。任务 / 需求完成后删除其 section（历史留在 git）。
 
+## 进行中：Grok 集成（仅 MCP）—— 实现已落地并 live 验证，待用户验收
+
+grok skill「不被模型主动加载」已修复并 install 落盘：根因是 skill 懒加载 + 自指悖论（按「需要提问时加载」写，
+模型在最需要时意识不到需要它）。处置：把 skill 从「AskHuman 提问技能」重定位为「**无条件必读的交互协议**」——
+frontmatter `description` 第一句无条件要求「每 session 先读」+ 前置兜底事实「普通输出人类不可见」；skill 更名
+`askhuman` → `interaction-protocol`（`paths.rs` 目录同步）；`grok_skill_body()` 改为复用 `mcp_reference()` +
+末尾一段**通用**「联系人类降级阶梯」（MCP 优先→没列出先搜→仍够不到退回其它提问渠道如 CLI，绝不退化成普通输出；
+刻意不写死 harness/工具名）。已实测排除两条路线：`when-to-use` 仅拼在 description 后无价值、hook 无法注入
+always-on 上下文（三证）。文档 overview.md / 调研 §6.3/§6.4/§7.2 已更新，全量 350 单测通过，install.sh + 落盘
+`~/.grok/skills/interaction-protocol/SKILL.md` 已核对。**未做**：未 live 实测两 harness 首触发（避免 grok 子进程
+再次卡住 shell）——待你需要时可 `grok inspect` 看 skill 是否加载。
+
+计划 `docs/plans/grok-integration.md`（Q1–Q5 + P1/P2/P3 定案）已按序全量实现：
+- P1（MCP 集成）：`AgentTarget::Grok` + `paths` grok 路径族 + `mcp_config`（三超时键
+  `startup_timeout_sec=30`/`tool_timeout_sec=86400`/`tool_timeouts={ask=86400}`，且比较容忍整值浮点，
+  顺带修好 Codex 因 CLI 归一化 `30→30.0` 造成的「永远需更新」）+ `grok_skill.rs` 指令载体
+  （`prompts::grok_skill_body`，P2 措辞：找人一律走 `ask` MCP 工具、其它 shell 不受限）+
+  `agent_mode` 两态（None|Mcp，拒 Cli）+ CLI(`agents mode/show/install`)/`doctor`/前端卡片(types/i18n)。
+- P2（生命周期）：`AgentKind::Grok` 全链路（`mod`/`detect` 优先判 Grok/`registry`/`title` 解析
+  `summary.json` 与解包 `<user_query>`）+ `agent_lifecycle` 原生 hook（`~/.grok/hooks/askhuman-lifecycle.json`，
+  7 事件 Nested）+ `report.rs` P1 去重（`running==Grok && intended!=Grok` 跳过 claude/cursor 兼容 hook）。
+
+Live 验证（`grok inspect`）：`askhuman` skill 已加载、MCP Server `askhuman(stdio) config` 已加载、
+grok 原生 hook 已加载；同时确认 Grok 确会兼容读取 `~/.claude/CLAUDE.md`（P2 场景，靠 skill 措辞压制）
+与触发 `~/.claude` 兼容 hook（P1 场景，靠 reporter 去重）。全部单测通过、`install.sh` 通过。
+
+## 待办：install.sh 换新后 daemon 与 GUI 宿主「换新不同步」→ 旧 GUI 重建旧路径产物
+
+现象（本轮 grok skill 改名 `askhuman`→`interaction-protocol` 时踩到）：`install.sh` 换二进制后 daemon 会自动
+drain+重启到新版（`ASKHUMAN_DAEMON_AUTORESTART`），但 **GUI 宿主（`--gui-host` 菜单栏 app）有独立的二进制
+换新监视（`gui_host.rs::start_binary_watch`/`maybe_refresh_binary`，每 15s，且仅在「无打开窗口」时才换）**，
+可长时间滞留旧二进制（实测滞留 6h+）。分裂期内 **旧 GUI 按旧代码的产物路径反复重建托管产物**：删掉
+`~/.grok/skills/askhuman` 后，每逢 daemon 重连/配置事件它又按旧路径补回（内容为旧版 `name: askhuman`），
+即便 daemon 已是新版。手动退出并重开 app（GUI 切到新二进制）后复现消失，重启 daemon 回归验证通过。
+
+风险点：任何「产物落点/命名变更」的发布，在用户 GUI 未及时换新前都可能被旧 GUI 以旧路径重建，产生「新旧两份
+并存」。待评估修法：install.sh/daemon 换新时主动通知 GUI 宿主换新（而非仅靠其自身 15s+无窗口门控）；或让 GUI
+换新不被「有窗口」长期阻塞；或产物 reconcile 统一由单一新二进制来源执行。
+
+## 待办：分析 PID 定位 Terminal 功能失效
+
+已定位：6 月 22 日启动的 Codex app-server daemon 持有当前 thread 并执行 hooks/tools；TUI 自动连接该
+daemon。AskHuman 从 hook/ask 子进程向上 walk 得到 daemon PID 52407（无 tty、父链到 PID 1），而非
+Terminal 内的 TUI PID 83240（ttys005、父链含 Terminal.app）。registry 因而缓存 `terminal=other`，
+状态页隐藏按钮；弹窗同样对该 PID 探测失败，badge 不可点击。Codex 源码确认：默认 control socket
+存在且启动配置可复用时，所有普通 TUI 自动连接同一 LocalDaemon；无 socket、带不可复放覆盖或显式
+remote endpoint 时分别走每 TUI Embedded / 指定 Remote。共享 PID 还会触发 registry 的“同 PID 新
+session 结束旧 session”、daemon 存活误当 thread 存活、按 PID 的 MCP/在途活动跨 session 刷新。
+建议拆分 session 生命周期身份与 Terminal 定位：共享 app-server PID 不进入 session liveness；Terminal
+在旧父链精确命中失败时按 Codex TUI 的 tty + cwd 唯一候选解析，歧义时不猜。待确认歧义交互策略。
+
 ## 弹窗启动延迟性能优化（埋点 + harness + 基线 + 首轮 + 次轮 + 方案6 已落地；性能已暂停 → 远期余方案8/markdown-it）
 
 文档：`docs/specs/popup-launch-performance.md`（调用链、等待点、优化方案、度量方法论 §7）。

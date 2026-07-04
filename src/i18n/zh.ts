@@ -106,6 +106,7 @@ export default {
       claude: "Claude Code",
       codex: "Codex",
       cursor: "Cursor",
+      grok: "Grok",
       unsupported: "当前平台不支持",
       outdated: "需要更新——请先关闭再开启以刷新。",
       verticalQuestionsTitle: "多问题纵向同时显示",
@@ -162,6 +163,7 @@ export default {
       copy: "复制",
       copied: "已复制",
       rulesLabel: "Rules",
+      skillLabel: "Skill",
       hookLabel: "超时 Hook",
       mcpConfigLabel: "MCP 配置",
       reveal: "定位",
@@ -174,6 +176,8 @@ export default {
       hookShort: "检测到调用 AskHuman 时自动把超时延长到 24 小时，避免长时间等待被取消。",
       cursorRulesHint:
         "需项目位于用户主目录（~）之下才会全局生效；其它位置请在 Cursor 设置 → Rules 手动配置。",
+      grokSkillHint:
+        "在 ~/.grok/skills 下安装 AskHuman skill，让 Composer 与 Grok Build 都能发现交互协议。Grok 仅支持 MCP 模式（无 CLI/超时 Hook）。",
       installed: "已安装",
       notInstalled: "未安装",
       install: "安装",
@@ -363,6 +367,7 @@ export default {
       claude: "Claude Code",
       codex: "Codex",
       cursor: "Cursor",
+      grok: "Grok",
     },
     field: {
       session: "会话",

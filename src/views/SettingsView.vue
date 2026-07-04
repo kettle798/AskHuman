@@ -132,15 +132,20 @@ const promptVariant = ref<"cli" | "mcp">("cli");
 
 // 各 Agent 的展示信息。Codex 没有「超时 Hook」概念（hasTimeoutHook=false），
 // 且无法延长 CLI 超时，故推荐 MCP；Cursor / Claude Code 有可靠超时 Hook，推荐 CLI。
+// `hasCli`：是否提供 CLI 档（超时 Hook 方案）。Grok 的 Composer CLI 会自动后台化，
+// 超时不可靠，故仅 None|Mcp 两态。`instructionKind`：指令载体（规则文件 vs skill）。
 const AGENTS: {
   id: AgentId;
   title: string;
   hasTimeoutHook: boolean;
+  hasCli: boolean;
+  instructionKind: "rule" | "skill";
   recommended: AgentMode;
 }[] = [
-  { id: "cursor", title: "Cursor", hasTimeoutHook: true, recommended: "cli" },
-  { id: "claude", title: "Claude Code", hasTimeoutHook: true, recommended: "cli" },
-  { id: "codex", title: "Codex", hasTimeoutHook: false, recommended: "mcp" },
+  { id: "cursor", title: "Cursor", hasTimeoutHook: true, hasCli: true, instructionKind: "rule", recommended: "cli" },
+  { id: "claude", title: "Claude Code", hasTimeoutHook: true, hasCli: true, instructionKind: "rule", recommended: "cli" },
+  { id: "codex", title: "Codex", hasTimeoutHook: false, hasCli: true, instructionKind: "rule", recommended: "mcp" },
+  { id: "grok", title: "Grok", hasTimeoutHook: false, hasCli: false, instructionKind: "skill", recommended: "mcp" },
 ];
 
 const emptyMode = (): AgentModeStatus => ({
@@ -160,21 +165,25 @@ const modes = ref<Record<AgentId, AgentModeStatus>>({
   cursor: emptyMode(),
   claude: emptyMode(),
   codex: emptyMode(),
+  grok: emptyMode(),
 });
 const modeBusy = ref<Record<AgentId, boolean>>({
   cursor: false,
   claude: false,
   codex: false,
+  grok: false,
 });
 const modeMessage = ref<Record<AgentId, string | null>>({
   cursor: null,
   claude: null,
   codex: null,
+  grok: null,
 });
 const modeError = ref<Record<AgentId, boolean>>({
   cursor: false,
   claude: false,
   codex: false,
+  grok: false,
 });
 
 async function refreshMode(agent: AgentId) {
@@ -625,22 +634,25 @@ function stepHeight(delta: number) {
 }
 
 // ===== 实验区：Agent 生命周期追踪开关 =====
-const LIFECYCLE_KINDS: AgentKind[] = ["claude", "codex", "cursor"];
+const LIFECYCLE_KINDS: AgentKind[] = ["claude", "codex", "cursor", "grok"];
 
 const lifecycleStatus = ref<Record<AgentKind, LifecycleStatus>>({
   claude: { installed: false, outdated: false, supported: true },
   codex: { installed: false, outdated: false, supported: true },
   cursor: { installed: false, outdated: false, supported: true },
+  grok: { installed: false, outdated: false, supported: true },
 });
 const lifecycleBusy = ref<Record<AgentKind, boolean>>({
   claude: false,
   codex: false,
   cursor: false,
+  grok: false,
 });
 const lifecycleError = ref<Record<AgentKind, string | null>>({
   claude: null,
   codex: null,
   cursor: null,
+  grok: null,
 });
 
 async function refreshLifecycle() {
@@ -1803,6 +1815,7 @@ onBeforeUnmount(() => unlistenProgress?.());
             <span class="spacer"></span>
             <div class="segmented">
               <button
+                v-if="a.hasCli"
                 type="button"
                 class="seg"
                 :class="{ active: modes[a.id].mode === 'cli' }"
@@ -1841,9 +1854,13 @@ onBeforeUnmount(() => unlistenProgress?.());
           <template v-if="modes[a.id].mode !== 'none'">
             <hr class="divider" />
 
-            <!-- Rules（CLI / MCP 共有） -->
+            <!-- Rules / Skill（CLI / MCP 共有；Grok 为 skill） -->
             <div class="row agent-row">
-              <span class="label">{{ t("settings.integration.rulesLabel") }}</span>
+              <span class="label">{{
+                a.instructionKind === "skill"
+                  ? t("settings.integration.skillLabel")
+                  : t("settings.integration.rulesLabel")
+              }}</span>
               <span class="badge">
                 <span
                   class="dot"
@@ -1897,6 +1914,9 @@ onBeforeUnmount(() => unlistenProgress?.());
             </p>
             <p v-if="a.id === 'cursor'" class="card-desc agent-hint">
               {{ t("settings.integration.cursorRulesHint") }}
+            </p>
+            <p v-if="a.id === 'grok'" class="card-desc agent-hint">
+              {{ t("settings.integration.grokSkillHint") }}
             </p>
 
             <!-- CLI 模式：超时 Hook（Codex 无 Hook 给提示） -->

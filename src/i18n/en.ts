@@ -110,6 +110,7 @@ export default {
       claude: "Claude Code",
       codex: "Codex",
       cursor: "Cursor",
+      grok: "Grok",
       unsupported: "Not supported on this platform",
       outdated: "Needs update — toggle off then on to refresh.",
       verticalQuestionsTitle: "Show multiple questions vertically",
@@ -167,6 +168,7 @@ export default {
       copy: "Copy",
       copied: "Copied",
       rulesLabel: "Rules",
+      skillLabel: "Skill",
       hookLabel: "Timeout hook",
       mcpConfigLabel: "MCP config",
       reveal: "Locate",
@@ -180,6 +182,8 @@ export default {
         "Auto-extends the timeout to 24h when an AskHuman call is detected, so long waits aren't cancelled.",
       cursorRulesHint:
         "Applies globally only when your project lives under your home directory (~). For other locations, configure it manually in Cursor Settings → Rules.",
+      grokSkillHint:
+        "Installs an AskHuman skill under ~/.grok/skills so both Composer and Grok Build can discover the interaction protocol. Grok supports MCP mode only (no CLI/timeout hook).",
       installed: "Installed",
       notInstalled: "Not installed",
       install: "Install",
@@ -377,6 +381,7 @@ export default {
       claude: "Claude Code",
       codex: "Codex",
       cursor: "Cursor",
+      grok: "Grok",
     },
     field: {
       session: "Session",

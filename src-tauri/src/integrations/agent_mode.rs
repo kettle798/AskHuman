@@ -40,30 +40,30 @@ impl Mode {
 
 // MARK: - 超时 Hook 分派（Codex 无超时 Hook）
 
-/// 该 Agent 是否有「超时 Hook」概念（Codex 没有）。
+/// 该 Agent 是否有「超时 Hook」概念（Codex / Grok 没有）。
 pub fn timeout_hook_supported(target: AgentTarget) -> bool {
     match target {
         AgentTarget::Cursor => cursor_hook::supported(),
         AgentTarget::ClaudeCode => claude_hook::supported(),
-        AgentTarget::Codex => false,
+        AgentTarget::Codex | AgentTarget::Grok => false,
     }
 }
 
-/// 超时 Hook 是否已安装（Codex 恒 false）。
+/// 超时 Hook 是否已安装（Codex / Grok 恒 false）。
 pub fn timeout_hook_is_installed(target: AgentTarget) -> bool {
     match target {
         AgentTarget::Cursor => cursor_hook::is_installed(),
         AgentTarget::ClaudeCode => claude_hook::is_installed(),
-        AgentTarget::Codex => false,
+        AgentTarget::Codex | AgentTarget::Grok => false,
     }
 }
 
-/// 超时 Hook 是否需更新（Codex 恒 false）。
+/// 超时 Hook 是否需更新（Codex / Grok 恒 false）。
 pub fn timeout_hook_needs_update(target: AgentTarget) -> bool {
     match target {
         AgentTarget::Cursor => cursor_hook::needs_update(),
         AgentTarget::ClaudeCode => claude_hook::needs_update(),
-        AgentTarget::Codex => false,
+        AgentTarget::Codex | AgentTarget::Grok => false,
     }
 }
 
@@ -71,7 +71,7 @@ fn timeout_hook_install(target: AgentTarget) -> Result<()> {
     match target {
         AgentTarget::Cursor => cursor_hook::install().map(|_| ()),
         AgentTarget::ClaudeCode => claude_hook::install().map(|_| ()),
-        AgentTarget::Codex => Ok(()),
+        AgentTarget::Codex | AgentTarget::Grok => Ok(()),
     }
 }
 
@@ -79,25 +79,25 @@ fn timeout_hook_uninstall(target: AgentTarget) -> Result<()> {
     match target {
         AgentTarget::Cursor => cursor_hook::uninstall().map(|_| ()),
         AgentTarget::ClaudeCode => claude_hook::uninstall().map(|_| ()),
-        AgentTarget::Codex => Ok(()),
+        AgentTarget::Codex | AgentTarget::Grok => Ok(()),
     }
 }
 
-/// 在文件管理器中定位超时 Hook 的配置文件（Codex 无 Hook，no-op）。
+/// 在文件管理器中定位超时 Hook 的配置文件（Codex / Grok 无 Hook，no-op）。
 pub fn timeout_hook_reveal(target: AgentTarget) {
     match target {
         AgentTarget::Cursor => cursor_hook::reveal(),
         AgentTarget::ClaudeCode => claude_hook::reveal(),
-        AgentTarget::Codex => {}
+        AgentTarget::Codex | AgentTarget::Grok => {}
     }
 }
 
-/// 用系统默认程序打开超时 Hook 的配置文件（Codex 无 Hook，no-op）。
+/// 用系统默认程序打开超时 Hook 的配置文件（Codex / Grok 无 Hook，no-op）。
 pub fn timeout_hook_open(target: AgentTarget) {
     match target {
         AgentTarget::Cursor => cursor_hook::open(),
         AgentTarget::ClaudeCode => claude_hook::open(),
-        AgentTarget::Codex => {}
+        AgentTarget::Codex | AgentTarget::Grok => {}
     }
 }
 
@@ -180,7 +180,16 @@ pub fn needs_update(target: AgentTarget) -> bool {
 // MARK: - 切换
 
 /// 一键切到目标模式：先卸「非目标模式」的全部产物，再装目标模式产物。各底层 install/uninstall 已幂等。
+///
+/// Grok 只提供 `None | Mcp` 两态（Composer 的 CLI 会自动后台化、不可靠，见调研）：请求 `Cli` 直接报错，
+/// 避免留下「装了 skill 却没 MCP 配置」的半残状态。Grok 的 `Mcp` 产物 = skill（经 `agent_rules` 委托）+
+/// MCP 配置，正好复用下方 Mcp 分支（无超时 Hook）。
 pub fn set(target: AgentTarget, mode: Mode) -> Result<()> {
+    if target == AgentTarget::Grok && mode == Mode::Cli {
+        return Err(anyhow::anyhow!(
+            "Grok only supports None | Mcp (no CLI mode)"
+        ));
+    }
     match mode {
         Mode::None => uninstall_all(target),
         Mode::Cli => {

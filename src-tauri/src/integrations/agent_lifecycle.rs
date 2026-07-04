@@ -66,6 +66,17 @@ fn events(kind: AgentKind) -> &'static [(&'static str, &'static str)] {
             ("stop", "turn-end"),
             ("sessionEnd", "session-end"),
         ],
+        // Grok：PascalCase 事件，与 Claude 同构且事件最全（含 StopFailure + SessionEnd）。
+        // 落点 `~/.grok/hooks/*.json`（全局恒受信任，无需 Codex 那种信任哈希）。
+        AgentKind::Grok => &[
+            ("SessionStart", "session-start"),
+            ("UserPromptSubmit", "turn-start"),
+            ("PreToolUse", "activity"),
+            ("PostToolUse", "activity"),
+            ("Stop", "turn-end"),
+            ("StopFailure", "turn-end"),
+            ("SessionEnd", "session-end"),
+        ],
     }
 }
 
@@ -91,9 +102,14 @@ pub fn any_installed() -> bool {
     if !supported() {
         return false;
     }
-    [AgentKind::Claude, AgentKind::Codex, AgentKind::Cursor]
-        .iter()
-        .any(|k| status(*k).installed)
+    [
+        AgentKind::Claude,
+        AgentKind::Codex,
+        AgentKind::Cursor,
+        AgentKind::Grok,
+    ]
+    .iter()
+    .any(|k| status(*k).installed)
 }
 
 /// 启动时自动迁移：对**已安装但过期**的 lifecycle hook 幂等重装（补齐新增事件 / 修正命令路径）。
@@ -104,7 +120,12 @@ pub fn migrate_outdated() -> Vec<AgentKind> {
         return Vec::new();
     }
     let mut migrated = Vec::new();
-    for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Cursor] {
+    for kind in [
+        AgentKind::Claude,
+        AgentKind::Codex,
+        AgentKind::Cursor,
+        AgentKind::Grok,
+    ] {
         let st = status(kind);
         if st.installed && st.outdated {
             if install(kind).is_ok() {
@@ -140,6 +161,8 @@ pub fn status(kind: AgentKind) -> LifecycleStatus {
         AgentKind::Claude => json_status(kind, &paths::claude_settings_json(), Shape::Nested),
         AgentKind::Cursor => json_status(kind, &paths::cursor_hooks_json(), Shape::Flat),
         AgentKind::Codex => codex_status(),
+        // Grok：全局 hooks 恒受信任，纯 JSON 状态即可（无 Codex 那种信任哈希校验）。
+        AgentKind::Grok => json_status(kind, &paths::grok_hooks_json(), Shape::Nested),
     }
 }
 
@@ -151,6 +174,7 @@ pub fn install(kind: AgentKind) -> Result<String> {
         }
         AgentKind::Cursor => json_install(kind, &exe, &paths::cursor_hooks_json(), Shape::Flat)?,
         AgentKind::Codex => codex_install(&exe)?,
+        AgentKind::Grok => json_install(kind, &exe, &paths::grok_hooks_json(), Shape::Nested)?,
     }
     Ok(message("cmd.lifecycleInstalled"))
 }
@@ -160,6 +184,7 @@ pub fn uninstall(kind: AgentKind) -> Result<String> {
         AgentKind::Claude => json_uninstall(&paths::claude_settings_json(), Shape::Nested)?,
         AgentKind::Cursor => json_uninstall(&paths::cursor_hooks_json(), Shape::Flat)?,
         AgentKind::Codex => codex_uninstall()?,
+        AgentKind::Grok => json_uninstall(&paths::grok_hooks_json(), Shape::Nested)?,
     }
     Ok(message("cmd.lifecycleRemoved"))
 }
@@ -667,6 +692,27 @@ mod tests {
             assert_eq!(arr.len(), 1, "event {ev} should have one entry");
             let cmd = arr[0]["hooks"][0]["command"].as_str().unwrap();
             assert!(cmd.contains(MARKER) && cmd.contains("claude") && cmd.contains(lc));
+        }
+    }
+
+    #[test]
+    fn grok_install_adds_all_events_nested() {
+        // Grok 与 Claude 同构（Nested、PascalCase、事件最全），装 grok 原生 hook 命令含 `grok`。
+        let out = apply_json_install(AgentKind::Grok, EXE, "{}", Shape::Nested).unwrap();
+        let v = to_value(&out);
+        for (ev, lc) in [
+            ("SessionStart", "session-start"),
+            ("UserPromptSubmit", "turn-start"),
+            ("PreToolUse", "activity"),
+            ("PostToolUse", "activity"),
+            ("Stop", "turn-end"),
+            ("StopFailure", "turn-end"),
+            ("SessionEnd", "session-end"),
+        ] {
+            let arr = v["hooks"][ev].as_array().unwrap();
+            assert_eq!(arr.len(), 1, "event {ev} should have one entry");
+            let cmd = arr[0]["hooks"][0]["command"].as_str().unwrap();
+            assert!(cmd.contains(MARKER) && cmd.contains("grok") && cmd.contains(lc));
         }
     }
 

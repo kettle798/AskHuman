@@ -29,6 +29,7 @@ pub fn resolve_title(kind: AgentKind, session_id: &str) -> Option<String> {
         AgentKind::Cursor => cursor_title(session_id),
         AgentKind::Codex => codex_title(session_id),
         AgentKind::Claude => claude_title(session_id),
+        AgentKind::Grok => grok_title(session_id),
     }?;
     Some(clean_title(&raw))
 }
@@ -139,6 +140,87 @@ fn claude_title(session_id: &str) -> Option<String> {
         return Some(s);
     }
     first_user_message(&file)
+}
+
+// ── Grok ──
+
+/// Grok 会话布局：`~/.grok/sessions/<url编码的 cwd>/<session_id>/`，内含 `summary.json`
+/// （`session_summary` / `generated_title` 即恢复列表标题）与 `chat_history.jsonl`。
+/// 优先取 summary 字段；回退扫 `chat_history.jsonl` 的首条真实用户输入。
+///
+/// 注意 Grok（cursor harness）会把用户真实输入包在 `<user_query>…</user_query>` 里，而其它以 `<`
+/// 开头的块（`<user_info>`/`<git_status>` 等）才是注入上下文；故回退需先**解包** `<user_query>`，
+/// 不能直接套用 [`first_user_message`]（它会把所有以 `<` 开头的文本当注入块跳过）。
+fn grok_title(session_id: &str) -> Option<String> {
+    let sessions = paths::grok_sessions_dir();
+    // 遍历各 cwd 目录，定位含本 session_id 子目录者（量小、best-effort）。
+    let entries = fs::read_dir(&sessions).ok()?;
+    for e in entries.flatten() {
+        let dir = e.path().join(session_id);
+        if !dir.is_dir() {
+            continue;
+        }
+        // 优先：summary.json 的 session_summary，其次 generated_title。
+        let summary = dir.join("summary.json");
+        for field in ["session_summary", "generated_title"] {
+            if let Some(s) = read_json_field(&summary, field) {
+                if !s.trim().is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+        // 回退：chat_history.jsonl 首条真实用户输入（解包 <user_query>、跳过注入块）。
+        let chat = dir.join("chat_history.jsonl");
+        if chat.is_file() {
+            if let Some(t) = grok_first_query(&chat) {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
+/// 扫 Grok `chat_history.jsonl` 取首条真实用户输入：优先解包 `<user_query>…</user_query>` 的内层文本；
+/// 若某条用户文本本身不以 `<` 开头（Build harness 可能不加包裹）则直接取用。均跳过纯注入块。
+fn grok_first_query(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    for (i, line) in reader.lines().enumerate() {
+        if i >= MAX_LINES {
+            break;
+        }
+        let Ok(line) = line else { break };
+        if !line.contains("\"user\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if !is_user_line(&v) {
+            continue;
+        }
+        let Some(text) = extract_text(&v) else {
+            continue;
+        };
+        let t = text.trim();
+        if let Some(inner) = unwrap_tag(t, "user_query") {
+            if !inner.trim().is_empty() {
+                return Some(inner.trim().to_string());
+            }
+        } else if !is_injected_block(t) {
+            return Some(t.to_string());
+        }
+    }
+    None
+}
+
+/// 提取 `<tag>…</tag>` 之间的内层文本（找不到成对标签返回 `None`）。
+fn unwrap_tag(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    Some(text[start..end].to_string())
 }
 
 // ── 通用 jsonl 解析 ──
@@ -362,6 +444,41 @@ mod tests {
         assert_eq!(codex_user_message(&f).as_deref(), Some("帮我修一个 bug"));
         // 回退路径：response_item 也要跳过 AGENTS.md 注入块、取到真实问题。
         assert_eq!(first_user_message(&f).as_deref(), Some("帮我修一个 bug"));
+    }
+
+    #[test]
+    fn grok_first_query_unwraps_user_query_and_skips_injection() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("chat_history.jsonl");
+        let lines = [
+            r#"{"type":"system","content":"You are ..."}"#,
+            r#"{"type":"user","content":[{"type":"text","text":"<user_info>\nOS...\n</user_info>\n<git_status>...</git_status>"}]}"#,
+            r#"{"type":"user","content":[{"type":"text","text":"<user_query>\n帮我加一个功能\n</user_query>"}]}"#,
+        ];
+        std::fs::write(&f, lines.join("\n")).unwrap();
+        assert_eq!(grok_first_query(&f).as_deref(), Some("帮我加一个功能"));
+    }
+
+    #[test]
+    fn grok_first_query_falls_back_to_plain_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("chat_history.jsonl");
+        // Build harness 可能不加 <user_query> 包裹：直接取首条非注入用户文本。
+        let lines = [
+            r#"{"type":"user","content":[{"type":"text","text":"<user_info>ctx</user_info>"}]}"#,
+            r#"{"type":"user","content":"直接的问题"}"#,
+        ];
+        std::fs::write(&f, lines.join("\n")).unwrap();
+        assert_eq!(grok_first_query(&f).as_deref(), Some("直接的问题"));
+    }
+
+    #[test]
+    fn unwrap_tag_extracts_inner() {
+        assert_eq!(
+            unwrap_tag("a<user_query>\nhi\n</user_query>b", "user_query").as_deref(),
+            Some("\nhi\n")
+        );
+        assert_eq!(unwrap_tag("no tags here", "user_query"), None);
     }
 
     #[test]

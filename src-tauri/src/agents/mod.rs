@@ -24,6 +24,7 @@ pub enum AgentKind {
     Claude,
     Codex,
     Cursor,
+    Grok,
 }
 
 impl AgentKind {
@@ -33,6 +34,7 @@ impl AgentKind {
             AgentKind::Claude => "claude",
             AgentKind::Codex => "codex",
             AgentKind::Cursor => "cursor",
+            AgentKind::Grok => "grok",
         }
     }
 
@@ -42,6 +44,7 @@ impl AgentKind {
             AgentKind::Claude => "Claude Code",
             AgentKind::Codex => "Codex",
             AgentKind::Cursor => "Cursor",
+            AgentKind::Grok => "Grok",
         }
     }
 
@@ -50,12 +53,18 @@ impl AgentKind {
             "claude" => Some(AgentKind::Claude),
             "codex" => Some(AgentKind::Codex),
             "cursor" => Some(AgentKind::Cursor),
+            "grok" => Some(AgentKind::Grok),
             _ => None,
         }
     }
 
-    /// 三家集合（遍历用）。
-    pub const ALL: [AgentKind; 3] = [AgentKind::Claude, AgentKind::Codex, AgentKind::Cursor];
+    /// 四家集合（遍历用）。
+    pub const ALL: [AgentKind; 4] = [
+        AgentKind::Claude,
+        AgentKind::Codex,
+        AgentKind::Cursor,
+        AgentKind::Grok,
+    ];
 }
 
 /// 归一化后的生命周期事件（线上 `<event>` 取值）。

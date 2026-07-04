@@ -44,11 +44,17 @@ impl Variant {
 }
 
 /// 目标 Agent。
+///
+/// 注意 `Grok` 的「指令载体」不是 rules 文件，而是 `~/.grok/skills/interaction-protocol/SKILL.md`
+/// （见 [`crate::integrations::grok_skill`]）：Grok 默认模型 Composer 不读全局 `~/.grok/AGENTS.md`，
+/// 故本模块对 `Grok` 的所有指令查询 / 安装 / 卸载 / 打开一律**委托** `grok_skill`，让 `agent_mode`、
+/// 命令层、CLI 可用同一套 `AgentTarget` 统一处理四家（Grok 的 `Variant` 无意义，恒按 MCP 语义）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentTarget {
     Cursor,
     ClaudeCode,
     Codex,
+    Grok,
 }
 
 impl AgentTarget {
@@ -58,16 +64,23 @@ impl AgentTarget {
             "cursor" => Some(AgentTarget::Cursor),
             "claude" => Some(AgentTarget::ClaudeCode),
             "codex" => Some(AgentTarget::Codex),
+            "grok" => Some(AgentTarget::Grok),
             _ => None,
         }
     }
 
-    /// 目标规则文件路径。
+    /// 该 target 的指令载体是否为 Grok skill（委托 `grok_skill` 而非本模块的 rules 机制）。
+    fn is_grok_skill(self) -> bool {
+        matches!(self, AgentTarget::Grok)
+    }
+
+    /// 目标规则文件路径（Grok 返回其 skill 文件路径，仅用于展示；实际读写走 `grok_skill`）。
     fn file(self) -> PathBuf {
         match self {
             AgentTarget::Cursor => paths::cursor_rule_file(),
             AgentTarget::ClaudeCode => paths::claude_md(),
             AgentTarget::Codex => paths::codex_agents_md(),
+            AgentTarget::Grok => paths::grok_skill_md(),
         }
     }
 
@@ -194,6 +207,9 @@ pub fn is_managed_cursor_file(text: &str) -> bool {
 
 /// 该 Agent 的规则是否已安装（新格式托管区块，或 Cursor 旧格式头标记）。
 pub fn is_installed(agent: AgentTarget) -> bool {
+    if agent.is_grok_skill() {
+        return crate::integrations::grok_skill::is_installed();
+    }
     let path = agent.file();
     let Ok(text) = std::fs::read_to_string(&path) else {
         return false;
@@ -208,8 +224,11 @@ pub fn needs_update(agent: AgentTarget) -> bool {
 }
 
 /// 与指定变体的最新内置正文比对，判断是否需更新。
-/// Cursor 旧格式（头标记、无区块）一律视为需更新。
+/// Cursor 旧格式（头标记、无区块）一律视为需更新。Grok 委托 skill 比对（忽略 variant）。
 pub fn needs_update_variant(agent: AgentTarget, variant: Variant) -> bool {
+    if agent.is_grok_skill() {
+        return crate::integrations::grok_skill::needs_update();
+    }
     let Ok(text) = std::fs::read_to_string(agent.file()) else {
         return false;
     };
@@ -224,6 +243,10 @@ pub fn needs_update_variant(agent: AgentTarget, variant: Variant) -> bool {
 /// 已安装规则的变体：区块正文精确匹配 `mcp_reference()`/`cli_reference()` 即判定对应变体；
 /// 漂移（旧版本提示词）时用结构性信号兜底（见 [`classify_body`]）。未安装返回 None。
 pub fn installed_variant(agent: AgentTarget) -> Option<Variant> {
+    if agent.is_grok_skill() {
+        // Grok 只有 MCP 语义：装了 skill 即视为 Mcp 变体，未装为 None。
+        return crate::integrations::grok_skill::is_installed().then_some(Variant::Mcp);
+    }
     let text = std::fs::read_to_string(agent.file()).ok()?;
     if let Some(body) = block_body(&text) {
         return Some(classify_body(&body));
@@ -253,13 +276,16 @@ pub fn classify_body(body: &str) -> Variant {
     }
 }
 
-/// 当前平台是否支持（三种规则文件读写均跨平台）。
+/// 当前平台是否支持（四家指令文件读写均跨平台）。
 pub fn supported(_agent: AgentTarget) -> bool {
     true
 }
 
 /// 目标文件的展示路径（把 home 前缀折叠为 `~`）。
 pub fn display_path(agent: AgentTarget) -> String {
+    if agent.is_grok_skill() {
+        return crate::integrations::grok_skill::display_path();
+    }
     collapse_home(&agent.file())
 }
 
@@ -284,14 +310,20 @@ pub fn update(agent: AgentTarget) -> Result<String> {
     update_variant(agent, Variant::Cli)
 }
 
-/// 安装指定变体的提示词（托管区块 upsert，保留区块外用户内容）。
+/// 安装指定变体的提示词（托管区块 upsert，保留区块外用户内容）。Grok 委托 skill（忽略 variant）。
 pub fn install_variant(agent: AgentTarget, variant: Variant) -> Result<String> {
+    if agent.is_grok_skill() {
+        return crate::integrations::grok_skill::install();
+    }
     write_rule(agent, &variant.body())?;
     Ok(crate::i18n::tr(crate::i18n::Lang::current(), "cmd.ruleInstalled").to_string())
 }
 
-/// 更新为指定变体的最新提示词（与安装同样的写入逻辑，仅反馈文案不同）。
+/// 更新为指定变体的最新提示词（与安装同样的写入逻辑，仅反馈文案不同）。Grok 委托 skill。
 pub fn update_variant(agent: AgentTarget, variant: Variant) -> Result<String> {
+    if agent.is_grok_skill() {
+        return crate::integrations::grok_skill::update();
+    }
     write_rule(agent, &variant.body())?;
     Ok(crate::i18n::tr(crate::i18n::Lang::current(), "cmd.ruleUpdated").to_string())
 }
@@ -316,6 +348,9 @@ fn write_rule(agent: AgentTarget, body: &str) -> Result<()> {
 
 /// 卸载：移除托管区块、保留区块外用户内容；Cursor 文件若区块外只剩 frontmatter / 空白则整文件删除。
 pub fn uninstall(agent: AgentTarget) -> Result<String> {
+    if agent.is_grok_skill() {
+        return crate::integrations::grok_skill::uninstall();
+    }
     let path = agent.file();
     let lang = crate::i18n::Lang::current();
     if let Ok(old) = std::fs::read_to_string(&path) {
@@ -339,6 +374,9 @@ pub fn uninstall(agent: AgentTarget) -> Result<String> {
 
 /// 在文件管理器中定位规则文件。
 pub fn reveal(agent: AgentTarget) {
+    if agent.is_grok_skill() {
+        return crate::integrations::grok_skill::reveal();
+    }
     let path = agent.file();
     #[cfg(target_os = "macos")]
     {
@@ -364,6 +402,9 @@ pub fn reveal(agent: AgentTarget) {
 
 /// 用系统默认程序打开规则文件。
 pub fn open(agent: AgentTarget) {
+    if agent.is_grok_skill() {
+        return crate::integrations::grok_skill::open();
+    }
     let path = agent.file();
     #[cfg(target_os = "macos")]
     {
@@ -400,6 +441,7 @@ mod tests {
         assert_eq!(AgentTarget::parse("cursor"), Some(AgentTarget::Cursor));
         assert_eq!(AgentTarget::parse("claude"), Some(AgentTarget::ClaudeCode));
         assert_eq!(AgentTarget::parse("codex"), Some(AgentTarget::Codex));
+        assert_eq!(AgentTarget::parse("grok"), Some(AgentTarget::Grok));
         assert_eq!(AgentTarget::parse("other"), None);
     }
 

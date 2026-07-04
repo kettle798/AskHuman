@@ -32,11 +32,17 @@ pub fn run(args: &[String]) {
 
     let env: HashMap<String, String> = std::env::vars().collect();
 
-    // 去重：唯一需要跳过的误触发是「Cursor 兼容加载了 ~/.claude → Claude hook 在 cursor-agent 下双触发」。
-    // 即仅当 intended=claude 且实际运行家族是 Cursor 时跳过（保留 cursor 自身那次）。
-    // 其它情况一律不跳过：Codex/Cursor 只会执行自己的 hook，绝不能因 env 里残留 CURSOR_*
-    // （例如从 cursor-agent 环境启动 Codex/Claude）而误杀其自身上报（FINDINGS §7.6 的本意）。
+    // 去重：跳过「兼容加载他家 hook」造成的误触发。
     let running = detect::detect_running_agent_from(&env);
+    // Grok 默认会合并触发 `~/.claude`/`~/.cursor` 的兼容 hook（见 grok hooks 文档）：这些兼容 hook 的
+    // intended 是 claude/cursor，但真实运行家族是 Grok（env 有 GROK_HOOK_EVENT/GROK_SESSION_ID）→ 一律
+    // 跳过，只认 Grok 原生 hook（intended==grok），避免把 Grok 会话错标成 Claude/Cursor 或重复登记。
+    if running == Some(AgentKind::Grok) && intended != AgentKind::Grok {
+        return;
+    }
+    // Cursor 兼容加载了 ~/.claude → Claude hook 在 cursor-agent 下双触发：仅当 intended=claude 且实际
+    // 运行家族是 Cursor 时跳过（保留 cursor 自身那次）。其它情况一律不跳过：Codex/Cursor 只会执行自己的
+    // hook，绝不能因 env 里残留 CURSOR_*（例如从 cursor-agent 环境启动 Codex/Claude）而误杀其自身上报。
     if intended == AgentKind::Claude && running == Some(AgentKind::Cursor) {
         return;
     }
@@ -99,7 +105,7 @@ fn resolve_cwd(env: &HashMap<String, String>, stdin: Option<&Value>) -> Option<S
             }
         }
     }
-    for key in ["CURSOR_PROJECT_DIR", "CLAUDE_PROJECT_DIR"] {
+    for key in ["CURSOR_PROJECT_DIR", "GROK_WORKSPACE_ROOT", "CLAUDE_PROJECT_DIR"] {
         if let Some(s) = env.get(key) {
             if !s.trim().is_empty() {
                 return Some(s.clone());

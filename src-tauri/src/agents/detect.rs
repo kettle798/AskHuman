@@ -32,6 +32,13 @@ const SELF_MARKERS: [&str; 2] = ["askhuman", "humaninloop"];
 /// 判不出返回 `None`（调用方应按 intended 处理，避免漏报）。
 pub fn detect_running_agent_from(env: &HashMap<String, String>) -> Option<AgentKind> {
     let has = |k: &str| env.contains_key(k);
+    // Grok **必须**最先判：它在**每个** hook 子进程都注入 `CLAUDE_PROJECT_DIR`（Claude 兼容别名），
+    // 并会合并触发 `~/.claude`/`~/.cursor` 的兼容 hook。凭 `GROK_HOOK_EVENT`（hook runner 恒注入）/
+    // `GROK_SESSION_ID` 认出真实家族是 Grok，配合 reporter 的「running==Grok 且 intended!=Grok 跳过」
+    // 去重，避免 Grok 会话被错标成 Claude/Cursor（FINDINGS：兼容读取的坑）。
+    if has("GROK_HOOK_EVENT") || has("GROK_SESSION_ID") || has("GROK_WORKSPACE_ROOT") {
+        return Some(AgentKind::Grok);
+    }
     if has("CURSOR_AGENT") || has("CURSOR_VERSION") || has("CURSOR_PROJECT_DIR") {
         return Some(AgentKind::Cursor);
     }
@@ -55,6 +62,8 @@ pub fn session_id_env_var(kind: AgentKind) -> &'static str {
         AgentKind::Claude => "CLAUDE_CODE_SESSION_ID",
         AgentKind::Codex => "CODEX_THREAD_ID",
         AgentKind::Cursor => "CURSOR_CONVERSATION_ID",
+        // Grok 在每个 hook 子进程注入 `GROK_SESSION_ID`（见 grok hooks 文档）。
+        AgentKind::Grok => "GROK_SESSION_ID",
     }
 }
 
@@ -94,6 +103,8 @@ fn matches_agent(entry: &ProcEntry, kind: AgentKind) -> bool {
                 || comm.contains("cursor-agent")
                 || command.contains("cursor-agent")
         }
+        // Grok 可执行名为 `grok`（软链）或 `grok-macos-*`（真身），故按子串 `grok` 匹配。
+        AgentKind::Grok => comm.contains("grok") || argv0_base.contains("grok"),
     }
 }
 
@@ -138,7 +149,12 @@ pub fn walk_agent_pid_from_self(kind: AgentKind) -> Option<u32> {
 /// 会话 ID），但进程树依旧能定位到 agent 本体。返回的 pid 是当次现取、真实存活的（可用作 registry
 /// 按 pid 匹配的键）；拿不到 `session_id`。
 pub fn walk_any_agent(start_pid: u32) -> Option<(AgentKind, u32)> {
-    const KINDS: [AgentKind; 3] = [AgentKind::Codex, AgentKind::Claude, AgentKind::Cursor];
+    const KINDS: [AgentKind; 4] = [
+        AgentKind::Grok,
+        AgentKind::Codex,
+        AgentKind::Claude,
+        AgentKind::Cursor,
+    ];
     process_chain(start_pid)
         .into_iter()
         .filter(|e| !is_self(e))
@@ -300,6 +316,23 @@ mod tests {
         // Cursor 兼容性会设 CLAUDE_PROJECT_DIR，但必须判成 cursor。
         let env = env_of(&[("CURSOR_AGENT", "1"), ("CLAUDE_PROJECT_DIR", "/x")]);
         assert_eq!(detect_running_agent_from(&env), Some(AgentKind::Cursor));
+    }
+
+    #[test]
+    fn detect_grok_takes_priority_over_claude_and_cursor_compat() {
+        // Grok 在每个 hook 都设 CLAUDE_PROJECT_DIR；触发 claude/cursor 兼容 hook 时 env 还可能带
+        // CURSOR_*，但只要有 GROK_HOOK_EVENT / GROK_SESSION_ID 就必须判成 Grok（供 reporter 去重）。
+        let env = env_of(&[
+            ("GROK_SESSION_ID", "gs1"),
+            ("GROK_HOOK_EVENT", "session_start"),
+            ("CLAUDE_PROJECT_DIR", "/x"),
+            ("CURSOR_AGENT", "1"),
+        ]);
+        assert_eq!(detect_running_agent_from(&env), Some(AgentKind::Grok));
+        assert_eq!(
+            session_id_from_env_map(AgentKind::Grok, &env),
+            Some("gs1".to_string())
+        );
     }
 
     #[test]

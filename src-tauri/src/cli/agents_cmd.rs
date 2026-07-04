@@ -12,7 +12,7 @@ use crate::integrations::{
 use serde_json::Value;
 use std::process::exit;
 
-const AGENTS: [&str; 3] = ["cursor", "claude", "codex"];
+const AGENTS: [&str; 4] = ["cursor", "claude", "codex", "grok"];
 
 pub fn dispatch(args: &[String], lang: Lang) {
     // 无子命令 → 打印 help（与 channel/config 一致；不再默认开状态窗口）。
@@ -177,8 +177,8 @@ fn mode_cmd(args: &[String], lang: Lang) -> Result<(), String> {
     let target = AgentTarget::parse(agent).ok_or_else(|| {
         cfgio::t(
             lang,
-            &format!("unknown agent: {agent} (expected cursor|claude|codex)"),
-            &format!("未知 agent: {agent}（应为 cursor|claude|codex）"),
+            &format!("unknown agent: {agent} (expected cursor|claude|codex|grok)"),
+            &format!("未知 agent: {agent}（应为 cursor|claude|codex|grok）"),
         )
     })?;
     let kind = AgentKind::parse(agent).unwrap();
@@ -248,8 +248,8 @@ fn integrate(args: &[String], action: Action, lang: Lang) -> Result<(), String> 
     let target = AgentTarget::parse(agent).ok_or_else(|| {
         cfgio::t(
             lang,
-            &format!("unknown agent: {agent} (expected cursor|claude|codex)"),
-            &format!("未知 agent: {agent}（应为 cursor|claude|codex）"),
+            &format!("unknown agent: {agent} (expected cursor|claude|codex|grok)"),
+            &format!("未知 agent: {agent}（应为 cursor|claude|codex|grok）"),
         )
     })?;
     let kind = AgentKind::parse(agent).unwrap();
@@ -316,7 +316,7 @@ fn hook_action(target: AgentTarget, action: Action) -> Option<anyhow::Result<Str
             Action::Update => claude_hook::update(),
             Action::Uninstall => claude_hook::uninstall(),
         }),
-        AgentTarget::Codex => None,
+        AgentTarget::Codex | AgentTarget::Grok => None,
     }
 }
 
@@ -348,7 +348,13 @@ fn show(args: &[String], lang: Lang) -> Result<(), String> {
         _ => AGENTS.to_vec(),
     };
 
-    print_line(&crate::prompts::cli_reference());
+    // 参考提示词：单独查看 Grok 时给「skill 正文」（其指令载体是 skill、非 shell 版规则），
+    // 其余（含默认列出全部）沿用共享的 CLI 参考正文。
+    if targets == ["grok"] {
+        print_line(&crate::prompts::grok_skill_body());
+    } else {
+        print_line(&crate::prompts::cli_reference());
+    }
     print_line("");
     let yes = cfgio::t(lang, "installed", "已安装");
     let no = cfgio::t(lang, "not installed", "未安装");
@@ -380,9 +386,15 @@ fn show(args: &[String], lang: Lang) -> Result<(), String> {
         } else {
             no.clone()
         };
+        // Grok 的指令载体是 skill（非 rules 文件），标签相应改为 skill。
+        let rules_label = if matches!(target, AgentTarget::Grok) {
+            cfgio::t(lang, "skill", "skill")
+        } else {
+            cfgio::t(lang, "rules", "规则")
+        };
         print_line(&format!(
             "  {}: {} — {}",
-            cfgio::t(lang, "rules", "规则"),
+            rules_label,
             rules,
             agent_rules::display_path(target)
         ));
@@ -403,7 +415,7 @@ fn show(args: &[String], lang: Lang) -> Result<(), String> {
                 &no,
                 &upd,
             ),
-            AgentTarget::Codex => na.clone(),
+            AgentTarget::Codex | AgentTarget::Grok => na.clone(),
         };
         print_line(&format!(
             "  {}: {}",
@@ -472,7 +484,7 @@ fn hook_state(installed: bool, needs_update: bool, yes: &str, no: &str, upd: &st
 fn help(lang: Lang) -> String {
     cfgio::t(
         lang,
-        "AskHuman agents — agent status + integrations (cursor | claude | codex)\n\
+        "AskHuman agents — agent status + integrations (cursor | claude | codex | grok)\n\
 \n\
   agents monitor [--json|--text]     Live agent status (opens a window when a GUI is available)\n\
   agents mode <agent> [none|cli|mcp] Switch the integration mode (omit to query); auto-swaps products\n\
@@ -481,13 +493,14 @@ fn help(lang: Lang) -> String {
   agents uninstall <agent> [flags]   Remove the selected integrations\n\
   agents update <agent> [flags]      Refresh managed products to the latest\n\
 \n\
-  Modes: cli = rules + timeout hook;  mcp = rules + MCP server config;  none = remove both.\n\
+  Modes: cli = rules + timeout hook;  mcp = rules/skill + MCP server config;  none = remove.\n\
+  Grok only supports none | mcp (skill + MCP config); it has no CLI mode and no timeout hook.\n\
 \n\
-  --rules      global prompt rules (all three agents)\n\
-  --hook       timeout hook (cursor & claude only; codex skipped)\n\
-  --mcp        MCP server config (user-level global; all three)\n\
-  --lifecycle  lifecycle hook (experimental; all three)",
-        "AskHuman agents —— agent 状态 + 集成（cursor | claude | codex）\n\
+  --rules      global prompt rules (cursor/claude/codex); for grok this installs the AskHuman skill\n\
+  --hook       timeout hook (cursor & claude only; codex/grok skipped)\n\
+  --mcp        MCP server config (user-level global; all agents)\n\
+  --lifecycle  lifecycle hook (experimental; all agents)",
+        "AskHuman agents —— agent 状态 + 集成（cursor | claude | codex | grok）\n\
 \n\
   agents monitor [--json|--text]     实时 agent 状态（有 GUI 时开窗）\n\
   agents mode <agent> [none|cli|mcp] 切换集成模式（省略则查询）；自动切换底层产物\n\
@@ -496,12 +509,13 @@ fn help(lang: Lang) -> String {
   agents uninstall <agent> [选项]    移除所选集成\n\
   agents update <agent> [选项]       把托管的产物刷新到最新\n\
 \n\
-  模式: cli = 规则 + 超时 hook；mcp = 规则 + MCP server 配置；none = 两者都移除。\n\
+  模式: cli = 规则 + 超时 hook；mcp = 规则/skill + MCP server 配置；none = 移除。\n\
+  Grok 仅支持 none | mcp（skill + MCP 配置）；无 CLI 模式、无超时 hook。\n\
 \n\
-  --rules      全局提示词规则（三家都支持）\n\
-  --hook       超时 hook（仅 cursor 与 claude；codex 跳过）\n\
-  --mcp        MCP server 配置（用户级全局；三家都支持）\n\
-  --lifecycle  生命周期 hook（实验性；三家都支持）",
+  --rules      全局提示词规则（cursor/claude/codex）；对 grok 则安装 AskHuman skill\n\
+  --hook       超时 hook（仅 cursor 与 claude；codex/grok 跳过）\n\
+  --mcp        MCP server 配置（用户级全局；全部支持）\n\
+  --lifecycle  生命周期 hook（实验性；全部支持）",
     )
 }
 

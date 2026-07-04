@@ -8,6 +8,7 @@
 - **前端**：Vue 3 + Vite + TypeScript，纯手写 macOS 风 CSS（无组件库）。
 - **运行模型（当前）**：单进程。既是 CLI（纯信息命令直接终端输出、不起 GUI），又能进程内启动 Tauri 事件循环弹窗。**stdout 只输出结果区块，所有日志走 stderr。**
 - **运行模型（规划中）**：正迁往「常驻 Daemon + 瘦客户端 CLI + 独立 GUI Helper」三进程架构（见下节）。本文「运行流程」等小节描述的仍是当前单进程实现，迁移完成后再整体替换。
+- **Grok CLI 集成调研**：Composer 2.5 与 Grok Build 使用不同 harness，当前没有经验证可同时覆盖二者的持久化全局 rules；建议采用用户级 Grok skill + MCP per-tool timeout。完整证据与边界见 `docs/specs/grok-cli-integration-research.md`。
 
 ## 架构演进：常驻 Daemon（开发中，影响后续所有需求）
 
@@ -51,12 +52,12 @@ AskHuman/
                              (选中/打开/预览/拖出/右键) + 拖入回复文件胶囊 + 底部操作条；
                              message 下方右对齐小工具条（复制 Message + Markdown/源码切换，切换作用于整篇 message+所有问题，默认 Markdown、纯前端视图态不回传；仅在有共享 Message 时显示，直接提问无 message 则整条隐藏）；
                              多问题(n>1)且开实验开关 experimental.vertical_questions 时纵向平铺所有题卡片（.q-card），当前题(active)左侧 accent 高亮，上一个/下一个=滚动定位（详见下文「多问题纵向列表」）；开关关=旧版一次一题左右滑动
-    views/AgentsView.vue     (实验性) Agent 状态窗口：按类型(Claude/Codex/Cursor)分组、状态优先排序
+    views/AgentsView.vue     (实验性) Agent 状态窗口：按类型(Claude/Codex/Cursor/Grok)分组、状态优先排序
                              (工作中>空闲>已结束)、相对时间动态刷新；订阅 daemon 推送的 agents-updated
     views/SettingsView.vue   设置：通用（含「回复历史」保留条数 + 超额「立即清理」+ 3 题综合示例的「弹出测试窗口」
                              + 底部隐蔽开关「实验性功能」）
                              / Agent / 通信渠道（+ 开启实验后出现「实验」Tab）多 Tab
-                             （Agent Tab：顶部原理说明 + 「手动集成」参考提示词卡[CLI | MCP 分段切换，MCP 视图附三家 MCP 配置示例片段，绝对路径占位] + 「自动集成」按 Cursor/Claude Code/Codex 分组、每家一个 **CLI | MCP | 未集成** 三态分段控件[一键切换自动卸旧装新；推荐档位带绿色「推荐」标记：Cursor/Claude=CLI、Codex=MCP（Codex 无法延长 CLI 超时）]，下方按当前模式列出产物：CLI=Rule+超时 Hook[Codex 无 Hook 给提示]、MCP=Rule+MCP 配置；**产物过期/缺失时按产物粒度提示**：每个产物行「打开」左侧出现橙色「更新」按钮（仅刷该项，`agent_mode_update_artifact`，与 `needs_update` 同口径的 `artifact_updates` 驱动 `ruleNeedsUpdate/hookNeedsUpdate/mcpNeedsUpdate`），「自动集成」标题下另有跨三家的**待更新总览**（统计各 X 个 Rule/Hook/MCP 需更新 + 「全部更新」一键逐家 `agent_mode_update`），有任意待更新时给「Agents」Tab 标加橙色提示点；文件行「打开」下拉：在 Finder 中显示 / 用默认程序打开）
+                             （Agent Tab：顶部原理说明 + 「手动集成」参考提示词卡[CLI | MCP 分段切换，MCP 视图附三家 MCP 配置示例片段，绝对路径占位] + 「自动集成」按 Cursor/Claude Code/Codex/Grok 分组、每家一个 **CLI | MCP | 未集成** 三态分段控件[一键切换自动卸旧装新；推荐档位带绿色「推荐」标记：Cursor/Claude=CLI、Codex/Grok=MCP（Codex 无法延长 CLI 超时；Grok Composer CLI 自动后台化）。**Grok 仅 MCP | 未集成 两态**（隐藏 CLI 分段）、指令载体为 skill]，下方按当前模式列出产物：CLI=Rule+超时 Hook[Codex 无 Hook 给提示]、MCP=Rule/skill+MCP 配置[Grok=skill]；**产物过期/缺失时按产物粒度提示**：每个产物行「打开」左侧出现橙色「更新」按钮（仅刷该项，`agent_mode_update_artifact`，与 `needs_update` 同口径的 `artifact_updates` 驱动 `ruleNeedsUpdate/hookNeedsUpdate/mcpNeedsUpdate`），「自动集成」标题下另有跨三家的**待更新总览**（统计各 X 个 Rule/Hook/MCP 需更新 + 「全部更新」一键逐家 `agent_mode_update`），有任意待更新时给「Agents」Tab 标加橙色提示点；文件行「打开」下拉：在 Finder 中显示 / 用默认程序打开）
     views/HistoryView.vue    独立历史窗口：顶部项目下拉 + 清空菜单 + 搜索条（关键字空格分割 AND 匹配 message/题干/选中选项/输入回答/文件名，作用于项目筛选结果之上、左列表摘要高亮命中词）；左列表（渠道徽标/相对时间/摘要）右只读详情
     components/HistoryDetail.vue 只读还原一条历史（状态横幅 + 消息/附件 + 每题选项高亮/文本/图片/文件，best-effort）
     lib/ipc.ts               invoke 封装（与后端命令一一对应）
@@ -166,12 +167,15 @@ AskHuman/
         claude_hook.rs       Claude Code Hook：~/.claude/settings.json 注册 PreToolUse(Bash) 脚本 +
                              抬高 env.BASH_MAX_TIMEOUT_MS；命中 AskHuman 时把该次 Bash timeout 设为 24h
                              （幂等纯函数 + 单测；卸载不动 env）；needs_update 同 Cursor（脚本漂移）
-        agent_lifecycle.rs   (实验性) 三家生命周期 hook 安装/卸载/状态：**用户级**、与 timeout hook 独立共存
+        agent_lifecycle.rs   (实验性) 四家生命周期 hook 安装/卸载/状态：**用户级**、与 timeout hook 独立共存
                              （仅增删命令含 `__agent-hook` 标记的条目，保留其它 hook/格式）。Claude
                              `~/.claude/settings.json`(Nested) / Cursor `~/.cursor/hooks.json`(Flat) 用 jsonc CST；
                              Codex `~/.codex/hooks.json` + `config.toml [hooks.state]` 信任哈希用 toml_edit
                              （复刻 codex `version_for_toml`：sha256(紧凑·键排序 JSON(归一 identity))，键
-                             `<hooks.json 绝对路径>:<event_snake>:<g>:<h>`，见 demo codex-trust.cjs）；Codex 无 SessionEnd
+                             `<hooks.json 绝对路径>:<event_snake>:<g>:<h>`，见 demo codex-trust.cjs）；Codex 无 SessionEnd。
+                             Grok `~/.grok/hooks/askhuman-lifecycle.json`(Nested，与 Claude 同构、全局恒受信任无需哈希)，
+                             事件最全（含 StopFailure+SessionEnd）。**坑**：Grok 默认兼容加载 `~/.claude`/`~/.cursor`
+                             的 hook，会与其原生 hook 一起触发 → 靠 reporter 去重（见 agents/report.rs）
         agent_rules.rs       Agent 全局 Rules 安装/更新/卸载/状态/open/reveal：三者均用 AskHuman:begin/end
                              托管区块写入，保留区块外用户内容（Cursor ~/.cursor/rules/askhuman.mdc 另带
                              alwaysApply frontmatter，卸载时区块外仅剩 frontmatter/空白才删整文件；旧版
@@ -179,12 +183,28 @@ AskHuman/
                              Claude ~/.claude/CLAUDE.md、Codex ~/.codex/AGENTS.md。needs_update：区块内
                              正文 ≠ 最新提示词（或旧版无区块）→ 需更新（幂等纯函数 + 单测）。
                              `Variant`(Cli|Mcp) 区分写入 cli_reference/mcp_reference；`installed_variant`
-                             探测已装变体、`needs_update_variant`/`install_variant` 变体感知
+                             探测已装变体、`needs_update_variant`/`install_variant` 变体感知。
+                             `AgentTarget::Grok` 的指令载体**不是** rules 文件而是 skill，故 grok 的所有
+                             查询/安装/卸载/打开一律**委托** `grok_skill`（Variant 对 grok 无意义、恒 MCP 语义）
+        grok_skill.rs        (Grok 专属) 指令载体 `~/.grok/skills/interaction-protocol/SKILL.md`：Composer 不读
+                             全局 `~/.grok/AGENTS.md`，改以 skill 承载交互协议（`prompts::grok_skill_body`，带
+                             frontmatter + `SKILL_MARK` 归属标记）。**skill 定位为「无条件必读的交互协议」**：
+                             frontmatter `description` 是唯一常驻注入 prompt 的字段（skill 正文需判定相关后才加载，
+                             实测两 harness 均如此；`when-to-use` 仅以 `Use when:` 拼在 description 后，无额外价值故不用），
+                             故其第一句无条件要求「每个 session 先读本 skill」，并前置兜底事实「普通输出人类不可见、
+                             只能经 `ask` MCP 工具送达」——消解「需要提问才加载」的自指悖论。正文 = `mcp_reference()`
+                             原样 + 末尾一小段 Grok 说明(单一来源、协议措辞不漂移):只声明一条「联系人类」降级阶梯——
+                             ①优先 `ask` MCP 工具(MCP 优先于 shell/CLI;但其它 shell 调用不受限);②没列出时先用搜索机制找到;
+                             ③仍够不到 MCP 则退回其它提问渠道(如 CLI 版 AskHuman),**绝不**退化成普通输出/直接结束回合。
+                             **刻意不写死具体 harness / 工具名**(Grok 后续会变)。
+                             content/is_installed/needs_update/install/update/uninstall/reveal/open
         mcp_config.rs        MCP server 配置写入（用户级全局，server 名 `askhuman`、args `["mcp"]`）：
                              Cursor ~/.cursor/mcp.json、Claude ~/.claude.json 走 jsonc-parser CST（mcpServers.askhuman）；
-                             Codex ~/.codex/config.toml 走 toml_edit（[mcp_servers.askhuman] + startup_timeout_sec
-                             /tool_timeout_sec）。最小编辑保留用户其它内容/注释/格式；install/update/uninstall/
-                             is_installed/needs_update/display_path/reveal/open（幂等纯函数 + 单测）
+                             Codex ~/.codex/config.toml、Grok ~/.grok/config.toml 走 toml_edit（[mcp_servers.askhuman] +
+                             startup_timeout_sec/tool_timeout_sec；**Grok 额外写 `tool_timeouts = { ask = 86400 }`**
+                             per-tool 超时，对默认模型 Composer 更精准）。TOML 数值比较**容忍整值浮点**（Codex/Grok
+                             CLI 会把 `30`→`30.0`，只按整数比会陷入「永远需更新」死循环）。最小编辑保留用户其它内容/
+                             注释/格式；install/update/uninstall/is_installed/needs_update/display_path/reveal/open（幂等纯函数 + 单测）
         agent_mode.rs        三态模式编排（None|Cli|Mcp 互斥）：Cli=Rule(CLI)+超时 Hook，Mcp=Rule(MCP)+MCP 配置；
                              `current`(**以产物 MCP配置/超时Hook 为首要信号**，互斥且由 set 维护、稳定；产物不
                              明确时才回退 Rule 变体——避免内置提示词改版后已装旧正文失配被错判模式) /
@@ -203,13 +223,17 @@ AskHuman/
                              config_watch.rs(notify 监听 config.json + 去抖)
       update/                版本自更新：mod.rs(检测/比较/Updater/select/check) / direct.rs(GitHub 资产替换) /
                              npm.rs(npm i -g) / notes.rs(release notes 取/聚合) / state.rs(update.json)
-      agents/                (实验性, Unix) Agent 生命周期追踪：mod.rs(AgentKind=claude/codex/cursor +
+      agents/                (实验性, Unix) Agent 生命周期追踪：mod.rs(AgentKind=claude/codex/cursor/grok +
                              LifecycleEvent=session-start/turn-start/turn-end/session-end/activity[回合内
                              Pre/PostToolUse 工具心跳，刷活动时间+保持工作中、不结束回合]) /
-                             detect.rs(按 env 判真实运行家族[Cursor 双触发去重] / session_id 解析 /
-                             walk 进程树定位 agent pid / walk_any_agent[env 判不出时按进程树兜底拿
-                             kind+pid，MCP 模式专用] / kill-0 存活) /
-                             title.rs(三家会话标题解析：cursor meta.json / codex·claude jsonl) /
+                             detect.rs(按 env 判真实运行家族[**Grok 最先判**：它每个 hook 都注入 CLAUDE_PROJECT_DIR
+                             且兼容触发 claude/cursor hook，靠 GROK_HOOK_EVENT/GROK_SESSION_ID 认出；其后 Cursor 双触发去重] /
+                             session_id 解析[grok=GROK_SESSION_ID] / walk 进程树定位 agent pid[grok 按 comm/argv0 含 `grok`] /
+                             walk_any_agent[env 判不出时按进程树兜底拿 kind+pid，MCP 模式专用] / kill-0 存活) /
+                             report.rs(reporter 去重：`running==Grok && intended!=Grok` 一律跳过[只认 grok 原生 hook，
+                             滤掉兼容触发的 claude/cursor]；`intended==Claude && running==Cursor` 跳过[cursor 兼容 claude 双触发]) /
+                             title.rs(四家会话标题解析：cursor meta.json / codex·claude jsonl / grok summary.json 的
+                             session_summary|generated_title，回退 chat_history.jsonl 解包 `<user_query>`) /
                              registry.rs(AgentRecord 注册表：apply_event 推导 工作中/空闲/已结束[Activity
                              状态不变时返回 false 不落盘/广播，避免工具心跳刷屏]、
                              touch_activity[按 session 刷新] / touch_activity_by_pid[MCP 兜底：按 pid 刷新已存在 session]、
@@ -246,27 +270,27 @@ AskHuman/
 - 历史：`open_history`(Unix 路由到 GUI 宿主、带弹窗项目过滤；否则同进程建历史窗)、`history_init`(主题+当前项目)、`get_history`(按项目/全部，倒序)、`get_history_projects`(项目下拉)、`history_count`、`trim_history`(立即裁剪)、`clear_history`(按项目/全部清空)
 - Cursor Hook：`cursor_hook_status`（含 outdated）/ `install` / `update` / `uninstall` / `reveal`
 - Claude Code Hook：`claude_hook_status`（含 outdated）/ `install` / `update` / `uninstall` / `reveal`
-- Agent 全局 Rules：`agent_rule_status`（含 outdated）/ `install` / `update` / `uninstall` / `reveal` / `open`（入参 `agent`：cursor/claude/codex）
+- Agent 全局 Rules：`agent_rule_status`（含 outdated）/ `install` / `update` / `uninstall` / `reveal` / `open`（入参 `agent`：cursor/claude/codex/grok；grok 委托 `grok_skill` 走 skill 文件）
 - Agent 三态模式：`agent_mode_status`（返回 mode + 各产物装没装/需更新 + 路径）/ `agent_mode_set`(none|cli|mcp) / `agent_mode_update`（刷当前模式产物）/ `mcp_config_reveal`·`mcp_config_open`·`agent_hook_reveal`·`agent_hook_open`（定位/打开配置）/ `mcp_command_path`（当前 exe 绝对路径，供手动卡示例填充）
-- MCP 配置：`mcp_config_reveal` / `mcp_config_open`（入参 `agent`：cursor/claude/codex）
-- 超时 Hook 文件：`agent_hook_reveal` / `agent_hook_open`（入参 `agent`；Codex 无 Hook 为 no-op）
+- MCP 配置：`mcp_config_reveal` / `mcp_config_open`（入参 `agent`：cursor/claude/codex/grok）
+- 超时 Hook 文件：`agent_hook_reveal` / `agent_hook_open`（入参 `agent`；Codex/Grok 无 Hook 为 no-op）
 - Telegram：`telegram_test`
 - 钉钉：`dingtalk_test` / `dingtalk_detect_prepare` / `dingtalk_detect_wait`
 - 飞书：`feishu_test` / `feishu_detect_prepare` / `feishu_detect_wait`
 - Slack：`slack_test` / `slack_detect_prepare` / `slack_detect_wait`
 - 自动识别取消：`detect_cancel`（三家共用）。识别「等待」最多阻塞 120s，UI 在识别中显示「取消」按钮调用本命令。机制：`commands.rs` 进程内单槽 `Notify`，`*_detect_wait` 经 `detect_with_cancel` 与 `notified()` 竞速；取消即 drop 掉等待 future——走 daemon 的路径会关掉控制连接，daemon `handle_detect` 用 `select!`（识别 vs `wait_conn_closed`）感知断连即中止并释放临时长连接；进程内回退路径则直接 drop 临时 WS。
 - 版本自更新：`get_app_version` / `update_check`(manual) / `update_get_notes`(aggregate) / `update_apply`(落盘+进度事件) / `update_dismiss` / `popup_update_state`(弹窗拉初值) / `restart_settings`(设置进程重开)
-- (实验性) Agent 生命周期：`agents_init`(状态窗口主题+语言) / `agent_lifecycle_status` / `agent_lifecycle_install` / `agent_lifecycle_uninstall`（入参 `agent`：claude/codex/cursor）/ `agent_force_idle`(按 session_id 手动把卡「工作中」的 agent 置空闲，发 `ClientMsg::AgentForceIdle` 给 daemon)
+- (实验性) Agent 生命周期：`agents_init`(状态窗口主题+语言) / `agent_lifecycle_status` / `agent_lifecycle_install` / `agent_lifecycle_uninstall`（入参 `agent`：claude/codex/cursor/grok）/ `agent_force_idle`(按 session_id 手动把卡「工作中」的 agent 置空闲，发 `ClientMsg::AgentForceIdle` 给 daemon)
 
 窗口拖拽用 `data-tauri-drag-region`（导航栏/底部空白/设置 tab 栏）；置顶用前端 `@tauri-apps/api/window` setAlwaysOnTop。
 文件拖入用 `onDragDropEvent`（原生路径）；`-f` 附件拖出用 `tauri-plugin-drag` 的 `startDrag`。
-来源名（弹窗标题 / Telegram 消息头「Question from {名称}」）的解析优先级为 **自定义环境变量 `ASKHUMAN_ENV_SOURCE_NAME` > 探测到的发起 Agent 展示名（Claude Code/Codex/Cursor）> 默认「the Loop」**（后端 `models::source_name_for_agent`，CLI 构造 `TaskRequest` 时以 `detect_caller_agent` 的家族解析；供渠道消息头 + 历史共用。MCP 模式 env 判不出家族 → 回退「the Loop」）。弹窗导航栏标题旁还显示两枚浅灰圆角胶囊（`.brand-chip`，`pointer-events:auto` 以便 hover/点击，导航栏其余可拖拽；窄窗时标题先截断、胶囊尽量保留完整）：
+来源名（弹窗标题 / Telegram 消息头「Question from {名称}」）的解析优先级为 **自定义环境变量 `ASKHUMAN_ENV_SOURCE_NAME` > 探测到的发起 Agent 展示名（Claude Code/Codex/Cursor/Grok）> 默认「the Loop」**（后端 `models::source_name_for_agent`，CLI 构造 `TaskRequest` 时以 `detect_caller_agent` 的家族解析；供渠道消息头 + 历史共用。MCP 模式 env 判不出家族 → 回退「the Loop」）。弹窗导航栏标题旁还显示两枚浅灰圆角胶囊（`.brand-chip`，`pointer-events:auto` 以便 hover/点击，导航栏其余可拖拽；窄窗时标题先截断、胶囊尽量保留完整）：
 
 > 标题「胶囊内联」（前端 `PopupView`）：当探测到 agent 且未定制来源名时（`sourceName` 等于默认或等于 `agentLabel`），把标题里的来源文字替换为 **agent 胶囊本身**——按 `popup.messageFrom/questionFrom` 的 `{source}` 占位把文案切成前后两段，胶囊（agent + workspace）夹在中间，故中文渲染为「来自 [Cursor] [Project] 的消息」、英文为「Message from [Cursor] [Project]」。`.brand.inline` 下截断优先级为 **后缀 > 前缀 > 项目名**（agent 品牌名不缩，靠 flex-shrink 权重 1000≫50≫1 近似分级）。未探测到 agent → 仍「Message from the Loop」；设了自定义来源名 → 标题用自定义名文本、胶囊照旧跟随其后。
 
 > 多问题纵向列表（前端 `PopupView`，设计 `docs/specs/multi-question-vertical.md` / 计划 `docs/plans/multi-question-vertical.md`；**实验开关门控**）：仅当 `experimental.vertical_questions`（`config.rs`→`PopupInit.vertical_questions`→前端 `verticalEnabled`，设置页「实验」Tab，默认关）开 **且** n>1 时启用，即 `verticalMode = verticalEnabled && isMulti`；关或单题走旧版「一次一题 + 上/下一步左右滑动」（`.question-pane` + `q-slide-*` 过渡 + `qHeaderRef`/`goToSeq`/`onQuestionEntered`/`allViewed`）。纵向模式：n>1 时不再「一次一题 + 左右切换」，而是把所有题用 `v-for` 纵向平铺成卡片（`.q-card`，共享 Message/附件/工具条仍在最上方）。**当前题(active)** 指针 `current` 决定高亮 + ⌘1–9/语音目标：滚动时取「最后一个完整可见的题」（无完整可见则取首个与视口相交者，兼容超长题；`updateActiveFromScroll` 节流 + rAF），点击卡片(`@mousedown`)/聚焦输入(`onTextareaFocus`)/键盘导航(`setActive`)也切 active；键盘/按钮切换后 450ms 内锁定不被滚动回改（`activeLockUntil`）。`.q-card.active` 用 `::before` 画左侧 accent 细条 + 极淡背景（`inset` 横向铺到 `.content` 内边距边缘，纯视觉、不改排版无抖动）。**「已看到」** `visited[i]`：每题底部哨兵 `.q-sentinel` 进视口（`IntersectionObserver`，root=`.content`）或曾被设为 active 即置真；多问题发送按钮仅在最后一题已看到后出现（`lastSeen`）。**导航**：上一个/下一个 + ⌘[ / ⌘] → `goRel(±1)` 相对滚动定位（`scrollIntoView({block:"nearest"})`，不强制贴顶）；⌘↵ 非末题前往下一题、末题提交；⌘1–9 切 active 题选项。**折叠输入**：多问题补充输入框默认 1 行（`.textarea.collapsed`，scoped 提升特异性覆盖全局 `.textarea`），`expandedQ(i)` 在聚焦或有内容时还原多行高度。**每题作答状态**按索引存于 `chosenByQ/inputByQ/imagesByQ/replyFilesByQ`；DOM 引用按索引登记于 `inputRefs/cardRefs/sentinelRefs/thumbsRefs`（函数 ref），`inputRef`=active 题 textarea 供语音/autoGrow 复用。**图片归属**：拖放按原生落点命中的卡片（`questionAtPoint`，physical 坐标除 DPR → `elementFromPoint` 找 `.q-card[data-q-index]`）；粘贴归 `focusedQ ?? current`。单问题(n=1)恒 1 卡片、无高亮/不折叠/无哨兵，外观与旧版一致。
 
-- **来源 agent badge**（在 workspace 之前）：取 `AppState.agent_kind`（提问时 CLI `detect_caller_agent` 探到的家族，随 `TaskRequest→ShowPayload→AppState` 贯穿），前端显示本地化家族名（Claude Code/Codex/Cursor）；识别不到则不显示。若该 agent 终端可激活 tab（`PopupInit.agentTerminal` = `terminal_kind(agent_pid)` ∈ 共享集 `lib/terminals.ts`）则 badge 变可点按钮 + ↗ 箭头，点击 → `focus_agent_terminal(agentPid)`。
+- **来源 agent badge**（在 workspace 之前）：取 `AppState.agent_kind`（提问时 CLI `detect_caller_agent` 探到的家族，随 `TaskRequest→ShowPayload→AppState` 贯穿），前端显示本地化家族名（Claude Code/Codex/Cursor/Grok）；识别不到则不显示。若该 agent 终端可激活 tab（`PopupInit.agentTerminal` = `terminal_kind(agent_pid)` ∈ 共享集 `lib/terminals.ts`）则 badge 变可点按钮 + ↗ 箭头，点击 → `focus_agent_terminal(agentPid)`。
 - **来源 workspace**：取 `AppState.project`（git 仓库根 / 回退 cwd 绝对路径）经 `project::display_name` 得目录名，`title` hover 出完整路径；带 ↗ 箭头、整块可点 → `open_path(项目路径)` 在文件管理器打开。`project` 为空则隐藏。
 
 以上字段经 `PopupInit{project, projectName, agentKind, agentPid, agentTerminal}` 上送（`commands::popup_init`，终端类型在弹窗进程对给定 pid 现取）。
@@ -310,8 +334,8 @@ AskHuman/
 
 > 需求 `docs/specs/agent-lifecycle-tracking.md` + 计划 `docs/plans/agent-lifecycle-tracking.md`（基于 `demo/agent-lifecycle/FINDINGS.md` 三家实测）。**独立于** IM 渠道激活，只追踪、不做 attach/激活。
 
-- **开关入口**：设置「通用」底部隐蔽开关「实验性功能」(`config.experimental.enabled`，默认关、Windows 不显示) → 出现「实验」Tab，内含 Claude/Codex/Cursor 三家「生命周期追踪」开关；开/关＝安装/卸载**用户级** lifecycle hook（`integrations/agent_lifecycle.rs`，开关真值实时查 `agent_lifecycle_status`，与既有 timeout hook 互不影响）。
-- **事件采集**：hook 命令统一为 `AskHuman __agent-hook <agent> <event>`（`agents/report.rs`）；事件 session-start/turn-start/turn-end/session-end + **activity**（回合内 Pre/PostToolUse 工具心跳，三家都装）。Claude 另加 **StopFailure→turn-end**（API 错误结束回合时官方文档明确 Stop 不触发，靠它补结束）；Codex 无 session-end / 无 StopFailure。reporter 按 env 判真实运行家族做**去重**（Cursor 兼容加载 `~/.claude` 致每事件双触发，env 有 `CURSOR_*`→只认 cursor、跳过 claude 那次），并 walk 进程树定位真实 agent pid、解析 session_id（env 专用变量优先，回退 stdin JSON）。
+- **开关入口**：设置「通用」底部隐蔽开关「实验性功能」(`config.experimental.enabled`，默认关、Windows 不显示) → 出现「实验」Tab，内含 Claude/Codex/Cursor/Grok 四家「生命周期追踪」开关；开/关＝安装/卸载**用户级** lifecycle hook（`integrations/agent_lifecycle.rs`，开关真值实时查 `agent_lifecycle_status`，与既有 timeout hook 互不影响）。
+- **事件采集**：hook 命令统一为 `AskHuman __agent-hook <agent> <event>`（`agents/report.rs`）；事件 session-start/turn-start/turn-end/session-end + **activity**（回合内 Pre/PostToolUse 工具心跳，四家都装）。Claude/Grok 另加 **StopFailure→turn-end**（API 错误结束回合时官方文档明确 Stop 不触发，靠它补结束）；Codex 无 session-end / 无 StopFailure。reporter 按 env 判真实运行家族做**去重**：Cursor 兼容加载 `~/.claude` 致每事件双触发，env 有 `CURSOR_*`→只认 cursor、跳过 claude 那次；**Grok 兼容加载 `~/.claude`/`~/.cursor` hook**，`running==Grok` 时凡 `intended!=Grok` 一律跳过（只认 grok 原生 hook）。并 walk 进程树定位真实 agent pid、解析 session_id（env 专用变量优先，回退 stdin JSON）。
 - **状态推导**：daemon 内 `AgentRegistry`（`agents/registry.rs`）以 **session_id 为身份**、pid 仅判存活。turn-start/activity 切「工作中」、turn-end 切「空闲」；**进程存活轮询（15s）是权威的「已结束」判据**（关窗/`kill -9` 时事件全丢，靠它）；1h TTL 兜底（任何 hook 事件或 `AskHuman` 提问会刷新**对应 session** 的活动时间）。ended 最多留 10 条。状态持久化 `~/.askhuman/agents.json`，daemon 换新/重启后重载并 kill-0 复核。
 - **「工作中」兜底超时（30min）**：Claude **用户打断回合**时没有任何 hook 触发（官方确认 Stop/Notification 均不来），transcript 也只在完成时整条原子写入、不能当心跳——故无法即时检测打断。兜底：daemon 每 15s tick 跑 `working_backstop_sweep(WORKING_BACKSTOP_SECS=30min)`，把「工作中且距上次活动超 30min」的记录降级为空闲（活动时间由 turn-start/activity[Pre/PostToolUse]/提问刷新，故执行长编译等工具的合法长回合不会被误判）。**在途 AskHuman 豁免**：tick 先用 `RequestRegistry::in_flight_agent_pids()`（在途请求关联的 agent pid）经 `refresh_by_pids` 刷新活动，使「等待人类回答」期间永不被降级。打断后走开 → 30min 内自愈；下次提问/关窗也会即时纠正。
 - **hook 升级迁移**：版本升级新增事件后，已开启的用户**无需手动关开开关**——daemon 启动时 `agent_lifecycle::migrate_outdated()` 对**已安装但过期**的家族幂等重装（仅改含 `__agent-hook` 标记的条目）；「实验」Tab 每家额外提供一键『更新』按钮（outdated 时显露，仿 rules/hook 卡）。
@@ -345,7 +369,7 @@ AskHuman/
 - **复用而非重写**：渠道连通性 `test` / userId·openId 自动识别 `detect` 直接调 `commands.rs` 既有 `*_test`/`*_detect_prepare`/`*_detect_wait`（参数结构体字段已 `pub`，密钥经 `fallback_secret` 回退已存值）；配置读写走 `config.rs::{load,load_without_secrets,save}`（save 自动把密钥写钥匙串、文件 0600）；集成走 `integrations::{agent_rules,cursor_hook,claude_hook,agent_lifecycle,mcp_config,agent_mode}`；agent 状态走 daemon `AgentsSubscribe`/`AgentsState`。落盘后 daemon `config_watch` 自动热重载。
 - **`channel`**（`channel_cmd.rs`，name ∈ telegram|dingding|feishu|slack）：`list [--json]`（启用/配置齐全/已连接；daemon 未运行时连接态文本显 `—`、JSON 为 `null`）；`set <name>` 二合一——**终端且无 flag → 交互向导**（逐项提示、密钥隐藏输入、留空保留）、**带 flag → 非交互脚本**（`--enable/--disable` + 各非密钥字段 kebab flag）；`enable|disable`；`test`；`detect [--save]`（prepare 取识别码 → 提示发给 bot → wait 经 daemon 单连接捕获 → 可保存；telegram 无 detect）。
 - **密钥输入（D4，脚本安全）**：仅 `--<field>-env <VAR>` / `--<field>-file <path>` / `--<field>-stdin`（或值 `-`）；交互时隐藏输入（Unix termios 关 echo）；**密钥明文不进 argv**（避免泄漏 shell 历史 / `ps`）。
-- **`agents`**（`agents_cmd.rs`，agent ∈ cursor|claude|codex）：`monitor [--json|--text]`（见上节）；`mode <agent> [none|cli|mcp]`（省略模式则查询当前模式 + 是否需更新，带模式则一键切换、复用 `agent_mode::set` 自动卸旧装新）；`show [<agent>]`（打印 `prompts::cli_reference()` 手动集成提示词 + 各 agent 粘贴位置 + 当前模式/rules/hook/mcp/lifecycle 安装状态）；`install/uninstall/update <agent>` **必须显式** `--rules`/`--hook`/`--mcp`/`--lifecycle`（无默认捆绑，D6；`--hook` 仅 cursor/claude，codex 跳过；`--mcp` 写 MCP server 配置；`--lifecycle` 实验性；lifecycle 无独立 update→重装即刷新）。
+- **`agents`**（`agents_cmd.rs`，agent ∈ cursor|claude|codex|grok）：`monitor [--json|--text]`（见上节）；`mode <agent> [none|cli|mcp]`（省略模式则查询当前模式 + 是否需更新，带模式则一键切换、复用 `agent_mode::set` 自动卸旧装新；**grok 仅 none|mcp，请求 cli 报错**）；`show [<agent>]`（打印手动集成参考提示词——单查 grok 时打印 `grok_skill_body`、否则 `cli_reference()`——+ 各 agent 粘贴位置 + 当前模式/rules|skill/hook/mcp/lifecycle 安装状态）；`install/uninstall/update <agent>` **必须显式** `--rules`/`--hook`/`--mcp`/`--lifecycle`（无默认捆绑，D6；`--rules` 对 grok = 安装 skill；`--hook` 仅 cursor/claude，codex/grok 跳过；`--mcp` 写 MCP server 配置；`--lifecycle` 实验性；lifecycle 无独立 update→重装即刷新）。
 - **`config`**（`config_cmd.rs`，兜底）：`show [--json]`（密钥脱敏 `●●●`）/`get`/`set`/`unset`/`path`，点号 camelCase 键。`set` 非密钥键按目标 JSON 类型强制（bool/数字/字符串/枚举）→ 反序列化校验 → save；**密钥键**（5 个，`cfgio::SECRET_KEYS`，与 `secrets::ACCOUNT_*` 一致）自动路由进钥匙串，值仍只从 env/file/stdin 取。`unset` 重置默认（密钥 → `secrets::delete`）。
 - **`doctor [--json]`**（`doctor.rs`）：一屏体检 daemon（运行/版本/在途/IM 连接）+ 各渠道（启用·齐全·连接）+ 各 agent 集成（当前 mode + rules·hook·mcp·lifecycle 装没装/需更新）。
 
@@ -358,9 +382,10 @@ AskHuman/
 - **MCP 模式下的生命周期识别（env 清空 → 退用进程树 pid）**：agent 启动 STDIO MCP server 时会 `env_clear()`（实测 Codex：`rmcp-client` 仅注入 `HOME/PATH/...` 约 10 个系统变量），故 ask 子进程**看不到任何 `CODEX_*`/`CURSOR_*`/`CLAUDE*` 变量**——既判不出家族、也**拿不到会话 ID**（`CODEX_THREAD_ID` 本就只注入 codex 的 shell 工具子进程，连 codex 自身进程 env 都没有，配置 `env` 转发也无济于事）。兜底：`detect::walk_any_agent_from_self()` 向上 walk 进程树定位最近的 agent 祖先 → 拿到 `(kind, pid)`（无 session_id，pid 是当次现取、真实存活）；daemon `handle_submit` 据此走 `AgentRegistry::touch_activity_by_pid(kind, pid)`：按 `(kind,pid)` 匹配**已存在**的 session 刷新 `last_activity`，**只更新、绝不新建**（pid 真实存活 → 无幽灵会话）。命中前提是该会话已被 lifecycle hook 追踪（hook 的 turn 事件把同一 codex pid 写进 registry）。三家通用（仅 `from_mcp` 启用兜底，零影响普通 CLI 调用）。
 - **入参（精简）**：`ask` 仅暴露 `message`（**恒按 Markdown 渲染**）/`questions[{question, options[{text, recommended}]}]`/`files[]`；不暴露 `markdown`（恒 on）、`single`、`selectOnly`（属脚本/纯文本场景）。
 - **输出**：`ask` 声明 input/output schema；子进程 JSON 解析为 `AskResult`（**剔除脚本专用的 `selected_indices`**）→ 返回 `structuredContent`（结构化 JSON）+ `content`（序列化 JSON 文本 + 人类回复中的图片读回转 `ImageContent`）。**取消时顶层带 `status` 引导文案**（要求模型重新确认直到用户明确答复，不得当作放行）；该字段由 CLI `--output json` 顶层产出（取消路径才有），薄壳原样透传，脚本侧亦受益。
-- **三态集成**：每家 agent 的「自动集成」改为 **None / Cli / Mcp 互斥三态**（`integrations/agent_mode.rs`）。Cli 绑定 Rule(CLI 版)+超时 Hook；Mcp 绑定 Rule(MCP 版)+MCP 配置（`integrations/mcp_config.rs` 写用户级全局：Cursor `~/.cursor/mcp.json`、Claude `~/.claude.json`、Codex `~/.codex/config.toml`，最小编辑保留用户内容）。提示词分 `prompts::{cli_reference,mcp_reference}` 两版。lifecycle hook（turn 追踪）与三态正交，独立开关。
+- **三态集成**：每家 agent 的「自动集成」为 **None / Cli / Mcp 互斥三态**（`integrations/agent_mode.rs`）。Cli 绑定 Rule(CLI 版)+超时 Hook；Mcp 绑定 Rule(MCP 版)+MCP 配置（`integrations/mcp_config.rs` 写用户级全局：Cursor `~/.cursor/mcp.json`、Claude `~/.claude.json`、Codex `~/.codex/config.toml`，最小编辑保留用户内容）。提示词分 `prompts::{cli_reference,mcp_reference}` 两版。lifecycle hook（turn 追踪）与三态正交，独立开关。**Grok 例外：仅 None|Mcp 两态**（Composer 的 CLI 会自动后台化、超时不可靠 → 无 Cli 档、无超时 Hook；`set(Grok, Cli)` 直接报错），其 Mcp 产物 = skill（`grok_skill`，非 rules 文件）+ `~/.grok/config.toml`。
 - **MCP 工具超时**（长等待不被取消，各家机制不同）：
   - **Codex**：写 `tool_timeout_sec=86400`(秒) + `startup_timeout_sec=30`。✓
+  - **Grok**：写 `tool_timeout_sec=86400` + `startup_timeout_sec=30` + **`tool_timeouts = { ask = 86400 }`**（per-tool，对默认模型 Composer 更精准）。✓ live 验证 `grok inspect` 确认 `askhuman(stdio) config` 已加载。
   - **Claude Code（CLI）**：默认 60s（MCP TS SDK `DEFAULT_REQUEST_TIMEOUT_MSEC`），故在 `mcpServers.askhuman` 写 `timeout=86400000`(**毫秒**，24h) 覆盖默认（`CLAUDE_TOOL_TIMEOUT_MS`）；否则等待人类超 60s 会被 `-32001` 取消。`needs_update` 一并校验该值（旧条目无 timeout → 提示更新）。
   - **Cursor**：MCP 工具/elicitation 超时 ~60s **硬编码、不可配置**，无法支撑长等待——故不写 `timeout`，且 Cursor 推荐用 CLI(+Hook) 模式。
 - **入口**：设置页 Agent Tab 三态分段控件 + 手动集成卡的 CLI/MCP 切换；headless 走 `agents mode` / `agents install --mcp` / `doctor`（见「CLI 配置与 Agent 集成」节）。手动集成卡的 MCP 配置示例（JSON/TOML）**直接填入当前可执行文件绝对路径**（`mcp_command_path` 命令读 `current_exe()`，取不到时退回占位符）并各带**拷贝按钮**，免用户手改路径。JSON 示例含 `timeout: 86400000` 并注明「仅 Claude 需要」（Cursor 忽略该字段）。

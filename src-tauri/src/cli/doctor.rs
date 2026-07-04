@@ -10,7 +10,7 @@ use crate::integrations::{
     agent_lifecycle, agent_mode, agent_rules, claude_hook, cursor_hook, mcp_config,
 };
 
-const AGENTS: [&str; 3] = ["cursor", "claude", "codex"];
+const AGENTS: [&str; 4] = ["cursor", "claude", "codex", "grok"];
 
 pub fn dispatch(args: &[String], lang: Lang) {
     let json = args.iter().any(|a| a == "--json");
@@ -114,7 +114,7 @@ fn render_text(cfg: &AppConfig, status: &Option<crate::ipc::StatusInfo>, lang: L
                 claude_hook::needs_update(),
                 lang,
             ),
-            AgentTarget::Codex => cfgio::t(lang, "n/a", "—"),
+            AgentTarget::Codex | AgentTarget::Grok => cfgio::t(lang, "n/a", "—"),
         };
         let mcp = state_label(
             mcp_config::is_installed(target),
@@ -194,7 +194,7 @@ fn render_json(cfg: &AppConfig, status: &Option<crate::ipc::StatusInfo>) -> Stri
             let hook = match target {
                 AgentTarget::Cursor => Some((cursor_hook::is_installed(), cursor_hook::needs_update())),
                 AgentTarget::ClaudeCode => Some((claude_hook::is_installed(), claude_hook::needs_update())),
-                AgentTarget::Codex => None,
+                AgentTarget::Codex | AgentTarget::Grok => None,
             };
             let lc = agent_lifecycle::status(kind);
             serde_json::json!({

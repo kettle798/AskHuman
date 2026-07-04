@@ -77,7 +77,7 @@ function toggleCollapse(g: Group): void {
 }
 
 // 类型分组顺序。
-const KIND_ORDER: AgentKind[] = ["claude", "codex", "cursor"];
+const KIND_ORDER: AgentKind[] = ["claude", "codex", "cursor", "grok"];
 // 状态分组顺序（运行中置顶）。
 const STATE_ORDER: AgentRunState[] = ["working", "idle", "ended"];
 
