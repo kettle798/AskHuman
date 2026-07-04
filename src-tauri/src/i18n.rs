@@ -340,8 +340,8 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         // 反激活提示（活跃槽切到别处时发给旧渠道；{target} = 新渠道展示名，如「弹窗」「钉钉」）。
         "autoChannel.deactivated" => pick(
             lang,
-            "Questions have moved to {target} and will no longer be sent here. Send /here to switch back.",
-            "后续提问已切换到「{target}」，将不在此发送。发送 /here 可切回此渠道。",
+            "Questions have moved to {target} and will no longer be sent here. Send any message to switch back.",
+            "后续提问已切换到「{target}」，将不在此发送。发送任何消息即可切回此渠道。",
         ),
         // /status 文本分组标题。
         "autoChannel.statusWorking" => pick(lang, "Working", "工作中"),

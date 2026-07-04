@@ -161,7 +161,7 @@ pub fn activated_receipt(pending: usize, lang: Lang) -> String {
 }
 
 /// 反激活提示：活跃槽切到别处时发给**旧**渠道，明确告知切到了哪个渠道（`new_id`，含 "popup"），
-/// 后续提问不再走此渠道、可发 `/here` 重新激活。
+/// 后续提问不再走此渠道；发任意消息（自动激活开时切槽即可）即可重新激活。
 pub fn deactivated_receipt(new_id: &str, lang: Lang) -> String {
     i18n::tr(lang, "autoChannel.deactivated").replace("{target}", &channel_label(new_id, lang))
 }
