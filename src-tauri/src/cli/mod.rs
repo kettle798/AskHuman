@@ -3,6 +3,7 @@ pub mod args;
 pub mod cfgio;
 pub mod channel_cmd;
 pub mod config_cmd;
+pub mod debug_cmd;
 pub mod doctor;
 pub mod file_attachment;
 pub mod help;
@@ -182,6 +183,11 @@ pub fn dispatch() {
         // 一屏体检：daemon / 渠道 / 集成。
         "doctor" => {
             doctor::dispatch(&argv[2..], lang);
+            exit(0);
+        }
+        // 隐藏调试子命令组（不进 help）：如钉钉 watch PoC 探针 `debug dd-watch-poc`。
+        "debug" => {
+            debug_cmd::dispatch(&argv[2..], lang);
             exit(0);
         }
         // 第一题既可用位置参数，也可用 `-q`/`--question`；提问相关 flag 一律进入提问分支，

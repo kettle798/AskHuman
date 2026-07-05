@@ -15,6 +15,7 @@ pub mod blockkit;
 pub mod client;
 pub mod markdown;
 pub mod router;
+pub mod watch;
 pub mod ws;
 
 use std::fmt;

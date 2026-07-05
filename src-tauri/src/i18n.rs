@@ -439,12 +439,12 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "autoChannel.detectFieldUserId" => pick(lang, "User ID", "用户 ID"),
         "autoChannel.detectFieldOpenId" => pick(lang, "OpenID", "用户 OpenID"),
 
-        // —— /watch 实时关注（spec docs/specs/im-watch.md，P1 仅飞书）——
-        // 渠道门控：非飞书渠道收到 watch 命令。
+        // —— /watch 实时关注（spec docs/specs/im-watch.md；飞书/Telegram/Slack）——
+        // 渠道门控：不支持的渠道（如钉钉）收到 watch 命令。
         "watch.unsupported" => pick(
             lang,
-            "Live watch is currently only available on Feishu.",
-            "「实时关注」目前仅支持飞书渠道。",
+            "Live watch is currently available on Feishu, Telegram and Slack.",
+            "「实时关注」目前支持飞书、Telegram、Slack 渠道。",
         ),
         // 关注上限。
         "watch.limit" => pick(

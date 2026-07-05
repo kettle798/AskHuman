@@ -366,7 +366,7 @@ async fn finalize_card(
     };
     let html = compose_html(header, &body, is_markdown);
     if client
-        .edit_message_text(card_message_id, &html, Some("HTML"))
+        .edit_message_text(card_message_id, &html, Some("HTML"), None)
         .await
         .is_err()
     {
@@ -381,7 +381,7 @@ async fn finalize_card(
         }
         plain.push_str(status);
         let _ = client
-            .edit_message_text(card_message_id, &plain, None)
+            .edit_message_text(card_message_id, &plain, None, None)
             .await;
     }
 }

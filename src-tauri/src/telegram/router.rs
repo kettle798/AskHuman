@@ -134,6 +134,24 @@ impl RoutedTg {
             .insert(self.route_id, ActiveInfo { chat_id, seq: s });
     }
 
+    /// 仅登记卡片精确路由（callback），**不**认领该 chat 的自由文字。
+    /// 供 watch 卡使用：watch 卡只收按钮回调，不得抢走提问卡的文字答案。
+    pub fn set_card_route(&self, card_message_id: i64) {
+        self.routes
+            .lock()
+            .unwrap()
+            .cards
+            .insert(card_message_id, self.route_id);
+    }
+
+    /// 注销一条卡片精确路由（仅当归属仍是自己时）。
+    pub fn clear_card_route(&self, card_message_id: i64) {
+        let mut r = self.routes.lock().unwrap();
+        if r.cards.get(&card_message_id) == Some(&self.route_id) {
+            r.cards.remove(&card_message_id);
+        }
+    }
+
     /// 取消本会话的活动登记（仅当卡片归属仍是自己时才清除该卡片路由）。
     pub fn clear_active(&self, card_message_id: i64) {
         let mut r = self.routes.lock().unwrap();

@@ -2,6 +2,7 @@
 
 pub mod markdown;
 pub mod router;
+pub mod watch;
 
 use serde_json::{json, Value};
 use std::fmt;
@@ -231,13 +232,15 @@ impl TelegramClient {
             .await;
     }
 
-    /// 编辑消息文本（用于卡片终态）。不传 `reply_markup` 即移除按钮。
+    /// 编辑消息文本（卡片终态 / watch 卡就地更新）。`editMessageText` 会整体替换消息：
+    /// 不传 `reply_markup` 即移除按钮（终态用），传入则保留/替换按钮（watch 活动态用）。
     /// 返回 `Err` 表示服务端拒绝（如 HTML 解析失败），调用方可据此回退纯文本。
     pub async fn edit_message_text(
         &self,
         message_id: i64,
         text: &str,
         parse_mode: Option<&str>,
+        reply_markup: Option<Value>,
     ) -> Result<(), TelegramError> {
         let mut params = serde_json::Map::new();
         params.insert("chat_id".into(), json!(self.chat_id));
@@ -245,6 +248,9 @@ impl TelegramClient {
         params.insert("text".into(), json!(text));
         if let Some(pm) = parse_mode {
             params.insert("parse_mode".into(), json!(pm));
+        }
+        if let Some(rm) = reply_markup {
+            params.insert("reply_markup".into(), rm);
         }
         self.call("editMessageText", Value::Object(params))
             .await

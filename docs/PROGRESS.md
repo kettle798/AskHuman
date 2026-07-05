@@ -2,17 +2,17 @@
 
 按具体任务 / 需求记录待办与当前进展。任务 / 需求完成后删除其 section（历史留在 git）。
 
-## 【进行中】/watch 多渠道扩展：M0 公共重构 + Telegram + Slack
+## 待开工：/watch 多渠道扩展：M4 钉钉全量 + 提问投放给 watch 渠道
 
-P1 飞书已完成入库（`docs/specs/im-watch.md`）。多渠道计划 `docs/plans/im-watch-channels.md`
-已经 AskHuman 评审定案：顺序 Telegram → Slack → 钉钉 PoC；TG/Slack 的 TODO 仅摘要行；
-钉钉 PoC 方案（模板 + 探针命令 `debug dd-watch-poc` + 高频更新实测）已认可。
+M0 公共重构 + M1 Telegram + M2 Slack + **M3 钉钉 PoC 已全部落地并验收**（PoC 结论 GO：
+2s×150 次更新零频控 p50 ≈60–95ms、按钮回调/终态/折叠面板全通过；详见
+`docs/plans/im-watch-channels.md` §4 结论、渠道差异表 `docs/specs/im-watch.md`）。
 
-**当前任务**（用户指示：TG + Slack 都做完，到钉钉 PoC 时再联系）：
-1. M0 公共重构（R1 帧中立化 / R2 WatchTransport / R3 订阅与扰动按渠道 / R4 门控 / R5 频控参数化），飞书行为不变；
-2. M1 Telegram（HTML 渲染 + inline keyboard + 跟底 + 终态无按钮）；
-3. M2 Slack（新增 chat.update + Block Kit 卡 + interactive 路由；每卡 2s 频控）。
-完成后 AskHuman 验收 TG/Slack，然后进入钉钉 PoC（联系用户建模板）。
+**M4 范围（用户定案，计划 §6/§7）**：
+1. 钉钉 watch 接入引擎：`channel_supported` 放行 dingding、`WatchClient::DingTalk`、
+   `ensure_watch_route_for` 接共享 DdRouter（Reader 需放行 watch actionId 转发，现被空 ACK 吞）；
+2. **提问投放给 watch 渠道**：autoActivation 开启时投放渠道 = 最后活跃渠道 ∪ 正在 watch
+   该 agent 的渠道，收尾仍走既有多渠道抢答逻辑（不动抢答机制）。
 
 ## 待验收：守护进程「保活模式」（实验 Tab）
 

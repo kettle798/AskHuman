@@ -16,6 +16,7 @@ pub mod router;
 pub mod stream;
 pub mod textfile;
 pub mod token;
+pub mod watch;
 
 use std::fmt;
 

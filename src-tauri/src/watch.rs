@@ -1,9 +1,10 @@
 //! `/watch` 实时关注（spec `docs/specs/im-watch.md`）：与传输无关的纯逻辑。
 //!
-//! 一次关注 = 一张 IM「实时状态卡」，daemon 引擎按签名变化就地编辑（P1 仅飞书）。
-//! 本模块提供：订阅持久化（`~/.askhuman/state/watch.json`）、由注册表快照记录构建
-//! 渲染「帧」（`WatchFrame`）、帧签名（变化才编辑）、卡片视图文案组装（本地化在此完成，
-//! `feishu::card::build_watch_card` 只消费成品字符串）、本地时区绝对时刻格式化。
+//! 一次关注 = 一张 IM「实时状态卡」，daemon 引擎按签名变化就地编辑（飞书 / Telegram / Slack；
+//! 钉钉待 PoC）。本模块提供：订阅持久化（`~/.askhuman/state/watch.json`）、由注册表快照记录
+//! 构建**结构化**渲染「帧」（`WatchFrame`，不含任何渠道标记语言）、帧签名（变化才编辑，跨渠道
+//! 一致）、飞书卡片视图文案组装（`card_view`；Telegram/Slack 的渲染在各自渠道模块）、本地时区
+//! 绝对时刻格式化。
 
 use crate::autochannel;
 use crate::i18n::{self, Lang};
@@ -14,11 +15,16 @@ use serde_json::Value;
 /// 每渠道关注上限。
 pub const MAX_WATCHES: usize = 5;
 
+/// 渠道是否支持 /watch（就地编辑 + 按钮回调都可用）。钉钉待 PoC（`docs/plans/im-watch-channels.md`）。
+pub fn channel_supported(channel_id: &str) -> bool {
+    matches!(channel_id, "feishu" | "telegram" | "slack")
+}
+
 /// 持久化的一条关注（跨 daemon 重启恢复后继续编辑同一张卡）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedWatch {
-    /// 渠道 id（P1 恒 "feishu"）。
+    /// 渠道 id（feishu / telegram / slack）。
     pub channel: String,
     /// 被关注 agent 的 session_id（身份键，跨重启稳定；seq 编号不跨重启）。
     pub session_id: String,
@@ -80,7 +86,9 @@ pub enum CardMode {
     Final(FinalKind),
 }
 
-/// 一帧渲染数据（由注册表快照记录 + 等待标志构建）。签名不含渲染时刻，故内容不变不编辑。
+/// 一帧渲染数据（由注册表快照记录 + 等待标志构建）。**结构化、无渠道标记语言**：
+/// 各渠道渲染器（飞书 `card_view` / Telegram / Slack）各自消费。签名不含渲染时刻，
+/// 故内容不变不编辑。
 #[derive(Debug, Clone, PartialEq)]
 pub struct WatchFrame {
     /// 展示编号（当前 daemon 生命周期内稳定；重启后重解析）。
@@ -94,14 +102,12 @@ pub struct WatchFrame {
     pub phase: WatchPhase,
     /// 最后一段助手文字（transcript 尾部，已截断）。
     pub text: Option<String>,
-    /// 已渲染的足迹时间线（≤3 行，旧→新；`● **运行命令**: *cargo test*`）。
-    pub step_lines: Vec<String>,
+    /// 足迹时间线（≤3 步，旧→新；最后一段文字之后的调用）。
+    pub steps: Vec<crate::agents::activity::ToolStep>,
     /// 文字之后被挤出时间线的更早调用数（>0 时在时间线上方标注「… 已省略 N 步」）。
     pub steps_omitted: usize,
-    /// TODO 摘要（`📋 TODO 4/7 · 当前：xxx`；agent 未用 todo 功能则 None）——折叠面板标题。
-    pub todo_summary: Option<String>,
-    /// 已渲染的 TODO 清单全行（折叠面板内容，与摘要同生同灭）。
-    pub todo_lines: Vec<String>,
+    /// 当前 TODO 清单（agent 未用 todo 功能则空）。
+    pub todos: Vec<crate::agents::activity::TodoItem>,
     /// 本回合开始时刻（Unix 秒；无则 None）。**不入签名**（时长走字不应触发编辑）。
     pub turn_started_at: Option<u64>,
     /// 活动时刻（Unix 秒；进「最近动态」标签）。
@@ -110,7 +116,7 @@ pub struct WatchFrame {
 
 /// 由注册表快照的一条记录构建帧。`rec=None`（记录已彻底消失）→ 视为已结束的最小帧。
 /// `waiting`：该 agent 是否有在途 AskHuman 提问（覆盖 工作中/空闲）。
-pub fn build_frame(seq: u64, rec: Option<&Value>, waiting: bool, lang: Lang) -> WatchFrame {
+pub fn build_frame(seq: u64, rec: Option<&Value>, waiting: bool) -> WatchFrame {
     let Some(rec) = rec else {
         return WatchFrame {
             seq,
@@ -119,10 +125,9 @@ pub fn build_frame(seq: u64, rec: Option<&Value>, waiting: bool, lang: Lang) -> 
             project: None,
             phase: WatchPhase::Ended,
             text: None,
-            step_lines: Vec::new(),
+            steps: Vec::new(),
             steps_omitted: 0,
-            todo_summary: None,
-            todo_lines: Vec::new(),
+            todos: Vec::new(),
             turn_started_at: None,
             at: None,
         };
@@ -158,54 +163,54 @@ pub fn build_frame(seq: u64, rec: Option<&Value>, waiting: bool, lang: Lang) -> 
         project,
         phase,
         text: parts.text,
-        step_lines: parts
-            .steps
-            .iter()
-            .map(|s| render_step_feishu(s, lang))
-            .collect(),
+        steps: parts.steps,
         steps_omitted: parts.steps_omitted,
-        todo_summary: autochannel::todo_summary(&parts.todos, lang),
-        todo_lines: parts
-            .todos
-            .iter()
-            .map(render_todo_feishu)
-            .collect(),
+        todos: parts.todos,
         turn_started_at: rec.get("turnStartedAt").and_then(|v| v.as_u64()),
         at: parts.at,
     }
 }
 
-/// 帧签名：**只含用户可感知的内容**（状态、标题、文字、足迹行 + 省略数、TODO 清单、编号）。
-/// 签名不变 → 不编辑卡片。刻意**不含**活动时刻 `at` 与回合时长：它们会在内容不变时走动
-/// （transcript mtime / 时钟），若计入会造成「内容没变、卡片却被反复编辑」的无谓更新。
+/// 帧签名：**只含用户可感知的内容**（状态、标题、文字、足迹步 + 省略数、TODO 清单、编号），
+/// 对结构化数据计算、跨渠道一致。签名不变 → 不编辑卡片。刻意**不含**活动时刻 `at` 与回合
+/// 时长：它们会在内容不变时走动（transcript mtime / 时钟），若计入会造成「内容没变、卡片却
+/// 被反复编辑」的无谓更新。
 pub fn signature(f: &WatchFrame) -> String {
-    format!(
-        "{:?}|{}|{}|{}|{}|{}|{}",
+    use std::fmt::Write;
+    let mut s = format!(
+        "{:?}|{}|{}|{}|",
         f.phase,
         f.title.as_deref().unwrap_or(""),
         f.text.as_deref().unwrap_or(""),
-        f.step_lines.join("\u{1f}"),
         f.steps_omitted,
-        f.todo_lines.join("\u{1f}"),
-        f.seq,
-    )
+    );
+    for st in &f.steps {
+        let _ = write!(
+            s,
+            "{:?};{:?};{}\u{1f}",
+            st.state,
+            st.tool.label,
+            st.tool.object.as_deref().unwrap_or("")
+        );
+    }
+    s.push('|');
+    for td in &f.todos {
+        let _ = write!(s, "{:?};{}\u{1f}", td.state, td.content);
+    }
+    let _ = write!(s, "|{}", f.seq);
+    s
 }
 
-/// 组装飞书卡片视图（本地化文案在此完成）。`now` 为渲染时刻（Unix 秒，进「最后更新」行）。
-pub fn card_view(
-    f: &WatchFrame,
-    mode: CardMode,
-    now: u64,
-    lang: Lang,
-) -> crate::feishu::card::WatchCardView {
-    use crate::feishu::card::{WatchButtons, WatchCardView};
+// ── 渠道共享的本地化文案构件（飞书 `card_view` 与 Telegram/Slack 渲染器共用）──
 
+/// 头部行：`实时关注 [3] Cursor — HumanInLoop`。
+pub fn header_text(f: &WatchFrame, lang: Lang) -> String {
     let agent_label: &str = if f.kind_label.is_empty() {
         i18n::tr(lang, "autoChannel.noTitle")
     } else {
         f.kind_label.as_str()
     };
-    let header = i18n::tr(lang, "watch.cardHeader")
+    i18n::tr(lang, "watch.cardHeader")
         .replace("{id}", &f.seq.to_string())
         .replace("{agent}", agent_label)
         .replace(
@@ -213,8 +218,12 @@ pub fn card_view(
             f.project
                 .as_deref()
                 .unwrap_or(i18n::tr(lang, "autoChannel.noProject")),
-        );
+        )
+}
 
+/// 状态行：`🟢 工作中 · 已 6 分钟`。回合时长仅活动回合显示（<1 分钟不显示；步数不显示——
+/// 用户定案）；起点来自生命周期 hook（turn-start / 首个工具心跳兜底），未装 hook 时缺省。
+pub fn state_line_text(f: &WatchFrame, now: u64, lang: Lang) -> String {
     let mut state_line = match f.phase {
         WatchPhase::Working => i18n::tr(lang, "watch.stateWorking"),
         WatchPhase::Idle => i18n::tr(lang, "watch.stateIdle"),
@@ -222,9 +231,6 @@ pub fn card_view(
         WatchPhase::Ended => i18n::tr(lang, "watch.stateEnded"),
     }
     .to_string();
-    // 回合时长（仅活动回合有意义）：`🟢 工作中 · 已 6 分钟`。起点来自生命周期 hook
-    // （turn-start / 首个工具心跳兜底），未装 hook 时缺省不显示。步数不显示（用户定案：
-    // 标题上不需要步数）。
     if matches!(f.phase, WatchPhase::Working | WatchPhase::Waiting) {
         if let Some(start) = f.turn_started_at {
             let elapsed = now.saturating_sub(start);
@@ -237,25 +243,62 @@ pub fn card_view(
             }
         }
     }
+    state_line
+}
 
-    let title_line = f.title.as_ref().map(|t| format!("「{}」", t));
-
-    // 「最近动态（14:32:05）：」——绝对时刻（卡片只在变化时编辑，相对时间会失真）。
+/// 「最近动态（14:32:05）：」——绝对时刻（卡片只在变化时编辑，相对时间会失真）。
+pub fn activity_heading_text(f: &WatchFrame, now: u64, lang: Lang) -> String {
     let heading = i18n::tr(lang, "autoChannel.activityHeading");
-    let activity_heading = match (lang, f.at) {
+    match (lang, f.at) {
         (Lang::Zh, Some(at)) => format!("{heading}（{}）：", fmt_local_time(at, now)),
         (Lang::Zh, None) => format!("{heading}："),
         (_, Some(at)) => format!("{heading} ({}):", fmt_local_time(at, now)),
         (_, None) => format!("{heading}:"),
-    };
-    let no_activity = if f.text.is_none() && f.step_lines.is_empty() {
+    }
+}
+
+/// 「… 已省略 N 步」标注（>0 且有可显示步时才有）。
+pub fn omitted_line_text(f: &WatchFrame, lang: Lang) -> Option<String> {
+    if f.steps_omitted > 0 && !f.steps.is_empty() {
+        Some(i18n::tr(lang, "watch.stepsOmitted").replace("{n}", &f.steps_omitted.to_string()))
+    } else {
+        None
+    }
+}
+
+/// 「最后更新 14:32:07」。
+pub fn updated_line_text(now: u64, lang: Lang) -> String {
+    i18n::tr(lang, "watch.updatedAt").replace("{time}", &fmt_local_time(now, now))
+}
+
+/// 终态标签（`已结束 · 已自动取消关注` / `已移至最新卡片 ⬇` / …）。
+pub fn final_label_text(kind: FinalKind, lang: Lang) -> String {
+    i18n::tr(
+        lang,
+        match kind {
+            FinalKind::Ended => "watch.btnEnded",
+            FinalKind::Cancelled => "watch.btnCancelled",
+            FinalKind::Replaced => "watch.btnReplaced",
+            FinalKind::Moved => "watch.btnMoved",
+        },
+    )
+    .to_string()
+}
+
+/// 组装飞书卡片视图（本地化文案在此完成）。`now` 为渲染时刻（Unix 秒，进「最后更新」行）。
+pub fn card_view(
+    f: &WatchFrame,
+    mode: CardMode,
+    now: u64,
+    lang: Lang,
+) -> crate::feishu::card::WatchCardView {
+    use crate::feishu::card::{WatchButtons, WatchCardView};
+
+    let no_activity = if f.text.is_none() && f.steps.is_empty() {
         Some(i18n::tr(lang, "autoChannel.statusNoActivity").to_string())
     } else {
         None
     };
-
-    let updated_line =
-        i18n::tr(lang, "watch.updatedAt").replace("{time}", &fmt_local_time(now, now));
 
     let buttons = match mode {
         CardMode::Active => WatchButtons::Active {
@@ -263,42 +306,27 @@ pub fn card_view(
             refresh: i18n::tr(lang, "watch.btnRefresh").to_string(),
         },
         CardMode::Final(kind) => WatchButtons::Final {
-            label: i18n::tr(
-                lang,
-                match kind {
-                    FinalKind::Ended => "watch.btnEnded",
-                    FinalKind::Cancelled => "watch.btnCancelled",
-                    FinalKind::Replaced => "watch.btnReplaced",
-                    FinalKind::Moved => "watch.btnMoved",
-                },
-            )
-            .to_string(),
+            label: final_label_text(kind, lang),
         },
     };
 
-    // 「… 已省略 N 步」标注（灰字）置于足迹时间线首行：文字与展示的 ≤3 步之间还有更早调用时。
-    let mut step_lines = f.step_lines.clone();
-    if f.steps_omitted > 0 && !step_lines.is_empty() {
-        step_lines.insert(
-            0,
-            format!(
-                "<font color='grey'>{}</font>",
-                i18n::tr(lang, "watch.stepsOmitted").replace("{n}", &f.steps_omitted.to_string())
-            ),
-        );
+    // 足迹时间线（飞书 markdown 渲染）；「… 已省略 N 步」标注（灰字）置于首行。
+    let mut step_lines: Vec<String> = f.steps.iter().map(|s| render_step_feishu(s, lang)).collect();
+    if let Some(om) = omitted_line_text(f, lang) {
+        step_lines.insert(0, format!("<font color='grey'>{}</font>", om));
     }
 
     WatchCardView {
-        header,
-        state_line,
-        title_line,
-        activity_heading,
+        header: header_text(f, lang),
+        state_line: state_line_text(f, now, lang),
+        title_line: f.title.as_ref().map(|t| format!("「{}」", t)),
+        activity_heading: activity_heading_text(f, now, lang),
         text: f.text.clone(),
         step_lines,
-        todo_summary: f.todo_summary.clone(),
-        todo_lines: f.todo_lines.clone(),
+        todo_summary: autochannel::todo_summary(&f.todos, lang),
+        todo_lines: f.todos.iter().map(render_todo_feishu).collect(),
         no_activity,
-        updated_line,
+        updated_line: updated_line_text(now, lang),
         buttons,
     }
 }
@@ -432,43 +460,43 @@ mod tests {
 
     #[test]
     fn frame_phase_derivation() {
-        let f = build_frame(3, Some(&rec("working")), false, Lang::Zh);
+        let f = build_frame(3, Some(&rec("working")), false);
         assert_eq!(f.phase, WatchPhase::Working);
         assert_eq!(f.kind_label, "Cursor");
         assert_eq!(f.project.as_deref(), Some("HumanInLoop"));
         // waiting 覆盖 working / idle。
         assert_eq!(
-            build_frame(3, Some(&rec("working")), true, Lang::Zh).phase,
+            build_frame(3, Some(&rec("working")), true).phase,
             WatchPhase::Waiting
         );
         assert_eq!(
-            build_frame(3, Some(&rec("idle")), true, Lang::Zh).phase,
+            build_frame(3, Some(&rec("idle")), true).phase,
             WatchPhase::Waiting
         );
         // ended 不受 waiting 影响。
         assert_eq!(
-            build_frame(3, Some(&rec("ended")), true, Lang::Zh).phase,
+            build_frame(3, Some(&rec("ended")), true).phase,
             WatchPhase::Ended
         );
         // 记录消失 → Ended 最小帧。
-        assert_eq!(build_frame(3, None, false, Lang::Zh).phase, WatchPhase::Ended);
+        assert_eq!(build_frame(3, None, false).phase, WatchPhase::Ended);
     }
 
     #[test]
     fn signature_changes_with_content_only() {
-        let a = build_frame(3, Some(&rec("working")), false, Lang::Zh);
-        let b = build_frame(3, Some(&rec("working")), false, Lang::Zh);
+        let a = build_frame(3, Some(&rec("working")), false);
+        let b = build_frame(3, Some(&rec("working")), false);
         assert_eq!(signature(&a), signature(&b));
-        let c = build_frame(3, Some(&rec("idle")), false, Lang::Zh);
+        let c = build_frame(3, Some(&rec("idle")), false);
         assert_ne!(signature(&a), signature(&c));
-        let d = build_frame(3, Some(&rec("working")), true, Lang::Zh);
+        let d = build_frame(3, Some(&rec("working")), true);
         assert_ne!(signature(&a), signature(&d));
     }
 
     #[test]
     fn signature_ignores_activity_timestamp() {
         // 活动时刻走动（transcript mtime / 工具心跳）但内容不变 → 签名不变，不触发卡片编辑。
-        let mut a = build_frame(3, Some(&rec("working")), false, Lang::Zh);
+        let mut a = build_frame(3, Some(&rec("working")), false);
         let mut b = a.clone();
         a.at = Some(1_700_000_000);
         b.at = Some(1_700_000_555);
@@ -480,7 +508,7 @@ mod tests {
 
     #[test]
     fn card_view_localizes_and_maps_buttons() {
-        let f = build_frame(3, Some(&rec("working")), false, Lang::Zh);
+        let f = build_frame(3, Some(&rec("working")), false);
         let now = 1_700_000_000;
         let v = card_view(&f, CardMode::Active, now, Lang::Zh);
         assert!(v.header.contains("[3]"));
@@ -514,13 +542,13 @@ mod tests {
         let mut r = rec("working");
         r["turnSteps"] = json!(12);
         r["turnStartedAt"] = json!(now - 6 * 60);
-        let f = build_frame(3, Some(&r), false, Lang::Zh);
+        let f = build_frame(3, Some(&r), false);
         let v = card_view(&f, CardMode::Active, now, Lang::Zh);
         assert_eq!(v.state_line, "🟢 工作中 · 已 6 分钟");
         // 不足 1 分钟不显示时长。
         let mut r2 = rec("working");
         r2["turnStartedAt"] = json!(now - 30);
-        let f2 = build_frame(3, Some(&r2), false, Lang::Zh);
+        let f2 = build_frame(3, Some(&r2), false);
         assert_eq!(
             card_view(&f2, CardMode::Active, now, Lang::Zh).state_line,
             "🟢 工作中"
@@ -528,14 +556,14 @@ mod tests {
         // 空闲态不显示统计（回合已结束）。
         let mut r4 = rec("idle");
         r4["turnStartedAt"] = json!(now - 600);
-        let f4 = build_frame(3, Some(&r4), false, Lang::Zh);
+        let f4 = build_frame(3, Some(&r4), false);
         assert_eq!(card_view(&f4, CardMode::Active, now, Lang::Zh).state_line, "⚪ 空闲");
         // 步数不入签名（不显示的东西不触发编辑）：turnSteps 变化签名不变。
         assert_eq!(signature(&f), signature(&{
             let mut r5 = rec("working");
             r5["turnSteps"] = json!(13);
             r5["turnStartedAt"] = json!(now - 6 * 60);
-            build_frame(3, Some(&r5), false, Lang::Zh)
+            build_frame(3, Some(&r5), false)
         }));
     }
 
