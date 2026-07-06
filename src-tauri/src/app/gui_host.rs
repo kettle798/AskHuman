@@ -26,8 +26,11 @@ use tauri::{AppHandle, Manager};
 use tokio::io::BufReader;
 use tokio::sync::Notify;
 
-/// 由宿主统一承载的窗口标签（用于窗口计数 / 续命判定）。
-const WINDOW_LABELS: [&str; 3] = ["settings", "history", "agents"];
+/// 某 label 是否为宿主统一承载的窗口（用于窗口计数 / 续命判定）。
+/// 插话 composer 窗口每 session 一个，label 动态（`interject-<hash>`），按前缀识别。
+pub fn is_hosted_label(label: &str) -> bool {
+    matches!(label, "settings" | "history" | "agents") || label.starts_with("interject-")
+}
 
 // ===== 内嵌图标资源（三态；统一单色模板图）=====
 //
@@ -85,6 +88,8 @@ pub struct TrayData {
     pub pending: bool,
     /// 在途请求摘要（托盘「待答」子菜单逐条列出）。
     pub pending_requests: Vec<ipc::PendingRequestInfo>,
+    /// 活动 agent 摘要（托盘「Agent 状态」子菜单逐条列出，spec agent-interject D7）。
+    pub agents: Vec<ipc::TrayAgentInfo>,
 }
 
 pub struct HostState {
@@ -323,8 +328,21 @@ fn menu_signature(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> 
         .map(|p| format!("{}={}", p.id, p.preview))
         .collect::<Vec<_>>()
         .join(";");
+    // Agent 子菜单内容也入签名：会话增删 / 标题 / 状态 / 待送达 / 可聚焦变化即触发 diff。
+    let agents: String = data
+        .agents
+        .iter()
+        .map(|a| {
+            format!(
+                "{}:{}:{}:{}:{}:{}:{}:{}",
+                a.session_id, a.seq, a.kind, a.title, a.project_name, a.state,
+                a.pending_interject as u8, a.focusable as u8
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
     format!(
-        "{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         lang,
         up as u8,
         data.version,
@@ -344,6 +362,7 @@ fn menu_signature(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> 
         lifecycle_on as u8,
         data.pending as u8,
         pending,
+        agents,
     )
 }
 
@@ -449,7 +468,10 @@ fn build_specs(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> Vec
         true,
     ));
     // 「Agent 状态」入口仅在开启了生命周期追踪时显示——否则窗口必为空，徒增困惑。
-    // 忙闲数量直接并入标题（合并了原状态区的只读忙闲行），点击仍是打开窗口。
+    // 忙闲数量直接并入标题（合并了原状态区的只读忙闲行）。
+    // 有活动 agent（daemon 下发摘要）时父项变**子菜单**（spec agent-interject D7）：
+    // 首项「打开状态窗口」+ 分隔线 + 逐 agent 子菜单（发送消息 / 聚焦终端；工作中在前）；
+    // 无活动 agent / 旧 daemon（缺摘要）→ 退回普通条目（点击即开窗口）。
     if lifecycle_on {
         let label = if up && data.agents_working + data.agents_idle > 0 {
             i18n::tr(lang, "tray.openAgentsCounts")
@@ -458,7 +480,61 @@ fn build_specs(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> Vec
         } else {
             i18n::tr(lang, "tray.openAgents").to_string()
         };
-        nodes.push(Node::item("open_agents", label, true));
+        if !up || data.agents.is_empty() {
+            nodes.push(Node::item("open_agents", label, true));
+        } else {
+            let mut children = vec![Node::item(
+                "open_agents",
+                i18n::tr(lang, "tray.openAgentsWindow").to_string(),
+                true,
+            )];
+            children.push(Node::separator("sep.agents"));
+            for a in &data.agents {
+                // 条目文案与 IM `/status` 列表行同构：`[编号] 类型 — 标题（项目）`（用户定案）。
+                // 编号可直接用于 `/msg <编号>`；标题截断 24 字符防菜单过宽。
+                let project = if a.project_name.is_empty() {
+                    i18n::tr(lang, "autoChannel.noProject").to_string()
+                } else {
+                    a.project_name.clone()
+                };
+                let session_title = if a.title.trim().is_empty() {
+                    i18n::tr(lang, "autoChannel.noTitle").to_string()
+                } else {
+                    truncate_chars(a.title.trim(), AGENT_TITLE_MAX_CHARS)
+                };
+                let title = format!(
+                    "[{}] {} — {}（{}）",
+                    a.seq,
+                    agent_kind_label(&a.kind),
+                    session_title,
+                    project
+                );
+                let mut sub: Vec<Node> = Vec::new();
+                // 「发送消息」：grok 无可靠传话通道，首期排除（spec agent-interject D1）。
+                if a.kind != "grok" {
+                    let text = if a.pending_interject {
+                        i18n::tr(lang, "tray.agentSendMessagePending").to_string()
+                    } else {
+                        i18n::tr(lang, "tray.agentSendMessage").to_string()
+                    };
+                    sub.push(Node::item(format!("ij:{}", a.session_id), text, true));
+                }
+                if a.focusable {
+                    sub.push(Node::item(
+                        format!("term:{}", a.session_id),
+                        i18n::tr(lang, "tray.agentFocusTerminal").to_string(),
+                        true,
+                    ));
+                }
+                if sub.is_empty() {
+                    // 无任何可用动作（grok 且终端不可聚焦）：列为只读行，仅供感知。
+                    children.push(Node::item(format!("agent:{}", a.session_id), title, false));
+                } else {
+                    children.push(Node::submenu(format!("agent:{}", a.session_id), title, true, sub));
+                }
+            }
+            nodes.push(Node::submenu("agents_menu", label, true, children));
+        }
     }
     nodes.push(Node::separator("sep.update"));
     nodes.push(Node::item(
@@ -505,6 +581,28 @@ fn build_specs(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> Vec
     nodes
 }
 
+/// agent 家族展示名（托盘 Agent 子菜单标签用；与 `AgentKind::label` 同口径）。
+fn agent_kind_label(kind: &str) -> &str {
+    match crate::agents::AgentKind::parse(kind) {
+        Some(k) => k.label(),
+        None => kind,
+    }
+}
+
+/// Agent 子菜单条目里会话标题的截断长度（与「待答」预览同 24 字符口径）。
+const AGENT_TITLE_MAX_CHARS: usize = 24;
+
+/// 按 Unicode 字符截断，超出追加省略号（与 `daemon::request::truncate_chars` 同逻辑）。
+fn truncate_chars(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 /// 托盘菜单事件分派（由 launch() 的全局 `on_menu_event` 在宿主进程中调用）。
 pub fn on_menu_event(app: &AppHandle, id: &str) {
     // 待答子菜单项：聚焦对应弹窗（向 daemon 发 FocusRequest，由 daemon 转发到该请求的弹窗进程）。
@@ -518,11 +616,55 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
         });
         return;
     }
+    // Agent 子菜单「发送消息」：宿主本进程直接开（或聚焦）该 session 的插话 composer 窗口。
+    if let Some(session_id) = id.strip_prefix("ij:") {
+        let info = app.try_state::<HostState>().and_then(|s| {
+            s.data
+                .lock()
+                .unwrap()
+                .agents
+                .iter()
+                .find(|a| a.session_id == session_id)
+                .cloned()
+        });
+        if let Some(a) = info {
+            open_window(
+                app,
+                WindowKind::Interject,
+                false,
+                None,
+                Some(crate::gui_host::InterjectTarget {
+                    session: a.session_id,
+                    agent: Some(a.kind),
+                    cwd: a.cwd,
+                }),
+            );
+        }
+        return;
+    }
+    // Agent 子菜单「聚焦终端」：AppleScript 可能阻塞（授权弹窗等），放后台线程。
+    if let Some(session_id) = id.strip_prefix("term:") {
+        let pid = app.try_state::<HostState>().and_then(|s| {
+            s.data
+                .lock()
+                .unwrap()
+                .agents
+                .iter()
+                .find(|a| a.session_id == session_id)
+                .and_then(|a| a.pid)
+        });
+        if let Some(pid) = pid {
+            std::thread::spawn(move || {
+                let _ = crate::integrations::terminal_focus::focus_agent_terminal(pid);
+            });
+        }
+        return;
+    }
     match id {
-        "open_settings" => open_window(app, WindowKind::Settings, false, None),
+        "open_settings" => open_window(app, WindowKind::Settings, false, None, None),
         // 托盘「历史」无调用方项目上下文 → 默认展示全部项目。
-        "open_history" => open_window(app, WindowKind::History, true, None),
-        "open_agents" => open_window(app, WindowKind::Agents, false, None),
+        "open_history" => open_window(app, WindowKind::History, true, None, None),
+        "open_agents" => open_window(app, WindowKind::Agents, false, None, None),
         "check_update" => {
             tauri::async_runtime::spawn(async {
                 if let Ok(info) = crate::update::check().await {
@@ -563,7 +705,14 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
 
 /// 在宿主进程内打开（或聚焦）指定窗口，并刷新窗口计数 / 续命。须在主线程调用。
 /// `project` 仅历史窗口使用：携带调用方项目 key（默认过滤到该项目），None 则用宿主自身项目。
-fn open_window(app: &AppHandle, kind: WindowKind, all: bool, project: Option<String>) {
+/// `target` 仅插话窗口使用（session 必填；缺失则忽略本次请求）。
+pub(crate) fn open_window(
+    app: &AppHandle,
+    kind: WindowKind,
+    all: bool,
+    project: Option<String>,
+    target: Option<crate::gui_host::InterjectTarget>,
+) {
     let cfg = AppConfig::load_without_secrets();
     // 弹窗在「另一个进程」（daemon 拉起的助手），宿主无 popup 窗口可探测；改据 daemon 在途请求数
     // 判定：置顶开启且有在途请求（即有弹窗在屏）→ 让设置/历史与弹窗同级，浮于其上。
@@ -578,15 +727,23 @@ fn open_window(app: &AppHandle, kind: WindowKind, all: bool, project: Option<Str
             crate::app::create_history_window(app, &cfg, all, project.as_deref(), pin_above_popup)
         }
         WindowKind::Agents => crate::app::create_agents_window(app, &cfg),
+        WindowKind::Interject => match &target {
+            Some(t) => crate::app::create_interject_window(app, &cfg, t, pin_above_popup),
+            None => return, // session 缺失：无法定位目标 agent，忽略。
+        },
     };
     if r.is_ok() {
         // 宿主是 accessory app（不自动激活）：新建窗口需显式聚焦，才能前置到置顶弹窗之上并接收键盘。
         let label = match kind {
-            WindowKind::Settings => "settings",
-            WindowKind::History => "history",
-            WindowKind::Agents => "agents",
+            WindowKind::Settings => "settings".to_string(),
+            WindowKind::History => "history".to_string(),
+            WindowKind::Agents => "agents".to_string(),
+            WindowKind::Interject => target
+                .as_ref()
+                .map(|t| crate::gui_host::interject_label(&t.session))
+                .unwrap_or_default(),
         };
-        if let Some(w) = app.get_webview_window(label) {
+        if let Some(w) = app.get_webview_window(&label) {
             let _ = w.set_focus();
         }
         // Agent 订阅**不在此处启动**：必须等前端注册好 `agents-updated` 监听后再经命令触发
@@ -601,9 +758,10 @@ pub fn recount_windows(app: &AppHandle) {
     let Some(state) = app.try_state::<HostState>() else {
         return;
     };
-    let n = WINDOW_LABELS
-        .iter()
-        .filter(|l| app.get_webview_window(l).is_some())
+    let n = app
+        .webview_windows()
+        .keys()
+        .filter(|l| is_hosted_label(l))
         .count();
     state.windows_open.store(n, Ordering::SeqCst);
     if n > 0 {
@@ -737,12 +895,24 @@ async fn handle_host_conn(stream: tokio::net::UnixStream, app: AppHandle) {
     let mut reader = BufReader::new(r);
     while let Ok(Some(msg)) = ipc::read_msg::<_, HostMsg>(&mut reader).await {
         match msg {
-            HostMsg::OpenWindow { kind, all, project } => {
+            HostMsg::OpenWindow {
+                kind,
+                all,
+                project,
+                session,
+                agent,
+                cwd,
+            } => {
                 // 回执（让客户端确认已受理），再到主线程开窗。
                 let _ = ipc::write_msg(&mut w, &HostMsg::Ping).await;
+                let target = session.map(|session| crate::gui_host::InterjectTarget {
+                    session,
+                    agent,
+                    cwd,
+                });
                 let app2 = app.clone();
                 let _ = app
-                    .run_on_main_thread(move || open_window(&app2, kind, all, project));
+                    .run_on_main_thread(move || open_window(&app2, kind, all, project, target));
             }
             HostMsg::Ping => {
                 let _ = ipc::write_msg(&mut w, &HostMsg::Ping).await;
@@ -797,6 +967,7 @@ fn start_status_subscription(app: AppHandle) {
                                     update_latest,
                                     pending,
                                     pending_requests,
+                                    agents,
                                 })) => {
                                     if let Some(state) = app.try_state::<HostState>() {
                                         *state.data.lock().unwrap() = TrayData {
@@ -812,6 +983,7 @@ fn start_status_subscription(app: AppHandle) {
                                             update_latest,
                                             pending,
                                             pending_requests,
+                                            agents,
                                         };
                                     }
                                     refresh_on_main(&app);

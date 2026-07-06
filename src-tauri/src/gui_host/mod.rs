@@ -16,6 +16,8 @@ pub enum WindowKind {
     Settings,
     History,
     Agents,
+    /// 插话 composer（spec agent-interject D7）：每 session 全局唯一，`OpenWindow.session` 必填。
+    Interject,
 }
 
 /// CLI / 弹窗 → 宿主 的消息。
@@ -25,12 +27,20 @@ pub enum HostMsg {
     /// 打开（或聚焦已存在的）指定窗口。`all` 仅历史窗口使用（默认展示全部项目）；
     /// `project` 仅历史窗口使用——携带调用方的项目 key（空串=未知项目），让宿主里的历史窗口
     /// 默认过滤到调用方项目而非宿主自身 cwd（spec 计划「项目过滤经 OpenWindow 字段传递」）。
+    /// `session`/`agent`/`cwd` 仅插话窗口使用：目标 agent 的 session_id（窗口唯一键）、
+    /// 家族（头部胶囊）与工作目录（头部项目名）。旧宿主忽略未知字段（serde default 兼容）。
     OpenWindow {
         kind: WindowKind,
         #[serde(default)]
         all: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
     },
     /// 探活（保留；当前 `host_open` 不依赖回包）。
     Ping,
@@ -38,12 +48,29 @@ pub enum HostMsg {
     Shutdown,
 }
 
+/// 插话窗口的额外参数（session 必填；agent/cwd 用于头部展示）。
+#[derive(Clone, Debug)]
+pub struct InterjectTarget {
+    pub session: String,
+    pub agent: Option<String>,
+    pub cwd: Option<String>,
+}
+
+/// 插话 composer 的窗口 label：每 session 全局唯一。session_id 可能含 label 非法字符，
+/// 用哈希编码（仅进程内聚焦去重用，无需跨进程/跨版本稳定）。
+pub fn interject_label(session_id: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    session_id.hash(&mut h);
+    format!("interject-{:016x}", h.finish())
+}
+
 #[cfg(unix)]
 pub use unix_impl::{bind, host_open, spawn_detached};
 
 #[cfg(unix)]
 mod unix_impl {
-    use super::{HostMsg, WindowKind};
+    use super::{HostMsg, InterjectTarget, WindowKind};
     use crate::ipc;
     use crate::paths::gui_host_sock;
     use std::io::{Error, ErrorKind};
@@ -95,12 +122,18 @@ mod unix_impl {
     ///
     /// 流程：连宿主 → 发 `OpenWindow` → 返回；连不上则 `spawn --gui-host` 后轮询重连。
     /// 全程失败返回 `Err`，调用方据此回退到「本进程直接建窗」兜底（保证至少能打开窗口）。
-    pub fn host_open(kind: WindowKind, all: bool, project: Option<String>) -> std::io::Result<()> {
+    /// `target` 仅插话窗口使用（session/agent/cwd），其余窗口传 `None`。
+    pub fn host_open(
+        kind: WindowKind,
+        all: bool,
+        project: Option<String>,
+        target: Option<InterjectTarget>,
+    ) -> std::io::Result<()> {
         let handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
-            rt.block_on(host_open_async(kind, all, project))
+            rt.block_on(host_open_async(kind, all, project, target))
         });
         match handle.join() {
             Ok(r) => r,
@@ -112,10 +145,11 @@ mod unix_impl {
         kind: WindowKind,
         all: bool,
         project: Option<String>,
+        target: Option<InterjectTarget>,
     ) -> std::io::Result<()> {
         // 1. 宿主已在 → 直接发送。
         if let Ok(stream) = connect().await {
-            return send_open(stream, kind, all, project).await;
+            return send_open(stream, kind, all, project, target).await;
         }
         // 2. 宿主不在 → 拉起后轮询重连（最多约 6 秒，覆盖 Tauri 进程启动 + socket 就绪）。
         spawn_detached()?;
@@ -123,7 +157,7 @@ mod unix_impl {
         while start.elapsed() < Duration::from_secs(6) {
             tokio::time::sleep(Duration::from_millis(80)).await;
             if let Ok(stream) = connect().await {
-                return send_open(stream, kind, all, project).await;
+                return send_open(stream, kind, all, project, target).await;
             }
         }
         Err(Error::new(
@@ -137,10 +171,26 @@ mod unix_impl {
         kind: WindowKind,
         all: bool,
         project: Option<String>,
+        target: Option<InterjectTarget>,
     ) -> std::io::Result<()> {
         let (r, mut w) = stream.into_split();
+        let (session, agent, cwd) = match target {
+            Some(t) => (Some(t.session), t.agent, t.cwd),
+            None => (None, None, None),
+        };
         // 写出请求并 flush；内核缓冲该行，即便随后关闭连接，宿主仍能读到。
-        ipc::write_msg(&mut w, &HostMsg::OpenWindow { kind, all, project }).await?;
+        ipc::write_msg(
+            &mut w,
+            &HostMsg::OpenWindow {
+                kind,
+                all,
+                project,
+                session,
+                agent,
+                cwd,
+            },
+        )
+        .await?;
         // 读一行作为「已受理」回执（宿主收到后回 Ping 作为 ack）；超时也按成功处理（已写入内核缓冲）。
         let mut reader = BufReader::new(r);
         let _ = tokio::time::timeout(

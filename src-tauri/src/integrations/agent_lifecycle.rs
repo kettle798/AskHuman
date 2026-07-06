@@ -80,6 +80,21 @@ fn events(kind: AgentKind) -> &'static [(&'static str, &'static str)] {
     }
 }
 
+/// PreToolUse 条目的显式超时（秒）：插话的「composer 打开时挂起等待」需要长超时
+/// （spec agent-interject D5）。仅 Claude / Codex / Cursor 的 PreToolUse；Grok 首期排除、
+/// 其余事件维持各家默认（Claude/Codex 600s、Cursor 60s）。
+pub const PRE_TOOL_USE_TIMEOUT_SECS: u64 = 86400;
+
+/// 某事件条目需要显式写入的超时（秒）；None＝不写（用各家默认）。
+fn event_timeout(kind: AgentKind, event_key: &str) -> Option<u64> {
+    match (kind, event_key) {
+        (AgentKind::Claude, "PreToolUse")
+        | (AgentKind::Codex, "PreToolUse")
+        | (AgentKind::Cursor, "preToolUse") => Some(PRE_TOOL_USE_TIMEOUT_SECS),
+        _ => None,
+    }
+}
+
 /// Codex 事件键（PascalCase）→ 信任用 snake_case 标签（hooks/src/lib.rs::hook_event_key_label）。
 fn codex_label(event_key: &str) -> Option<&'static str> {
     match event_key {
@@ -242,11 +257,25 @@ fn json_status(kind: AgentKind, path: &std::path::Path, shape: Shape) -> Lifecyc
             supported: true,
         };
     };
+    let (any, complete) = json_presence(kind, &exe, &root, shape);
+    LifecycleStatus {
+        installed: any,
+        outdated: any && !complete,
+        supported: true,
+    }
+}
+
+/// 已安装 / 完整性判定（纯函数，供单测）：`any`＝至少一个事件含本功能条目；
+/// `complete`＝每个事件都恰好是期望形态（命令逐字一致 + PreToolUse 带 timeout=86400）。
+/// 不完整（如旧版安装缺 timeout）→ `outdated` → 由 `migrate_outdated()` 自动幂等重装
+/// （spec agent-interject D5「已开启用户的 hook 更新流程」）。
+fn json_presence(kind: AgentKind, exe: &str, root: &Value, shape: Shape) -> (bool, bool) {
     let hooks = root.get("hooks");
     let mut any = false;
     let mut complete = true;
     for (event_key, lc) in events(kind) {
-        let want = hook_command(&exe, kind, lc);
+        let want = hook_command(exe, kind, lc);
+        let want_timeout = event_timeout(kind, event_key);
         let arr = hooks
             .and_then(|h| h.get(event_key))
             .and_then(|a| a.as_array());
@@ -254,7 +283,7 @@ fn json_status(kind: AgentKind, path: &std::path::Path, shape: Shape) -> Lifecyc
             .map(|a| a.iter().any(|e| elem_has_marker(e, shape)))
             .unwrap_or(false);
         let has_exact = arr
-            .map(|a| a.iter().any(|e| elem_cmd_equals(e, shape, &want)))
+            .map(|a| a.iter().any(|e| elem_matches(e, shape, &want, want_timeout)))
             .unwrap_or(false);
         if has_ours {
             any = true;
@@ -263,25 +292,29 @@ fn json_status(kind: AgentKind, path: &std::path::Path, shape: Shape) -> Lifecyc
             complete = false;
         }
     }
-    LifecycleStatus {
-        installed: any,
-        outdated: any && !complete,
-        supported: true,
-    }
+    (any, complete)
 }
 
-/// 元素是否恰好含给定命令（用于 outdated：路径变化检测）。
-fn elem_cmd_equals(elem: &Value, shape: Shape, want: &str) -> bool {
+/// 元素是否恰好为期望形态：命令逐字一致，且（要求显式 timeout 的事件）timeout 一致。
+/// 用于 outdated 判定：路径变化 / 旧版缺 timeout 都会触发幂等重装。
+fn elem_matches(elem: &Value, shape: Shape, want: &str, want_timeout: Option<u64>) -> bool {
+    let timeout_ok = |h: &Value| match want_timeout {
+        Some(t) => h.get("timeout").and_then(|v| v.as_u64()) == Some(t),
+        None => true,
+    };
     match shape {
         Shape::Nested => elem
             .get("hooks")
             .and_then(|h| h.as_array())
             .map(|arr| {
-                arr.iter()
-                    .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(want))
+                arr.iter().any(|h| {
+                    h.get("command").and_then(|c| c.as_str()) == Some(want) && timeout_ok(h)
+                })
             })
             .unwrap_or(false),
-        Shape::Flat => elem.get("command").and_then(|c| c.as_str()) == Some(want),
+        Shape::Flat => {
+            elem.get("command").and_then(|c| c.as_str()) == Some(want) && timeout_ok(elem)
+        }
     }
 }
 
@@ -320,6 +353,17 @@ fn apply_json_install(kind: AgentKind, exe: &str, text: &str, shape: Shape) -> R
     for (event_key, lc) in events(kind) {
         let command = hook_command(exe, kind, lc);
         let cmd = command.as_str();
+        // PreToolUse 显式长超时（插话等待，spec agent-interject D5）；其余事件不写、用默认。
+        let entry = match (shape, event_timeout(kind, event_key)) {
+            (Shape::Nested, Some(t)) => {
+                json!({ "hooks": [ { "type": "command", "command": cmd, "timeout": t } ] })
+            }
+            (Shape::Nested, None) => {
+                json!({ "hooks": [ { "type": "command", "command": cmd } ] })
+            }
+            (Shape::Flat, Some(t)) => json!({ "command": cmd, "timeout": t }),
+            (Shape::Flat, None) => json!({ "command": cmd }),
+        };
         let arr = hooks
             .array_value_or_create(event_key)
             .ok_or_else(|| anyhow!("配置的 '{event_key}' 不是数组，已中止"))?;
@@ -330,16 +374,7 @@ fn apply_json_install(kind: AgentKind, exe: &str, text: &str, shape: Shape) -> R
             }
             if !replaced {
                 if let Some(obj) = e.as_object() {
-                    match shape {
-                        Shape::Nested => {
-                            obj.replace_with(
-                                json!({ "hooks": [ { "type": "command", "command": cmd } ] }),
-                            );
-                        }
-                        Shape::Flat => {
-                            obj.replace_with(json!({ "command": cmd }));
-                        }
-                    }
+                    obj.replace_with(entry.clone());
                     replaced = true;
                     continue;
                 }
@@ -348,14 +383,7 @@ fn apply_json_install(kind: AgentKind, exe: &str, text: &str, shape: Shape) -> R
         }
         if !replaced {
             arr.ensure_multiline();
-            match shape {
-                Shape::Nested => {
-                    arr.append(json!({ "hooks": [ { "type": "command", "command": cmd } ] }));
-                }
-                Shape::Flat => {
-                    arr.append(json!({ "command": cmd }));
-                }
-            }
+            arr.append(entry);
         }
     }
     Ok(root.to_string())
@@ -476,7 +504,14 @@ fn codex_trust_entries(hooks_json: &std::path::Path) -> Result<Vec<(String, Stri
                     continue;
                 }
                 let key = format!("{abs_str}:{label}:{gi}:{hi}");
-                let hash = codex_trusted_hash(label, cmd);
+                // 按条目实际 timeout 计算（缺省 600、下限 1——复刻 codex discovery
+                // `timeout_sec.unwrap_or(600).max(1)` 的归一化）；PreToolUse 写入 86400。
+                let timeout = handler
+                    .get("timeout")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(600)
+                    .max(1);
+                let hash = codex_trusted_hash(label, cmd, timeout);
                 out.push((key, hash));
             }
         }
@@ -486,15 +521,16 @@ fn codex_trust_entries(hooks_json: &std::path::Path) -> Result<Vec<(String, Stri
 
 /// 复刻 codex `version_for_toml(NormalizedHookIdentity)`：
 /// `"sha256:" + hex(sha256(canonical_compact_json(identity)))`。
-/// identity = { event_name, hooks:[{type:"command", command, timeout:600, async:false}] }
-/// （我们的事件 matcher 恒 None → 省略；timeout 默认 600；async 默认 false）。
-fn codex_trusted_hash(label: &str, command: &str) -> String {
+/// identity = { event_name, hooks:[{type:"command", command, timeout, async:false}] }
+/// （我们的事件 matcher 恒 None → 省略；timeout 按条目实际值——codex 归一化为
+/// `unwrap_or(600).max(1)`，PreToolUse 写 86400、其余默认 600；async 默认 false）。
+fn codex_trusted_hash(label: &str, command: &str, timeout_sec: u64) -> String {
     let identity = serde_json::json!({
         "event_name": label,
         "hooks": [ {
             "type": "command",
             "command": command,
-            "timeout": 600,
+            "timeout": timeout_sec,
             "async": false,
         } ],
     });
@@ -696,6 +732,83 @@ mod tests {
     }
 
     #[test]
+    fn pre_tool_use_gets_long_timeout_others_dont() {
+        // 插话等待需要长超时（spec agent-interject D5）：仅 PreToolUse 显式 timeout=86400。
+        // Claude / Codex（Nested）。
+        for kind in [AgentKind::Claude, AgentKind::Codex] {
+            let out = apply_json_install(kind, EXE, "{}", Shape::Nested).unwrap();
+            let v = to_value(&out);
+            assert_eq!(
+                v["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"].as_u64(),
+                Some(86400),
+                "{kind:?} PreToolUse 应带 timeout"
+            );
+            assert!(
+                v["hooks"]["PostToolUse"][0]["hooks"][0].get("timeout").is_none(),
+                "{kind:?} 其余事件不写 timeout"
+            );
+            assert!(v["hooks"]["Stop"][0]["hooks"][0].get("timeout").is_none());
+        }
+        // Cursor（Flat）。
+        let out = apply_json_install(AgentKind::Cursor, EXE, "{}", Shape::Flat).unwrap();
+        let v = to_value(&out);
+        assert_eq!(
+            v["hooks"]["preToolUse"][0]["timeout"].as_u64(),
+            Some(86400)
+        );
+        assert!(v["hooks"]["postToolUse"][0].get("timeout").is_none());
+        // Grok 首期排除：任何事件都不写 timeout。
+        let out = apply_json_install(AgentKind::Grok, EXE, "{}", Shape::Nested).unwrap();
+        let v = to_value(&out);
+        assert!(v["hooks"]["PreToolUse"][0]["hooks"][0].get("timeout").is_none());
+    }
+
+    #[test]
+    fn old_install_without_timeout_is_incomplete() {
+        // 已开启用户的更新流程（spec agent-interject D5）：旧版产物（PreToolUse 无 timeout）
+        // 判 outdated → migrate_outdated() 自动幂等重装；重装后判定归位。
+        // 用「新版安装产物手动抹掉 timeout」模拟旧产物。
+        let new = apply_json_install(AgentKind::Claude, EXE, "{}", Shape::Nested).unwrap();
+        let mut old = to_value(&new);
+        old["hooks"]["PreToolUse"][0]["hooks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("timeout");
+        let (any, complete) = json_presence(AgentKind::Claude, EXE, &old, Shape::Nested);
+        assert!(any, "旧产物仍算已安装");
+        assert!(!complete, "缺 timeout 应判不完整（outdated）");
+        // 重装（幂等替换）后完整。
+        let migrated =
+            apply_json_install(AgentKind::Claude, EXE, &old.to_string(), Shape::Nested).unwrap();
+        let (any, complete) =
+            json_presence(AgentKind::Claude, EXE, &to_value(&migrated), Shape::Nested);
+        assert!(any && complete);
+        // Cursor Flat 同理。
+        let new = apply_json_install(AgentKind::Cursor, EXE, "{}", Shape::Flat).unwrap();
+        let mut old = to_value(&new);
+        old["hooks"]["preToolUse"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("timeout");
+        let (any, complete) = json_presence(AgentKind::Cursor, EXE, &old, Shape::Flat);
+        assert!(any && !complete);
+    }
+
+    #[test]
+    fn fresh_install_is_complete() {
+        for (kind, shape) in [
+            (AgentKind::Claude, Shape::Nested),
+            (AgentKind::Codex, Shape::Nested),
+            (AgentKind::Cursor, Shape::Flat),
+            (AgentKind::Grok, Shape::Nested),
+        ] {
+            let out = apply_json_install(kind, EXE, "{}", shape).unwrap();
+            let (any, complete) = json_presence(kind, EXE, &to_value(&out), shape);
+            assert!(any && complete, "{kind:?} 新装即完整");
+        }
+    }
+
+    #[test]
     fn grok_install_adds_all_events_nested() {
         // Grok 与 Claude 同构（Nested、PascalCase、事件最全），装 grok 原生 hook 命令含 `grok`。
         let out = apply_json_install(AgentKind::Grok, EXE, "{}", Shape::Nested).unwrap();
@@ -773,7 +886,7 @@ mod tests {
     fn codex_trusted_hash_matches_reference_algorithm() {
         // 与 codex-trust.cjs 同输入应得同输出（键排序紧凑 JSON 的 sha256）。
         let cmd = "\"/opt/AskHuman\" __agent-hook codex session-start";
-        let h = codex_trusted_hash("session_start", cmd);
+        let h = codex_trusted_hash("session_start", cmd, 600);
         // 独立计算参考值。
         let serialized = format!(
             "{{\"event_name\":\"session_start\",\"hooks\":[{{\"async\":false,\"command\":{},\"timeout\":600,\"type\":\"command\"}}]}}",
@@ -783,6 +896,22 @@ mod tests {
         hasher.update(serialized.as_bytes());
         let want = format!("sha256:{}", hex_encode(&hasher.finalize()));
         assert_eq!(h, want);
+    }
+
+    #[test]
+    fn codex_trusted_hash_includes_timeout() {
+        // PreToolUse 写 timeout=86400 → 信任哈希随 timeout 变化（旧哈希按 600 算 → 自动判过期）。
+        let cmd = "\"/opt/AskHuman\" __agent-hook codex activity";
+        let h = codex_trusted_hash("pre_tool_use", cmd, 86400);
+        let serialized = format!(
+            "{{\"event_name\":\"pre_tool_use\",\"hooks\":[{{\"async\":false,\"command\":{},\"timeout\":86400,\"type\":\"command\"}}]}}",
+            serde_json::to_string(cmd).unwrap()
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(serialized.as_bytes());
+        let want = format!("sha256:{}", hex_encode(&hasher.finalize()));
+        assert_eq!(h, want);
+        assert_ne!(h, codex_trusted_hash("pre_tool_use", cmd, 600));
     }
 
     #[test]

@@ -63,6 +63,13 @@ pub fn run(args: &[String]) {
         None
     };
 
+    // 插话轮询（spec agent-interject D3/D4）：仅 **PreToolUse**（stdin 判定阶段为 pre）、
+    // 且已通过上方去重、且非 Grok（首期排除，无可靠传话通道）时，在上报的同一连接上
+    // 读回一帧裁决；PostToolUse 与其余事件保持即发即走。
+    let interject_poll = matches!(event, super::LifecycleEvent::Activity)
+        && intended != AgentKind::Grok
+        && stdin.as_ref().and_then(|v| detect_phase(v)) == Some(ToolPhase::Pre);
+
     let msg = ClientMsg::AgentEvent {
         agent: intended.as_str().to_string(),
         event: event.as_str().to_string(),
@@ -71,8 +78,49 @@ pub fn run(args: &[String]) {
         cwd,
         ts: 0,
         tool,
+        interject_poll,
     };
-    crate::client::report_agent_event(msg);
+    if interject_poll {
+        if let crate::client::InterjectPollOutcome::Deny(text) =
+            crate::client::report_agent_event_with_poll(msg)
+        {
+            print_deny_json(intended, &text);
+        }
+    } else {
+        crate::client::report_agent_event(msg);
+    }
+}
+
+/// 输出各家 PreToolUse 的 deny JSON（stdout，随后调用方 exit 0；spec agent-interject D3）。
+/// 消息经 `prompts::interject_deny_reason` 包装（`[USER INTERJECTION]` 协议文案）。
+fn print_deny_json(kind: AgentKind, message: &str) {
+    let json = deny_json(kind, message);
+    println!("{json}");
+}
+
+/// 构造 deny JSON（纯函数，供单测）。Claude / Codex 同构（`hookSpecificOutput`）；
+/// Cursor 用 `permission` + `user_message`/`agent_message` **双字段同文**：live 实测 + bundle
+/// 静态核对（IDE cursor-agent-exec 与 CLI hooks-exec 的 deny 分支）证实**模型看到的拒绝理由
+/// 取自 `user_message`**（`agent_message` 仅透传 protobuf、未见进模型的消费点，与官方文档
+/// 「fed back to the agent」不符）；两字段都放完整协议文本，兼容未来 Cursor 按文档语义改用
+/// `agent_message`。代价：UI 拦截提示显示整段协议文本（内含用户原话），可接受。
+fn deny_json(kind: AgentKind, message: &str) -> Value {
+    let reason = crate::prompts::interject_deny_reason(message);
+    match kind {
+        AgentKind::Cursor => serde_json::json!({
+            "permission": "deny",
+            "agent_message": reason.clone(),
+            "user_message": reason,
+        }),
+        // Claude / Codex（Grok 不会走到：上游已排除）。
+        _ => serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }),
+    }
 }
 
 /// 从 hook stdin 解析本次工具调用（best-effort）：判 pre/post，pre 需能取到工具名（否则退化为无工具）。
@@ -268,5 +316,32 @@ mod tests {
         let v = json!({"tool_input":{"command":"ls"}});
         assert_eq!(detect_phase(&v), Some(ToolPhase::Pre));
         assert!(extract_tool(Some(&v)).is_none());
+    }
+
+    #[test]
+    fn deny_json_claude_codex_shape() {
+        for kind in [AgentKind::Claude, AgentKind::Codex] {
+            let v = deny_json(kind, "改用方案 B");
+            let out = &v["hookSpecificOutput"];
+            assert_eq!(out["hookEventName"], "PreToolUse");
+            assert_eq!(out["permissionDecision"], "deny");
+            let reason = out["permissionDecisionReason"].as_str().unwrap();
+            assert!(reason.starts_with("[USER INTERJECTION]"));
+            assert!(reason.contains("<user_message>\n改用方案 B\n</user_message>"));
+            assert!(v.get("permission").is_none(), "不应混入 Cursor 字段");
+        }
+    }
+
+    #[test]
+    fn deny_json_cursor_shape() {
+        let v = deny_json(AgentKind::Cursor, "停一下");
+        assert_eq!(v["permission"], "deny");
+        // live 实测：Cursor 喂回模型的拒绝理由取自 user_message（agent_message 未见消费）——
+        // 两字段须同为完整协议文本，缺一即丢话。
+        let user_msg = v["user_message"].as_str().unwrap();
+        assert!(user_msg.starts_with("[USER INTERJECTION]"));
+        assert!(user_msg.contains("停一下"));
+        assert_eq!(v["agent_message"], v["user_message"]);
+        assert!(v.get("hookSpecificOutput").is_none(), "不应混入 Claude 字段");
     }
 }

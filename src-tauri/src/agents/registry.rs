@@ -567,6 +567,65 @@ impl AgentRegistry {
             .count()
     }
 
+    /// 活动（工作中 / 空闲）会话的 session_id 集合（插话队列兜底清理用：不在此集合的会话
+    /// 视为已结束，其待送达条目应清空）。
+    pub fn active_session_ids(&self) -> Vec<String> {
+        let inner = self.inner.lock().unwrap();
+        inner.active.iter().map(|r| r.session_id.clone()).collect()
+    }
+
+    /// 托盘「Agent 状态」子菜单摘要（spec agent-interject D7）：仅活动会话，**工作中在前**、
+    /// 组内按最近活动倒序；ended 不含。`pending_interject` 恒 false，由 daemon 按插话队列注入。
+    pub fn tray_agent_infos(&self) -> Vec<crate::ipc::TrayAgentInfo> {
+        let mut inner = self.inner.lock().unwrap();
+        // 标题 / 终端类型惰性补齐（与 snapshot 同口径）：标题用于条目文案、终端决定「聚焦终端」显隐。
+        for r in inner.active.iter_mut() {
+            if r.title.is_none() {
+                r.title = resolve_title(r.kind, &r.session_id);
+            }
+            if r.terminal.is_none() {
+                if let Some(pid) = r.pid {
+                    r.terminal =
+                        Some(super::detect::terminal_kind(pid).unwrap_or("other").to_string());
+                }
+            }
+        }
+        let mut list: Vec<&AgentRecord> = inner.active.iter().collect();
+        list.sort_by(|a, b| {
+            let rank = |r: &AgentRecord| match r.state {
+                AgentState::Working => 0u8,
+                _ => 1u8,
+            };
+            rank(a)
+                .cmp(&rank(b))
+                .then(b.last_activity.cmp(&a.last_activity))
+        });
+        list.into_iter()
+            .map(|r| crate::ipc::TrayAgentInfo {
+                session_id: r.session_id.clone(),
+                seq: r.seq,
+                kind: r.kind.as_str().to_string(),
+                title: r.title.clone().unwrap_or_default(),
+                project_name: r
+                    .cwd
+                    .as_deref()
+                    .map(crate::project::display_name)
+                    .unwrap_or_default(),
+                cwd: r.cwd.clone(),
+                state: match r.state {
+                    AgentState::Working => "working",
+                    _ => "idle",
+                }
+                .to_string(),
+                pending_interject: false,
+                // 与前端 `lib/terminals.ts` 的支持清单一致（Terminal.app / iTerm2）。
+                focusable: r.pid.is_some()
+                    && matches!(r.terminal.as_deref(), Some("apple-terminal") | Some("iterm2")),
+                pid: r.pid,
+            })
+            .collect()
+    }
+
     /// 构造全量快照（解析缺失标题并缓存）。返回 agents 列表 Value（前端按类型分组、按状态排序）。
     pub fn snapshot(&self) -> Value {
         let mut inner = self.inner.lock().unwrap();

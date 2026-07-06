@@ -169,6 +169,18 @@ export interface AgentRecord {
   terminal?: string | null;
   /** 实时「当前工具」（hook 上报，仅 snapshot、不落盘）：`{name, object?, at}`。GUI 暂不消费。 */
   currentTool?: { name: string; object?: string | null; at: number } | null;
+  /** 有待送达的插话消息（daemon 注入；驱动「待送达」徽标与撤回按钮）。 */
+  pendingInterject?: boolean;
+}
+
+/** 插话 composer 窗口 init 负载。 */
+export interface InterjectInit {
+  theme: ThemeMode;
+  lang: string;
+  /** 待送达全文（预填编辑；空 = 无待送达）。 */
+  text: string;
+  /** 待送达条数。 */
+  entries: number;
 }
 
 export type UiLanguage = "auto" | "en" | "zh";

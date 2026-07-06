@@ -380,6 +380,11 @@ export default {
     markIdleConfirm: "Mark this agent as idle?",
     confirmOk: "Mark idle",
     confirmCancel: "Cancel",
+    sendMessage: "Send message",
+    pendingInterject: "Queued",
+    revokeInterject: "Revoke",
+    revokeConfirm: "Revoke the queued message?",
+    revokeOk: "Revoke",
     view: {
       status: "Status",
       type: "Type",
@@ -410,5 +415,13 @@ export default {
       hoursAgo: "{n}h ago",
       daysAgo: "{n}d ago",
     },
+  },
+  interject: {
+    title: "Message to Agent",
+    hint: "Delivered at the agent's next tool call. While this window is open, the agent pauses and waits for you.",
+    placeholder: "Type the message to send to this agent…",
+    overwriteNote: "{n} queued message(s) prefilled — submitting overwrites them",
+    send: "Send",
+    cancel: "Cancel",
   },
 };

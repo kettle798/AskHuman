@@ -99,6 +99,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "title.settings" => pick(lang, "AskHuman Settings", "AskHuman 设置"),
         "title.history" => pick(lang, "AskHuman History", "AskHuman 历史记录"),
         "title.agents" => pick(lang, "AskHuman Agents", "AskHuman Agent 状态"),
+        "title.interject" => pick(lang, "Message to Agent", "给 Agent 发消息"),
 
         // —— macOS 附件右键菜单 ——
         "menu.open" => pick(lang, "Open", "打开"),
@@ -373,6 +374,56 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "autoChannel.activityRead" => pick(lang, "Read", "读取文件"),
         "autoChannel.activityWrite" => pick(lang, "Edit", "写入文件"),
 
+        // —— /msg 插话（spec agent-interject D9）。编号复用 /status 的稳定 seq。 ——
+        // 用法提示（编号缺省 / 非数字时）。
+        "autoChannel.msgUsage" => pick(
+            lang,
+            "Usage: {p}msg <n> <text> — queue a message for agent n (delivered at its next tool call); {p}msg <n> — show pending; {p}msg-clear <n> — revoke.",
+            "用法：{p}msg <编号> <内容> — 给该 agent 排队一条插话（其下一次工具调用时送达）；{p}msg <编号> — 查看待送达；{p}msg-clear <编号> — 撤回。",
+        ),
+        // 追加成功回执（{n} = 当前待送达条数）。
+        "autoChannel.msgQueued" => pick(
+            lang,
+            "Queued — {n} message(s) pending delivery to this agent.",
+            "已排队，该 agent 共 {n} 条待送达。",
+        ),
+        // 追加时恰有 hook 挂起等待 → 立即送达（待送达清零）。
+        "autoChannel.msgDeliveredNow" => pick(
+            lang,
+            "Delivered — the agent was waiting and received it immediately.",
+            "已送达 — 该 agent 正在等待，消息已立即转交。",
+        ),
+        // /msg <编号> 回显头（{n} = 条数；正文换行接在后面）。
+        "autoChannel.msgEchoHeader" => pick(
+            lang,
+            "Pending for this agent ({n}):",
+            "该 agent 待送达插话（{n} 条）：",
+        ),
+        // 无待送达（回显 / 撤回时）。
+        "autoChannel.msgNone" => pick(
+            lang,
+            "No pending message for this agent.",
+            "该 agent 暂无待送达插话。",
+        ),
+        // 撤回成功。
+        "autoChannel.msgCleared" => pick(
+            lang,
+            "Pending message revoked.",
+            "已撤回待送达插话。",
+        ),
+        // grok 不支持插话（无可靠传话通道，spec agent-interject D1）。
+        "autoChannel.msgGrokUnsupported" => pick(
+            lang,
+            "This agent (Grok) does not support interjection.",
+            "该 agent（Grok）不支持插话。",
+        ),
+        // 会话已结束：无处送达。
+        "autoChannel.msgEnded" => pick(
+            lang,
+            "This agent session has ended; nothing to deliver to.",
+            "该 agent 会话已结束，无法插话。",
+        ),
+
         // —— 动态引导 / /help 文案（spec R3）：按开关拼装；不含「已收到」。 ——
         // `{p}` 为渠道命令前缀：Slack 客户端拦截一切 `/` 输入，故 Slack 提示 `!` 前缀，其余渠道 `/`。
         "autoChannel.helpTitle" => pick(lang, "AskHuman is running. You can:", "AskHuman 正在运行，你可以："),
@@ -381,6 +432,11 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             lang,
             "• {p}watch <n> — follow agent n with a live status card ({p}unwatch to stop)",
             "• {p}watch <编号> — 用一张实时状态卡关注该 agent（{p}unwatch 取消）",
+        ),
+        "autoChannel.helpCmdMsg" => pick(
+            lang,
+            "• {p}msg <n> <text> — send a message to agent n (delivered at its next tool call)",
+            "• {p}msg <编号> <内容> — 给该 agent 插话（其下一次工具调用时送达）",
         ),
         "autoChannel.helpCmdHelp" => pick(lang, "• {p}help — show this help", "• {p}help — 显示此帮助"),
         "autoChannel.helpCmdHere" => pick(lang, "• {p}here — route questions to this channel", "• {p}here — 把提问切到此渠道接收"),
@@ -701,6 +757,15 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "Agent Status ({w} working · {i} idle)",
             "Agent 状态（工作 {w} · 空闲 {i}）",
         ),
+        // Agent 子菜单（spec agent-interject D7）。
+        "tray.openAgentsWindow" => pick(lang, "Open Status Window", "打开状态窗口"),
+        "tray.agentSendMessage" => pick(lang, "Send Message…", "发送消息…"),
+        "tray.agentSendMessagePending" => pick(
+            lang,
+            "Send Message… (queued)",
+            "发送消息…（有待送达）",
+        ),
+        "tray.agentFocusTerminal" => pick(lang, "Focus Terminal", "聚焦终端"),
         "tray.checkUpdate" => pick(lang, "Check for Updates", "检查更新"),
         "tray.applyUpdate" => pick(
             lang,
