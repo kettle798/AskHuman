@@ -69,8 +69,13 @@ pub fn dispatch() {
         "--settings" => {
             #[cfg(unix)]
             {
-                if crate::gui_host::host_open(crate::gui_host::WindowKind::Settings, false, None)
-                    .is_ok()
+                if crate::gui_host::host_open(
+                    crate::gui_host::WindowKind::Settings,
+                    false,
+                    None,
+                    None,
+                )
+                .is_ok()
                 {
                     exit(0);
                 }
@@ -88,6 +93,7 @@ pub fn dispatch() {
                     crate::gui_host::WindowKind::History,
                     all,
                     Some(project),
+                    None,
                 )
                 .is_ok()
                 {

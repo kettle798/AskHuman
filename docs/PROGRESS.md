@@ -2,6 +2,23 @@
 
 按具体任务 / 需求记录待办与当前进展。任务 / 需求完成后删除其 section（历史留在 git）。
 
+## 待验收：Agent 插话（Interject）—— M1–M6 全量落地
+
+spec `docs/specs/agent-interject.md`（D1–D9）、计划 `docs/plans/agent-interject.md`（M1–M6），均已
+按用户评审定稿实现（详见 overview「Agent 插话」节），456 单测 + vue-tsc 通过、install.sh 已跑：
+- **M1 daemon 核心**：`agents/interject.rs` 队列（覆盖/追加/撤回/三态 poll/持久化 interject.json）+
+  IPC 扩展 + daemon 三态回帧与 Hold/composer 连接（非保活）+ 会话结束清理 + AgentsState 注入 pendingInterject。
+- **M2 hook**：reporter PreToolUse 捎带 `interject_poll` 等一帧裁决（300ms 超时失败放行）+ 各家 deny JSON
+  （`[USER INTERJECTION]` 协议文案）+ 安装产物 PreToolUse `timeout: 86400`（旧安装自动迁移 + 手动『更新』兜底）。
+- **M3 GUI**：`WindowKind::Interject` 宿主路由 + `InterjectView.vue` composer（预填/覆盖提交/取消）+
+  `client/composer.rs` 专属连接（断开=放行 hook）+ AgentsView「发送消息」入口/「插话」徽标/行内撤回。
+- **M4 托盘**：`TrayState.agents` 摘要 → 「Agent 状态」子菜单（打开窗口 + 每 agent 发送消息/聚焦终端）。
+- **M5 IM**：`/msg <编号> <内容>` 追加、`/msg <编号>` 回显、`/msg-clear` 撤回（别名 `/插话`、`/撤回`；
+  grok/ended 拒绝；与 /status 同门控、进 /help）。
+- **未做（待你验收）**：未真机端到端——需重启 daemon 用新二进制后：① AgentsView/托盘给某 working agent
+  发消息，观察其下一次工具调用收到 `[USER INTERJECTION]`；② 打开 composer 不提交，确认 agent 工具调用挂起
+  等待、取消后放行；③ IM 发 `/msg`；④ 已开生命周期的 agent hook 是否被自动迁移出 timeout=86400。
+
 ## 待验收：守护进程「保活模式」（实验 Tab）
 
 在「实验」Tab 加**分段控件**（与状态栏图标一致）选 daemon 生命周期：`activity`（默认＝当前行为：按需拉起、5min 空闲退出）/ `keepalive`（保活）。已全量落地：

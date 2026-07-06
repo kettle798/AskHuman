@@ -69,6 +69,12 @@ pub fn watch_file() -> PathBuf {
     state_dir().join("watch.json")
 }
 
+/// Agent 插话待送达队列持久化文件 `~/.askhuman/state/interject.json`（跨 daemon 重启恢复；
+/// 只在变更时写、启动读一次——hook 热路径零文件 IO，见 `docs/specs/agent-interject.md` D8）。
+pub fn interject_file() -> PathBuf {
+    state_dir().join("interject.json")
+}
+
 /// GUI 宿主进程的 IPC socket `~/.askhuman/gui-host.sock`（与 daemon socket 解耦，
 /// 使 daemon 未运行时也能打开设置/历史窗口，spec D13）。
 pub fn gui_host_sock() -> PathBuf {

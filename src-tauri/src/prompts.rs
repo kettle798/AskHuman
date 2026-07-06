@@ -85,9 +85,37 @@ pub fn grok_skill_body() -> String {
     )
 }
 
+/// 插话 deny 的包装文案（spec agent-interject D3，用户三轮定形）：前缀标明「用户消息」、
+/// 讲清「拦截只为送信、工具未被禁用、可原样重发」；消息块用 XML tag；末句不点名具体提问工具
+/// （提问入口可能经脚本封装，用最短的 "as instructed"）。始终英文（面向 AI 的契约）。
+pub fn interject_deny_reason(message: &str) -> String {
+    format!(
+        r#"[USER INTERJECTION] The user sent you the message below while you were working.
+This tool call was blocked only to deliver it — the tool is not forbidden; re-issue
+the same call if still appropriate.
+
+<user_message>
+{message}
+</user_message>
+
+Adjust your plan if needed. If anything is unclear, ask the user as instructed."#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interject_deny_reason_wraps_message() {
+        let p = interject_deny_reason("先停下，改用方案 B");
+        assert!(p.starts_with("[USER INTERJECTION]"));
+        assert!(p.contains("<user_message>\n先停下，改用方案 B\n</user_message>"));
+        assert!(p.contains("the tool is not forbidden"));
+        assert!(p.contains("ask the user as instructed"));
+        // 不点名具体提问工具（用户定案）。
+        assert!(!p.contains("AskHuman"));
+    }
 
     #[test]
     fn grok_skill_body_reuses_mcp_reference_and_appends_grok_note() {

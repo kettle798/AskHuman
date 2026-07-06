@@ -158,6 +158,38 @@ pub struct PendingRequestInfo {
     pub preview: String,
 }
 
+/// 一条活动 agent 的菜单栏摘要（D→宿主，托盘「Agent 状态」子菜单用，spec agent-interject D7）。
+/// 仅含活动会话（工作中在前）；ended 不下发。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrayAgentInfo {
+    pub session_id: String,
+    /// `/status` 同源的稳定编号（条目文案 `[n]` 前缀，可直接用于 IM `/msg <n>`）。
+    #[serde(default)]
+    pub seq: u64,
+    /// 家族小写标识（claude/codex/cursor/grok）。
+    pub kind: String,
+    /// 会话标题（transcript 解析；空=未解析出）。
+    #[serde(default)]
+    pub title: String,
+    /// 项目显示名（cwd basename；空=未知）。
+    #[serde(default)]
+    pub project_name: String,
+    /// 原始工作目录（插话窗口头部展示透传用）。
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// working / idle。
+    pub state: String,
+    /// 有待送达的插话消息。
+    #[serde(default)]
+    pub pending_interject: bool,
+    /// 「聚焦终端」可用（有 pid 且所在终端受支持）。
+    #[serde(default)]
+    pub focusable: bool,
+    #[serde(default)]
+    pub pid: Option<u32>,
+}
+
 /// Daemon → GUI Helper 的题目下发（show 是 submit 的子集 + Daemon 分配的 request_id + 上下文）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -245,6 +277,11 @@ pub enum ClientMsg {
         /// 旧 daemon 忽略此字段（`default`）；旧 report 不带 → `None`。用于 `/status <编号>` 实时「当前工具」。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool: Option<ToolReport>,
+        /// 插话轮询（spec agent-interject D4）：hook 侧仅在 **PreToolUse** 且通过去重的那次上报置 true，
+        /// daemon 须立即回一帧 `InterjectDecision`（none/message/hold）。旧 daemon 忽略此字段不回帧 →
+        /// hook 侧 300ms 超时放行（fail-open）；旧 report 不带 → false（保持即发即走）。
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        interject_poll: bool,
     },
     /// 状态窗口订阅 agent 快照（握手后发；之后 daemon 持续推 `AgentsState`，spec D20）。
     AgentsSubscribe,
@@ -258,6 +295,17 @@ pub enum ClientMsg {
     /// 手动把某 agent 置为「空闲」（状态窗口→daemon，即发即走）：用户发现某 agent 因漏 hook
     /// （如 Claude 被打断）卡在「工作中」时，可在状态窗口手动纠正。仅改状态、不结束会话。
     AgentForceIdle { session_id: String },
+    /// 插话 composer 窗口连接登记（spec agent-interject D7）：daemon 接管该连接并把该 session 标记
+    /// 「composer 打开中」（此后到来的 PreToolUse poll 会挂起等待）；**连接断开＝关闭**（杜绝宿主
+    /// 崩溃后的僵尸状态挂起 hook）。同连接上可继续收 `InterjectSubmit` / `InterjectQuery`。非保活。
+    InterjectComposer { session_id: String },
+    /// 插话提交（整体覆盖该 session 的待送达队列，D2）：空文本＝清空。有等待中的 hook 时立即交付。
+    /// 可在 composer 连接上发，也可独立连接即发即走。
+    InterjectSubmit { session_id: String, text: String },
+    /// 撤回：清空该 session 的待送达队列（AgentsView 撤回按钮 / IM `/msg-clear`）。即发即走。
+    InterjectClear { session_id: String },
+    /// 查询该 session 的待送达全文（composer 预填 / IM 回显）。回一帧 `InterjectState`。
+    InterjectQuery { session_id: String },
 }
 
 /// 一次工具调用的实时上报（随 `AgentEvent` 的 activity 事件携带）。跨进程只传**原始工具名**与
@@ -279,6 +327,20 @@ pub struct ToolReport {
 pub enum ToolPhase {
     Pre,
     Post,
+}
+
+/// 插话轮询的裁决动作（`InterjectDecision.action`，spec agent-interject D3/D4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InterjectAction {
+    /// 无消息、无等待 → hook 立即放行（首帧）。
+    None,
+    /// 交付消息 → hook 输出 deny+消息（首帧或 Hold 后二帧）。
+    Message,
+    /// composer 打开中 → hook 保持连接等待二帧（首帧）。
+    Hold,
+    /// 放行（Hold 后二帧：composer 取消/关窗，或消息被并发的另一个 hook 拿走）。
+    Release,
 }
 
 /// Daemon → 客户端（CLI / GUI Helper）的消息。
@@ -371,9 +433,26 @@ pub enum ServerMsg {
         /// 旧端回包缺此字段 → 空 Vec（仍显示数量、无子菜单项）。
         #[serde(default)]
         pending_requests: Vec<PendingRequestInfo>,
+        /// 活动 agent 摘要（托盘「Agent 状态」子菜单逐条列出，spec agent-interject D7）。
+        /// 旧 daemon 缺此字段 → 空 Vec（父项退回普通「打开状态窗口」条目）。
+        #[serde(default)]
+        agents: Vec<TrayAgentInfo>,
     },
     /// 聚焦并闪烁某请求的弹窗（daemon→该请求的 GUI Helper）。弹窗进程据此 `set_focus` + 通知前端闪烁。
     FocusPopup { request_id: String },
+    /// 插话轮询裁决（D→hook；`AgentEvent.interject_poll=true` 的回帧，spec agent-interject D4）。
+    /// 首帧 none/message/hold；hold 后二帧 message/release。`text` 仅 message 时有意义。
+    InterjectDecision {
+        action: InterjectAction,
+        #[serde(default)]
+        text: String,
+    },
+    /// 插话待送达状态（D→composer/查询方；`InterjectQuery` 的回帧）。`text` 为按空行拼接的全文
+    /// （composer 预填），`entries` 为条数（IM 回执）。
+    InterjectState {
+        text: String,
+        entries: usize,
+    },
 }
 
 #[cfg(test)]
@@ -479,12 +558,25 @@ mod tests {
                 id: "r1".to_string(),
                 preview: "deploy?".to_string(),
             }],
+            agents: vec![TrayAgentInfo {
+                session_id: "s1".to_string(),
+                seq: 3,
+                kind: "claude".to_string(),
+                title: "修复登录".to_string(),
+                project_name: "proj".to_string(),
+                cwd: Some("/w/proj".to_string()),
+                state: "working".to_string(),
+                pending_interject: true,
+                focusable: true,
+                pid: Some(7),
+            }],
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""type":"trayState""#));
         assert!(json.contains(r#""active_requests":1"#));
         assert!(json.contains(r#""agents_working":2"#));
         assert!(json.contains(r#""preview":"deploy?""#));
+        assert!(json.contains(r#""pendingInterject":true"#));
         let back: ServerMsg = serde_json::from_str(&json).unwrap();
         match back {
             ServerMsg::TrayState {
@@ -492,13 +584,24 @@ mod tests {
                 active_requests,
                 agents_idle,
                 update_available,
+                agents,
                 ..
             } => {
                 assert!(running);
                 assert_eq!(active_requests, 1);
                 assert_eq!(agents_idle, 3);
                 assert!(update_available);
+                assert_eq!(agents.len(), 1);
+                assert!(agents[0].focusable);
             }
+            other => panic!("unexpected: {:?}", other),
+        }
+        // 旧 daemon 回包缺 agents 字段 → 空 Vec（宿主退回普通条目）。
+        let old = r#"{"type":"trayState","running":true,"version":"0.6","uptime_secs":1,
+            "active_requests":0,"im_connections":[],"draining":false,"agents_working":0,
+            "agents_idle":0,"update_available":false,"update_latest":"","pending":false}"#;
+        match serde_json::from_str::<ServerMsg>(old).unwrap() {
+            ServerMsg::TrayState { agents, .. } => assert!(agents.is_empty()),
             other => panic!("unexpected: {:?}", other),
         }
     }
@@ -509,5 +612,102 @@ mod tests {
     fn unknown_server_variant_is_error_not_panic() {
         let r: Result<ServerMsg, _> = serde_json::from_str(r#"{"type":"somethingNew","x":1}"#);
         assert!(r.is_err());
+    }
+
+    /// 旧 report 发的 AgentEvent（无 interject_poll 字段）→ 默认 false（即发即走语义不变）；
+    /// false 时序列化省略该字段（旧 daemon 收到的负载与从前逐字一致）。
+    #[test]
+    fn agent_event_interject_poll_defaults_false_and_omitted() {
+        let json = r#"{"type":"agentEvent","agent":"claude","event":"activity","session_id":"s1"}"#;
+        let msg: ClientMsg = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMsg::AgentEvent { interject_poll, .. } => assert!(!interject_poll),
+            other => panic!("unexpected: {:?}", other),
+        }
+        let out = serde_json::to_string(&ClientMsg::AgentEvent {
+            agent: "claude".into(),
+            event: "activity".into(),
+            session_id: "s1".into(),
+            pid: None,
+            cwd: None,
+            ts: 0,
+            tool: None,
+            interject_poll: false,
+        })
+        .unwrap();
+        assert!(!out.contains("interject_poll"));
+        // true 时带字段。
+        let out = serde_json::to_string(&ClientMsg::AgentEvent {
+            agent: "claude".into(),
+            event: "activity".into(),
+            session_id: "s1".into(),
+            pid: None,
+            cwd: None,
+            ts: 0,
+            tool: None,
+            interject_poll: true,
+        })
+        .unwrap();
+        assert!(out.contains(r#""interject_poll":true"#));
+    }
+
+    /// 插话裁决帧序列化往返（action 小写；text 缺省为空串）。
+    #[test]
+    fn interject_decision_roundtrip() {
+        let json = serde_json::to_string(&ServerMsg::InterjectDecision {
+            action: InterjectAction::Hold,
+            text: String::new(),
+        })
+        .unwrap();
+        assert!(json.contains(r#""action":"hold""#));
+        // hook 侧解析（text 缺省）。
+        let back: ServerMsg =
+            serde_json::from_str(r#"{"type":"interjectDecision","action":"message","text":"停"}"#)
+                .unwrap();
+        match back {
+            ServerMsg::InterjectDecision { action, text } => {
+                assert_eq!(action, InterjectAction::Message);
+                assert_eq!(text, "停");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+        let none: ServerMsg =
+            serde_json::from_str(r#"{"type":"interjectDecision","action":"none"}"#).unwrap();
+        assert!(matches!(
+            none,
+            ServerMsg::InterjectDecision {
+                action: InterjectAction::None,
+                ..
+            }
+        ));
+    }
+
+    /// 插话客户端消息序列化往返（composer 登记 / 提交 / 撤回 / 查询）。
+    #[test]
+    fn interject_client_msgs_roundtrip() {
+        let msgs = [
+            ClientMsg::InterjectComposer {
+                session_id: "s1".into(),
+            },
+            ClientMsg::InterjectSubmit {
+                session_id: "s1".into(),
+                text: "调整方向".into(),
+            },
+            ClientMsg::InterjectClear {
+                session_id: "s1".into(),
+            },
+            ClientMsg::InterjectQuery {
+                session_id: "s1".into(),
+            },
+        ];
+        for m in msgs {
+            let json = serde_json::to_string(&m).unwrap();
+            let back: ClientMsg = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                std::mem::discriminant(&back),
+                std::mem::discriminant(&m),
+                "roundtrip variant mismatch: {json}"
+            );
+        }
     }
 }

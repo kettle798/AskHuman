@@ -11,6 +11,7 @@
 
 pub mod activity;
 pub mod detect;
+pub mod interject;
 pub mod registry;
 #[cfg(unix)]
 pub mod report;

@@ -9,6 +9,8 @@ import {
   agentsInit,
   agentsStartSubscription,
   focusAgentTerminal,
+  interjectClear,
+  openInterject,
 } from "../lib/ipc";
 import { isFocusableTerminal } from "../lib/terminals";
 import type { AgentKind, AgentRecord, AgentRunState } from "../lib/types";
@@ -220,6 +222,39 @@ async function confirmForceIdle(a: AgentRecord): Promise<void> {
   }
 }
 
+// 「发送消息」（插话）：非 grok（无可靠传话通道，首期排除）、非已结束。
+function canSendMessage(a: AgentRecord): boolean {
+  return a.kind !== "grok" && a.state !== "ended";
+}
+
+async function onSendMessage(a: AgentRecord): Promise<void> {
+  try {
+    await openInterject(a.sessionId, a.kind, a.cwd ?? null);
+  } catch (err) {
+    console.warn("open interject failed", err);
+  }
+}
+
+// 撤回待送达插话：行内二次确认后清空队列（daemon 推回新快照，徽标消失）。
+const confirmRevokeSession = ref<string | null>(null);
+
+function requestRevoke(a: AgentRecord): void {
+  confirmRevokeSession.value = a.sessionId;
+}
+
+function cancelRevoke(): void {
+  confirmRevokeSession.value = null;
+}
+
+async function confirmRevoke(a: AgentRecord): Promise<void> {
+  confirmRevokeSession.value = null;
+  try {
+    await interjectClear(a.sessionId);
+  } catch (err) {
+    console.warn("interject revoke failed", err);
+  }
+}
+
 // 绝对时间（hover 提示用）：保留简洁的相对显示，同时可悬停看到精确时间。
 function absoluteTime(secs?: number | null): string {
   if (!secs) return "";
@@ -334,6 +369,23 @@ onBeforeUnmount(() => {
                   {{ stateLabel(a.state) }}
                 </span>
                 <button
+                  v-if="canSendMessage(a)"
+                  type="button"
+                  class="focus-btn msg-btn"
+                  :title="t('agents.sendMessage')"
+                  :aria-label="t('agents.sendMessage')"
+                  @click="onSendMessage(a)"
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M2 3.5 C2 2.7 2.7 2 3.5 2 H12.5 C13.3 2 14 2.7 14 3.5 V9.5
+                      C14 10.3 13.3 11 12.5 11 H6 L3.2 13.4 C2.8 13.8 2 13.5 2 12.9 Z"
+                      fill="none" stroke="currentColor" stroke-width="1.3"
+                      stroke-linecap="round" stroke-linejoin="round" />
+                    <path d="M5 5.6 H11 M5 7.8 H9" stroke="currentColor" stroke-width="1.3"
+                      stroke-linecap="round" />
+                  </svg>
+                </button>
+                <button
                   v-if="canFocusTerminal(a)"
                   type="button"
                   class="focus-btn"
@@ -380,6 +432,24 @@ onBeforeUnmount(() => {
                     {{ t("agents.confirmOk") }}
                   </button>
                 </span>
+              </div>
+
+              <div v-if="a.pendingInterject" class="ij-row">
+                <span class="ij-badge">{{ t("agents.pendingInterject") }}</span>
+                <template v-if="confirmRevokeSession === a.sessionId">
+                  <span class="idle-confirm-text">{{ t("agents.revokeConfirm") }}</span>
+                  <span class="idle-confirm-actions">
+                    <button type="button" class="ic-btn" @click="cancelRevoke">
+                      {{ t("agents.confirmCancel") }}
+                    </button>
+                    <button type="button" class="ic-btn ic-revoke" @click="confirmRevoke(a)">
+                      {{ t("agents.revokeOk") }}
+                    </button>
+                  </span>
+                </template>
+                <button v-else type="button" class="ij-revoke" @click="requestRevoke(a)">
+                  {{ t("agents.revokeInterject") }}
+                </button>
               </div>
 
               <div v-if="showProject(a) || a.pid" class="meta">
@@ -685,6 +755,57 @@ onBeforeUnmount(() => {
 .idle-btn:hover {
   background: color-mix(in srgb, #ff9f0a 18%, transparent);
   color: #c77700;
+}
+.msg-btn:hover {
+  background: color-mix(in srgb, #0a84ff 14%, transparent);
+  color: #0a84ff;
+}
+.ij-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, #0a84ff 10%, transparent);
+}
+.ij-badge {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  background: color-mix(in srgb, #0a84ff 18%, transparent);
+  color: #0a84ff;
+  white-space: nowrap;
+}
+.ij-row .idle-confirm-text {
+  flex: 1 1 auto;
+}
+.ij-revoke {
+  appearance: none;
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.ij-revoke:hover {
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  color: var(--text-primary);
+}
+.ic-revoke {
+  border-color: transparent;
+  background: #0a84ff;
+  color: #fff;
+}
+.ic-revoke:hover {
+  background: #0071e3;
 }
 .idle-confirm {
   display: flex;

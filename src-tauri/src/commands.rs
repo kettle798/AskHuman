@@ -468,10 +468,11 @@ fn route_open_window(
     kind: crate::gui_host::WindowKind,
     all: bool,
     project: Option<String>,
+    target: Option<crate::gui_host::InterjectTarget>,
 ) {
     use crate::gui_host::WindowKind;
     std::thread::spawn(move || {
-        if crate::gui_host::host_open(kind, all, project.clone()).is_ok() {
+        if crate::gui_host::host_open(kind, all, project.clone(), target.clone()).is_ok() {
             return;
         }
         let fallback = app.clone();
@@ -485,6 +486,10 @@ fn route_open_window(
                     crate::app::create_history_window(&fallback, &cfg, all, project.as_deref(), pin)
                 }
                 WindowKind::Agents => crate::app::create_agents_window(&fallback, &cfg),
+                WindowKind::Interject => match &target {
+                    Some(t) => crate::app::create_interject_window(&fallback, &cfg, t, pin),
+                    None => Ok(()),
+                },
             };
         });
     });
@@ -514,7 +519,13 @@ pub fn open_history(app: AppHandle, state: State<AppState>) -> Result<(), String
     #[cfg(unix)]
     {
         let project = effective_popup_project(&app, &state);
-        route_open_window(app, crate::gui_host::WindowKind::History, false, Some(project));
+        route_open_window(
+            app,
+            crate::gui_host::WindowKind::History,
+            false,
+            Some(project),
+            None,
+        );
         Ok(())
     }
     #[cfg(not(unix))]
@@ -811,7 +822,7 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
     #[cfg(unix)]
     {
         // 路由到统一宿主（全局单窗）；宿主不可用时回退到本进程内建窗。
-        route_open_window(app, crate::gui_host::WindowKind::Settings, false, None);
+        route_open_window(app, crate::gui_host::WindowKind::Settings, false, None, None);
         Ok(())
     }
     #[cfg(not(unix))]
@@ -1182,6 +1193,129 @@ pub fn agent_force_idle(session_id: String) {
     crate::client::force_agent_idle(session_id);
     #[cfg(not(unix))]
     let _ = session_id;
+}
+
+// ===== Agent 插话（spec agent-interject）=====
+
+/// 打开某 agent 的插话 composer 窗口（AgentsView「发送消息」按钮）：路由到统一宿主
+/// （每 session 全局单窗），失败兜底本进程建窗。`kind`/`cwd` 仅用于窗口头部展示。
+#[tauri::command]
+pub fn open_interject(
+    app: AppHandle,
+    session_id: String,
+    kind: Option<String>,
+    cwd: Option<String>,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let target = crate::gui_host::InterjectTarget {
+            session: session_id,
+            agent: kind,
+            cwd,
+        };
+        route_open_window(
+            app,
+            crate::gui_host::WindowKind::Interject,
+            false,
+            None,
+            Some(target),
+        );
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (app, session_id, kind, cwd);
+        Err("unsupported".to_string())
+    }
+}
+
+/// 插话窗口初始化负载：主题 + 语言 + 待送达预填全文与条数。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InterjectInit {
+    theme: String,
+    lang: String,
+    /// 待送达全文（预填编辑；空 = 无待送达）。
+    text: String,
+    /// 待送达条数。
+    entries: usize,
+}
+
+/// 插话窗口挂载时调用：打开到 daemon 的 composer 专属连接（登记「composer 打开中」，
+/// 此后该 session 的 PreToolUse hook 挂起等待）+ 查询待送达全文作预填。连接生命周期与窗口一致。
+#[tauri::command]
+pub async fn interject_init(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<InterjectInit, String> {
+    let theme = theme_str(state.config.general.theme);
+    let lang = crate::i18n::Lang::resolve(&state.config.general.language)
+        .code()
+        .to_string();
+    #[cfg(unix)]
+    let (text, entries) = crate::client::composer::open(&session_id).await;
+    #[cfg(not(unix))]
+    let (text, entries) = {
+        let _ = &session_id;
+        (String::new(), 0usize)
+    };
+    Ok(InterjectInit {
+        theme,
+        lang,
+        text,
+        entries,
+    })
+}
+
+/// 插话提交（整体覆盖该 session 的待送达队列；空文本＝清空）：优先经 composer 连接送出
+/// （等待中的 hook 可当场拿到消息），随后关连接、关窗口。
+#[tauri::command]
+pub async fn interject_submit(
+    app: AppHandle,
+    session_id: String,
+    text: String,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        crate::client::composer::submit(&session_id, &text).await;
+        crate::client::composer::close(&session_id);
+        close_interject_window(&app, &session_id);
+    }
+    #[cfg(not(unix))]
+    let _ = (app, session_id, text);
+    Ok(())
+}
+
+/// 插话取消（取消按钮 / Esc）：关连接（daemon 视为 composer 关闭，放行等待 hook）、关窗口。
+/// 队列不动（已排队消息保留）。
+#[tauri::command]
+pub fn interject_cancel(app: AppHandle, session_id: String) {
+    #[cfg(unix)]
+    {
+        crate::client::composer::close(&session_id);
+        close_interject_window(&app, &session_id);
+    }
+    #[cfg(not(unix))]
+    let _ = (app, session_id);
+}
+
+/// 撤回某 session 的全部待送达插话（AgentsView 徽标撤回按钮）。即发即走、best-effort；
+/// daemon 清空后经订阅推回新快照（徽标消失）。
+#[tauri::command]
+pub fn interject_clear(session_id: String) {
+    #[cfg(unix)]
+    crate::client::report_agent_event(crate::ipc::ClientMsg::InterjectClear { session_id });
+    #[cfg(not(unix))]
+    let _ = session_id;
+}
+
+/// 关闭某 session 的插话窗口（提交/取消后收尾）。窗口不存在时静默。
+#[cfg(unix)]
+fn close_interject_window(app: &AppHandle, session_id: &str) {
+    let label = crate::gui_host::interject_label(session_id);
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.close();
+    }
 }
 
 /// 生命周期 hook 装/卸后刷新托盘菜单，使「Agent 状态」入口随之显隐。仅在统一 GUI 宿主进程内

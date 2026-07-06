@@ -51,7 +51,9 @@ fn monitor(args: &[String], lang: Lang) -> Result<(), String> {
     {
         if !json && !text && gui_available() {
             // 彻底路由到统一 GUI 宿主（全局单窗，spec D3）：宿主在则聚焦/新建 Agent 窗口、不在则拉起。
-            if crate::gui_host::host_open(crate::gui_host::WindowKind::Agents, false, None).is_ok() {
+            if crate::gui_host::host_open(crate::gui_host::WindowKind::Agents, false, None, None)
+                .is_ok()
+            {
                 exit(0);
             }
             // 兜底（宿主起不来）：本进程直接建窗。run_agents 进入事件循环并不会返回（-> !）。

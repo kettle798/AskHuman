@@ -7,8 +7,9 @@ import PopupView from "./views/PopupView.vue";
 const SettingsView = defineAsyncComponent(() => import("./views/SettingsView.vue"));
 const HistoryView = defineAsyncComponent(() => import("./views/HistoryView.vue"));
 const AgentsView = defineAsyncComponent(() => import("./views/AgentsView.vue"));
+const InterjectView = defineAsyncComponent(() => import("./views/InterjectView.vue"));
 
-// 视图模式由 Rust 侧通过窗口 URL 的查询参数注入：?view=popup | settings | history | agents
+// 视图模式由 Rust 侧通过窗口 URL 的查询参数注入：?view=popup | settings | history | agents | interject
 const view = computed(() => {
   const params = new URLSearchParams(window.location.search);
   return params.get("view") ?? "popup";
@@ -19,5 +20,6 @@ const view = computed(() => {
   <SettingsView v-if="view === 'settings'" />
   <HistoryView v-else-if="view === 'history'" />
   <AgentsView v-else-if="view === 'agents'" />
+  <InterjectView v-else-if="view === 'interject'" />
   <PopupView v-else />
 </template>

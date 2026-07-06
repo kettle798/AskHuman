@@ -48,7 +48,7 @@ pub fn save_active(channel: Option<&str>) {
 }
 
 /// 入站内置命令（带 `/` 前缀才算命令；可扩展）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// `/here`、`/这里`：把此渠道设为活跃槽 + 补推在途 + 必回执。
     Here,
@@ -58,6 +58,12 @@ pub enum Command {
     Watch(Option<u64>),
     /// `/unwatch`、`/取消关注`：取消关注（编号 / 全部 / 缺省自动）。
     Unwatch(WatchSel),
+    /// `/msg <编号> <内容>`、`/插话`：给该 agent 排队一条插话（spec agent-interject D2/D9）。
+    /// 编号缺省/非数字 → `(None, None)`（回用法提示）；有编号无内容 → 回显当前待送达全文。
+    /// 内容保留原始换行（多行插话原样送达）。
+    Msg(Option<u64>, Option<String>),
+    /// `/msg-clear <编号>`、`/撤回`：清空该 agent 的待送达插话。编号缺省 → 回用法提示。
+    MsgClear(Option<u64>),
     /// `/help`、`/帮助`、`/?`：返回动态引导文案（可发什么、可用命令）。
     Help,
 }
@@ -74,7 +80,7 @@ pub enum WatchSel {
 }
 
 /// 一条入站文本的分类（供 `handle_inbound` 分派）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Parsed {
     /// 已识别的内置命令。
     Command(Command),
@@ -101,8 +107,14 @@ pub fn classify(text: &str) -> Parsed {
             None => return Parsed::Text,
         },
     };
-    let mut tokens = bare.split_whitespace();
-    let token = tokens.next().unwrap_or("");
+    // 首 token（命令名）与其后的原文剩余。`/msg` 的内容需保留原始换行 / 空白结构，
+    // 不能整句 split_whitespace 后重拼，故此处手工切分。
+    let bare = bare.trim_start();
+    let (token, rest) = match bare.find(char::is_whitespace) {
+        Some(i) => (&bare[..i], bare[i..].trim_start()),
+        None => (bare, ""),
+    };
+    let mut tokens = rest.split_whitespace();
     match token.to_ascii_lowercase().as_str() {
         "here" | "这里" => Parsed::Command(Command::Here),
         "status" | "状态" => {
@@ -123,6 +135,24 @@ pub fn classify(text: &str) -> Parsed {
                 None => WatchSel::Auto,
             };
             Parsed::Command(Command::Unwatch(sel))
+        }
+        "msg" | "插话" => {
+            // `<编号> <内容>`：编号后的原文（含换行）整体为内容；编号缺省/非数字 → (None, None)。
+            let (first, content) = match rest.find(char::is_whitespace) {
+                Some(i) => (&rest[..i], rest[i..].trim_start()),
+                None => (rest, ""),
+            };
+            match first.parse::<u64>() {
+                Ok(n) => {
+                    let content = (!content.is_empty()).then(|| content.to_string());
+                    Parsed::Command(Command::Msg(Some(n), content))
+                }
+                Err(_) => Parsed::Command(Command::Msg(None, None)),
+            }
+        }
+        "msg-clear" | "撤回" => {
+            let sel = tokens.next().and_then(|s| s.parse::<u64>().ok());
+            Parsed::Command(Command::MsgClear(sel))
         }
         "help" | "帮助" | "?" | "？" => Parsed::Command(Command::Help),
         _ if bang => Parsed::Text,
@@ -195,6 +225,9 @@ pub fn help_text(
         out.push('\n');
         out.push_str(&i18n::tr(lang, "autoChannel.helpCmdWatch").replace("{p}", prefix));
     }
+    // `/msg` 插话与 `/status` 同门控（daemon 存活即可用，spec agent-interject D9）。
+    out.push('\n');
+    out.push_str(&i18n::tr(lang, "autoChannel.helpCmdMsg").replace("{p}", prefix));
     out.push('\n');
     out.push_str(&i18n::tr(lang, "autoChannel.helpCmdHelp").replace("{p}", prefix));
     if auto {
@@ -311,16 +344,19 @@ pub(crate) fn kind_title_project(rec: &Value, lang: Lang) -> String {
     format!("{} — {}（{}）", kind_label, title, project)
 }
 
+/// 按 `/status` 稳定编号（seq）在注册表快照中定位记录（`/msg` 寻址复用，spec agent-interject D9）。
+pub fn find_by_seq(snapshot: &Value, id: u64) -> Option<&Value> {
+    snapshot
+        .as_array()?
+        .iter()
+        .find(|r| r.get("seq").and_then(|v| v.as_u64()) == Some(id))
+}
+
 /// `/status <编号>`：单个 agent 的「头部 + 当前活动」。找不到该编号回未找到提示
 /// （`prefix` 为命令展示前缀，见 `cmd_prefix`）。
 /// 可寻址范围＝快照里的任意记录（工作中 / 空闲 / 已结束皆可）。
 pub fn status_detail_text(snapshot: &Value, id: u64, prefix: &str, lang: Lang) -> String {
-    let empty = Vec::new();
-    let list = snapshot.as_array().unwrap_or(&empty);
-    let Some(rec) = list
-        .iter()
-        .find(|r| r.get("seq").and_then(|v| v.as_u64()) == Some(id))
-    else {
+    let Some(rec) = find_by_seq(snapshot, id) else {
         return i18n::tr(lang, "autoChannel.statusDetailNotFound")
             .replace("{id}", &id.to_string())
             .replace("{p}", prefix);
@@ -769,6 +805,60 @@ mod tests {
             classify("/UNWATCH ALL"),
             Parsed::Command(Command::Unwatch(WatchSel::All))
         );
+    }
+
+    #[test]
+    fn classify_msg_and_msg_clear() {
+        // `/msg <编号> <内容>`：内容为编号后的原文，保留内部换行 / 空白。
+        assert_eq!(
+            classify("/msg 3 停一下，先看测试"),
+            Parsed::Command(Command::Msg(Some(3), Some("停一下，先看测试".to_string())))
+        );
+        assert_eq!(
+            classify("/msg 3 第一行\n  第二行"),
+            Parsed::Command(Command::Msg(Some(3), Some("第一行\n  第二行".to_string())))
+        );
+        // 有编号无内容 → 回显。
+        assert_eq!(classify("/msg 3"), Parsed::Command(Command::Msg(Some(3), None)));
+        // 编号缺省 / 非数字 → (None, None)（用法提示）。
+        assert_eq!(classify("/msg"), Parsed::Command(Command::Msg(None, None)));
+        assert_eq!(classify("/msg hello"), Parsed::Command(Command::Msg(None, None)));
+        // 中文别名 + `!` 备用前缀（Slack）。
+        assert_eq!(
+            classify("/插话 2 换个方案"),
+            Parsed::Command(Command::Msg(Some(2), Some("换个方案".to_string())))
+        );
+        assert_eq!(
+            classify("!msg 1 hi"),
+            Parsed::Command(Command::Msg(Some(1), Some("hi".to_string())))
+        );
+        // msg-clear / 撤回。
+        assert_eq!(classify("/msg-clear 3"), Parsed::Command(Command::MsgClear(Some(3))));
+        assert_eq!(classify("/撤回 3"), Parsed::Command(Command::MsgClear(Some(3))));
+        assert_eq!(classify("/msg-clear"), Parsed::Command(Command::MsgClear(None)));
+        assert_eq!(classify("!MSG-CLEAR 7"), Parsed::Command(Command::MsgClear(Some(7))));
+    }
+
+    #[test]
+    fn help_text_always_lists_msg() {
+        // /msg 与 /status 同门控：任何开关组合都在 help 中列出。
+        let msg = i18n::tr(Lang::En, "autoChannel.helpCmdMsg").replace("{p}", "/");
+        assert!(help_text(false, false, false, "/", Lang::En).contains(&msg));
+        assert!(help_text(true, true, true, "/", Lang::En).contains(&msg));
+    }
+
+    #[test]
+    fn find_by_seq_locates_record() {
+        let snap = serde_json::json!([
+            { "seq": 1, "sessionId": "s1", "kind": "claude", "state": "working" },
+            { "seq": 2, "sessionId": "s2", "kind": "grok", "state": "idle" },
+        ]);
+        assert_eq!(
+            find_by_seq(&snap, 2).and_then(|r| r.get("sessionId")).and_then(|v| v.as_str()),
+            Some("s2")
+        );
+        assert!(find_by_seq(&snap, 9).is_none());
+        assert!(find_by_seq(&serde_json::json!({}), 1).is_none());
     }
 
     #[test]

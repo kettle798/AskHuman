@@ -886,6 +886,57 @@ mod tests {
     }
 
     #[test]
+    fn agents_submenu_add_remove_and_badge_text_change() {
+        // spec agent-interject D7：「Agent 状态」父项为子菜单，首项打开窗口 + 分隔线 + 逐 agent 子菜单。
+        let menu = |agents: Vec<(&str, &str, bool)>| {
+            let mut children = vec![it("open_agents", "Open Status Window"), sep("sep.agents")];
+            for (sid, msg_text, focusable) in agents {
+                let mut sub = vec![it(&format!("ij:{sid}"), msg_text)];
+                if focusable {
+                    sub.push(it(&format!("term:{sid}"), "Focus Terminal"));
+                }
+                children.push(Node::submenu(
+                    format!("agent:{sid}"),
+                    format!("Claude Code · proj-{sid}"),
+                    true,
+                    sub,
+                ));
+            }
+            vec![Node::submenu("agents_menu", "Agent Status (1 · 0)", true, children)]
+        };
+        let b = MockOps::new();
+        let mut d = Driver::new(&b);
+        d.apply(menu(vec![("s1", "Send Message…", true)]));
+
+        // 新 agent 上线：仅插入其子菜单（含子项），其余不动。
+        b.clear_log();
+        d.apply(menu(vec![
+            ("s1", "Send Message…", true),
+            ("s2", "Send Message…", false),
+        ]));
+        assert!(b.ops().contains(&"insert agent:s2 @3 agents_menu".to_string()));
+        assert!(b.ops().contains(&"insert ij:s2 @0 agent:s2".to_string()));
+        assert!(!b.ops().iter().any(|l| l.contains("remove")));
+
+        // 待送达徽标：仅该 agent 的「发送消息」文字变化，零结构操作。
+        b.clear_log();
+        d.apply(menu(vec![
+            ("s1", "Send Message… (queued)", true),
+            ("s2", "Send Message…", false),
+        ]));
+        assert_eq!(b.ops(), vec!["settext ij:s1 Send Message… (queued)".to_string()]);
+        assert_eq!(b.structural_ops(), 0);
+
+        // agent 下线：仅移除其子菜单。
+        b.clear_log();
+        d.apply(menu(vec![("s2", "Send Message…", false)]));
+        assert_eq!(
+            b.ops(),
+            vec!["remove agent:s1 agents_menu".to_string()]
+        );
+    }
+
+    #[test]
     fn full_menu_uptime_tick_only_sets_text() {
         // 还原真实场景：完整菜单，仅 uptime 文案变化 → 只 1 次 set_text、0 结构操作。
         let menu = |uptime: &str| {

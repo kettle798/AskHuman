@@ -3,6 +3,8 @@
 //! Phase 0：仅提供连通性原语（ensure_running / request_status / request_stop）。
 //! 任务提交（submit）将在 Phase 1 接入。
 
+pub mod composer;
+
 use crate::daemon::lifecycle;
 use crate::daemon::spawn;
 use crate::ipc::{
@@ -201,6 +203,76 @@ pub fn report_agent_event(msg: ClientMsg) {
     });
 }
 
+/// 插话轮询产物（hook 侧视角，spec agent-interject D3/D4）。
+#[derive(Debug, PartialEq, Eq)]
+pub enum InterjectPollOutcome {
+    /// 放行（无消息 / composer 取消 / daemon 不可达 / 旧 daemon 无回帧 / 任何失败）。
+    Allow,
+    /// deny + 用户插话消息（hook 侧按家族输出 deny JSON）。
+    Deny(String),
+}
+
+/// 首帧读取超时：旧 daemon 不认识 `interject_poll`、不会回帧，超时即放行（fail-open），
+/// 插话绝不拖慢正常工具调用（spec agent-interject D4）。
+const INTERJECT_FIRST_FRAME_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// 带插话轮询的生命周期上报（PreToolUse 专用，spec agent-interject D4）：与 `report_agent_event`
+/// 同一连接语义，但发送后读回裁决帧——首帧 300ms 超时放行；`hold` 则无限期等二帧
+/// （composer 打开中，等待受 hook 自身 timeout=86400 兜底）。全程 best-effort，失败＝放行。
+pub fn report_agent_event_with_poll(msg: ClientMsg) -> InterjectPollOutcome {
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return InterjectPollOutcome::Allow;
+    };
+    rt.block_on(async {
+        let _ = ensure_running().await;
+        let Ok((mut reader, mut writer)) = connect_split().await else {
+            return InterjectPollOutcome::Allow;
+        };
+        if ipc::write_msg(&mut writer, &msg).await.is_err() {
+            return InterjectPollOutcome::Allow;
+        }
+        interject_read_frames(&mut reader, INTERJECT_FIRST_FRAME_TIMEOUT).await
+    })
+}
+
+/// 裁决帧读取逻辑（与传输解耦，内存流可单测）：首帧带超时（none/message/hold），
+/// hold 后二帧不限时（message/release）。忽略穿插的其它帧；EOF/解析错误＝放行。
+async fn interject_read_frames<R>(reader: &mut R, first_timeout: Duration) -> InterjectPollOutcome
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use crate::ipc::InterjectAction;
+    let first = match tokio::time::timeout(first_timeout, read_interject_decision(reader)).await {
+        Ok(v) => v,
+        Err(_) => return InterjectPollOutcome::Allow, // 超时：旧 daemon / 慢回帧 → 放行
+    };
+    match first {
+        Some((InterjectAction::Message, text)) => InterjectPollOutcome::Deny(text),
+        Some((InterjectAction::Hold, _)) => match read_interject_decision(reader).await {
+            Some((InterjectAction::Message, text)) => InterjectPollOutcome::Deny(text),
+            _ => InterjectPollOutcome::Allow, // release / EOF（daemon 退出等）→ 放行
+        },
+        _ => InterjectPollOutcome::Allow, // none / release / EOF / 意外帧
+    }
+}
+
+/// 读到下一帧 `InterjectDecision`（跳过其它服务端消息）；EOF/错误返回 None。
+async fn read_interject_decision<R>(reader: &mut R) -> Option<(crate::ipc::InterjectAction, String)>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    loop {
+        match ipc::read_msg::<_, ServerMsg>(reader).await {
+            Ok(Some(ServerMsg::InterjectDecision { action, text })) => return Some((action, text)),
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => return None,
+        }
+    }
+}
+
 /// 状态窗口手动把某 agent 置空闲（纠正漏 hook 卡「工作中」）：即发即走，best-effort。
 pub fn force_agent_idle(session_id: String) {
     report_agent_event(ClientMsg::AgentForceIdle { session_id });
@@ -329,5 +401,160 @@ async fn run_ask_async(task: crate::ipc::TaskRequest) -> i32 {
         }
         eprintln!("askhuman: could not reach daemon");
         return 3;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::InterjectAction;
+    use tokio::io::BufReader;
+
+    /// 假 daemon 帧序列 → 裁决逻辑（三态 + 超时 fail-open，spec agent-interject D4）。
+    async fn run_frames(
+        frames: Vec<ServerMsg>,
+        close_after: bool,
+        first_timeout: Duration,
+    ) -> InterjectPollOutcome {
+        let (mut tx, rx) = tokio::io::duplex(4096);
+        let mut reader = BufReader::new(rx);
+        let writer = tokio::spawn(async move {
+            for f in frames {
+                ipc::write_msg(&mut tx, &f).await.unwrap();
+            }
+            if !close_after {
+                // 保持连接打开（模拟 daemon 挂着不回帧）。
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+        let out = interject_read_frames(&mut reader, first_timeout).await;
+        writer.abort();
+        out
+    }
+
+    #[tokio::test]
+    async fn first_frame_none_allows() {
+        let out = run_frames(
+            vec![ServerMsg::InterjectDecision {
+                action: InterjectAction::None,
+                text: String::new(),
+            }],
+            true,
+            Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(out, InterjectPollOutcome::Allow);
+    }
+
+    #[tokio::test]
+    async fn first_frame_message_denies() {
+        let out = run_frames(
+            vec![ServerMsg::InterjectDecision {
+                action: InterjectAction::Message,
+                text: "改用方案 B".into(),
+            }],
+            true,
+            Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(out, InterjectPollOutcome::Deny("改用方案 B".into()));
+    }
+
+    #[tokio::test]
+    async fn hold_then_message_denies() {
+        let out = run_frames(
+            vec![
+                ServerMsg::InterjectDecision {
+                    action: InterjectAction::Hold,
+                    text: String::new(),
+                },
+                ServerMsg::InterjectDecision {
+                    action: InterjectAction::Message,
+                    text: "停一下".into(),
+                },
+            ],
+            true,
+            Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(out, InterjectPollOutcome::Deny("停一下".into()));
+    }
+
+    #[tokio::test]
+    async fn hold_then_release_allows() {
+        let out = run_frames(
+            vec![
+                ServerMsg::InterjectDecision {
+                    action: InterjectAction::Hold,
+                    text: String::new(),
+                },
+                ServerMsg::InterjectDecision {
+                    action: InterjectAction::Release,
+                    text: String::new(),
+                },
+            ],
+            true,
+            Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(out, InterjectPollOutcome::Allow);
+    }
+
+    #[tokio::test]
+    async fn hold_then_eof_allows() {
+        // daemon 在 Hold 后退出（drain）：EOF → 放行。
+        let out = run_frames(
+            vec![ServerMsg::InterjectDecision {
+                action: InterjectAction::Hold,
+                text: String::new(),
+            }],
+            true,
+            Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(out, InterjectPollOutcome::Allow);
+    }
+
+    #[tokio::test]
+    async fn no_reply_times_out_to_allow() {
+        // 旧 daemon 不认识 interject_poll、不回帧：首帧超时 → 放行（fail-open）。
+        let started = std::time::Instant::now();
+        let out = run_frames(vec![], false, Duration::from_millis(100)).await;
+        assert_eq!(out, InterjectPollOutcome::Allow);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn immediate_eof_allows() {
+        // 连接被立即关闭（daemon 崩溃）→ 放行。
+        let out = run_frames(vec![], true, Duration::from_millis(300)).await;
+        assert_eq!(out, InterjectPollOutcome::Allow);
+    }
+
+    #[tokio::test]
+    async fn interleaved_frames_are_skipped() {
+        // 穿插其它服务端帧（如广播）不影响裁决读取。
+        let out = run_frames(
+            vec![
+                ServerMsg::Warn {
+                    text: "noise".into(),
+                },
+                ServerMsg::InterjectDecision {
+                    action: InterjectAction::Hold,
+                    text: String::new(),
+                },
+                ServerMsg::Warn {
+                    text: "noise2".into(),
+                },
+                ServerMsg::InterjectDecision {
+                    action: InterjectAction::Message,
+                    text: "msg".into(),
+                },
+            ],
+            true,
+            Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(out, InterjectPollOutcome::Deny("msg".into()));
     }
 }

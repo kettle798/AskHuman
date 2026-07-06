@@ -840,6 +840,11 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::agent_lifecycle_uninstall,
             crate::commands::focus_agent_terminal,
             crate::commands::agent_force_idle,
+            crate::commands::open_interject,
+            crate::commands::interject_init,
+            crate::commands::interject_submit,
+            crate::commands::interject_cancel,
+            crate::commands::interject_clear,
             crate::commands::telegram_test,
             crate::commands::dingtalk_test,
             crate::commands::dingtalk_detect_prepare,
@@ -897,18 +902,23 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                 // 设置窗口关闭时清掉 Liquid Glass 注册表条目：插件按 label 缓存玻璃视图，
                 // 若不清理，下次同 label 重开会走 update 分支去操作已销毁的旧视图，导致背景透明无玻璃。
                 #[cfg(target_os = "macos")]
-                "settings" | "history" | "agents" => {
+                l if gui_host::is_hosted_label(l) => {
                     if matches!(event, WindowEvent::CloseRequested { .. }) {
                         clear_window_glass(window);
                     }
                 }
                 _ => {}
             }
-            // 宿主模式：托管窗口销毁后重算窗口计数（驱动 daemon 续命与宿主退出判定）。
             #[cfg(unix)]
             if matches!(event, WindowEvent::Destroyed)
-                && matches!(window.label(), "settings" | "history" | "agents")
+                && gui_host::is_hosted_label(window.label())
             {
+                // 插话窗口销毁 → 关闭其 composer 连接（daemon 视为「composer 关闭」，放行等待 hook）。
+                // 兜底路径：正常取消/提交已由命令关闭，这里覆盖直接关窗/进程内异常。
+                if window.label().starts_with("interject-") {
+                    crate::client::composer::close_by_label(window.label());
+                }
+                // 宿主模式：托管窗口销毁后重算窗口计数（驱动 daemon 续命与宿主退出判定）。
                 let app = window.app_handle();
                 if app.try_state::<gui_host::HostState>().is_some() {
                     gui_host::recount_windows(app);
@@ -1631,6 +1641,57 @@ where
     .min_inner_size(520.0, 360.0)
     .center()
     .theme(theme);
+    let window_effect = config.general.window_effect;
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    let win = apply_surface(builder, window_bg, window_effect).build()?;
+    #[cfg(target_os = "macos")]
+    if matches!(window_effect, WindowEffect::Glass) {
+        apply_liquid_glass(&win);
+    }
+    Ok(())
+}
+
+/// 创建（或聚焦已存在的）插话 composer 窗口（spec agent-interject D7）：**每 session 全局唯一**
+/// （label 带 session 哈希）。URL 携带 session / agent 家族 / 项目显示名，前端据此渲染头部；
+/// 待送达预填文本由前端经 `interject_init` 向 daemon 查询（连接生命周期与窗口一致）。
+/// `pin_above_popup` 语义同 [`create_settings_window`]。
+#[cfg(unix)]
+pub(crate) fn create_interject_window<R, M>(
+    manager: &M,
+    config: &AppConfig,
+    target: &crate::gui_host::InterjectTarget,
+    pin_above_popup: bool,
+) -> tauri::Result<()>
+where
+    R: tauri::Runtime,
+    M: Manager<R>,
+{
+    let label = crate::gui_host::interject_label(&target.session);
+    if let Some(w) = manager.get_webview_window(&label) {
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    let theme = window_theme(config);
+    let lang = Lang::resolve(&config.general.language);
+    let window_bg = background_for(resolved_theme(config));
+    let mut url = String::from("index.html?view=interject&session=");
+    url.push_str(&urlencode(&target.session));
+    if let Some(agent) = target.agent.as_deref() {
+        url.push_str("&kind=");
+        url.push_str(&urlencode(agent));
+    }
+    if let Some(cwd) = target.cwd.as_deref() {
+        // 预算好显示名（目录 basename），前端免再拆路径。
+        url.push_str("&project=");
+        url.push_str(&urlencode(&crate::project::display_name(cwd)));
+    }
+    let builder = WebviewWindowBuilder::new(manager, &label, WebviewUrl::App(url.into()))
+        .title(i18n::tr(lang, "title.interject"))
+        .inner_size(520.0, 340.0)
+        .min_inner_size(420.0, 260.0)
+        .center()
+        .always_on_top(pin_above_popup)
+        .theme(theme);
     let window_effect = config.general.window_effect;
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     let win = apply_surface(builder, window_bg, window_effect).build()?;

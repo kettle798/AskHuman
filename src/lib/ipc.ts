@@ -16,6 +16,7 @@ import type {
   HistoryEntry,
   HistoryInit,
   HookStatus,
+  InterjectInit,
   LifecycleStatus,
   PopupInit,
   PopupSoundSupport,
@@ -218,6 +219,29 @@ export const focusAgentTerminal = (pid: number) =>
 /** 手动把某 agent 置为「空闲」（纠正漏 hook 卡「工作中」）。即发即走，daemon 改后推回新快照。 */
 export const agentForceIdle = (sessionId: string) =>
   invoke<void>("agent_force_idle", { sessionId });
+
+/** 打开某 agent 的插话 composer 窗口（经统一宿主路由，每 session 全局单窗）。 */
+export const openInterject = (
+  sessionId: string,
+  kind: string | null,
+  cwd: string | null,
+) => invoke<void>("open_interject", { sessionId, kind, cwd });
+
+/** 插话窗口初始化：登记 composer 打开 + 取待送达预填全文。 */
+export const interjectInit = (sessionId: string) =>
+  invoke<InterjectInit>("interject_init", { sessionId });
+
+/** 提交插话（整体覆盖待送达队列；空文本＝清空），随后后端关连接、关窗口。 */
+export const interjectSubmit = (sessionId: string, text: string) =>
+  invoke<void>("interject_submit", { sessionId, text });
+
+/** 取消插话（队列不动），后端关连接、关窗口。 */
+export const interjectCancel = (sessionId: string) =>
+  invoke<void>("interject_cancel", { sessionId });
+
+/** 撤回某 session 的全部待送达插话。 */
+export const interjectClear = (sessionId: string) =>
+  invoke<void>("interject_clear", { sessionId });
 
 export const telegramTest = (args: TelegramTestArgs) =>
   invoke<string>("telegram_test", { args });

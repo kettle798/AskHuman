@@ -181,6 +181,8 @@ mod unix_impl {
         update: Mutex<UpdateSnapshot>,
         /// Agent 生命周期注册表（实验性功能，spec D3）。
         agents: Arc<AgentRegistry>,
+        /// Agent 插话队列（spec agent-interject）：内存常驻，变更时落盘 `interject.json`。
+        interject: crate::agents::interject::InterjectStore,
         /// 状态窗口订阅者的发送端列表（变化 / 心跳时推 `AgentsState`）。
         agent_subs: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<ServerMsg>>>,
         /// 菜单栏宿主订阅者的发送端列表（变化 / 心跳时推 `TrayState`）。
@@ -497,6 +499,7 @@ mod unix_impl {
             config: Mutex::new(AppConfig::load()),
             update: Mutex::new(init_update_snapshot()),
             agents: Arc::new(AgentRegistry::load()),
+            interject: crate::agents::interject::InterjectStore::load(),
             agent_subs: Mutex::new(Vec::new()),
             tray_subs: Mutex::new(Vec::new()),
             active_channel: Mutex::new(crate::autochannel::load_active()),
@@ -612,7 +615,15 @@ mod unix_impl {
                     if changed {
                         state.agents.persist();
                     }
-                    if changed || has_agent_subs(&state) {
+                    // 插话队列兜底清理（spec agent-interject D2/D8）：不再活动的会话（漏 session-end /
+                    // 进程死亡 / pid 轮换 / daemon 停机期间结束）清空其待送达条目、放行等待者。
+                    let ij_changed = state
+                        .interject
+                        .retain_sessions(&state.agents.active_session_ids());
+                    if ij_changed {
+                        state.interject.persist();
+                    }
+                    if changed || ij_changed || has_agent_subs(&state) {
                         broadcast_agents_state(&state);
                     }
                     // 菜单栏宿主在线时周期刷新（uptime / IM 连接等随时间变化的字段）。
@@ -695,6 +706,13 @@ mod unix_impl {
         AgentsSub,
         /// 菜单栏宿主订阅：接管连接，持续推送 `TrayState`（非保活）。
         TraySub,
+        /// 插话 composer 窗口连接：接管连接，登记「composer 打开」；断开＝关闭（非保活）。
+        InterjectComposer { session_id: String },
+        /// 插话 Hold：hook 连接等待 composer 提交/取消（非保活；首帧 Hold 已回，等二帧）。
+        InterjectHold {
+            session_id: String,
+            rx: tokio::sync::oneshot::Receiver<crate::agents::interject::WaitOutcome>,
+        },
         Closed,
     }
 
@@ -710,6 +728,12 @@ mod unix_impl {
             Control::GuiWarm => handle_gui_warm(reader, w, &state).await,
             Control::AgentsSub => handle_agents_sub(reader, w, &state).await,
             Control::TraySub => handle_tray_sub(reader, w, &state).await,
+            Control::InterjectComposer { session_id } => {
+                handle_interject_composer(reader, w, &state, session_id).await
+            }
+            Control::InterjectHold { session_id, rx } => {
+                handle_interject_hold(reader, w, &state, session_id, rx).await
+            }
             Control::Closed => {}
         }
 
@@ -819,7 +843,8 @@ mod unix_impl {
                 ClientMsg::GuiHello { token } => return Control::Gui(token),
                 // 方案6 预热弹窗握手（无 token）：接管连接入热池待命。
                 ClientMsg::GuiWarmReady => return Control::GuiWarm,
-                // Agent 生命周期事件上报（即发即走）：更新注册表，变化则持久化 + 推订阅窗口。
+                // Agent 生命周期事件上报（默认即发即走；`interject_poll=true` 时回一帧插话裁决）：
+                // 更新注册表，变化则持久化 + 推订阅窗口。
                 ClientMsg::AgentEvent {
                     agent,
                     event,
@@ -828,6 +853,7 @@ mod unix_impl {
                     cwd,
                     ts,
                     tool,
+                    interject_poll,
                 } => {
                     if let (Some(kind), Some(ev)) =
                         (AgentKind::parse(&agent), LifecycleEvent::parse(&event))
@@ -838,6 +864,12 @@ mod unix_impl {
                         if changed {
                             state.agents.persist();
                             broadcast_agents_state(state);
+                        }
+                        // 会话结束 → 清空该 session 的插话队列（spec agent-interject D2/D8）。
+                        if matches!(ev, LifecycleEvent::SessionEnd) {
+                            if state.interject.remove_session(&session_id) {
+                                state.interject.persist();
+                            }
                         }
                         // 实时「当前工具」（不落盘、不广播；IM /status 拉取时现取）。
                         match tool {
@@ -859,6 +891,59 @@ mod unix_impl {
                         ensure_inbound_listeners(state).await;
                         // /watch 引擎即时唤醒：turn / 工具 / 会话结束事件立刻反映到实时状态卡。
                         state.watch.notify.notify_one();
+
+                        // 插话轮询（spec agent-interject D3/D4）：必须回一帧（hook 在等，300ms 超时）。
+                        if interject_poll {
+                            use crate::agents::interject::PollOutcome;
+                            use crate::ipc::InterjectAction;
+                            match state.interject.poll(&session_id) {
+                                PollOutcome::None => {
+                                    let _ = ipc::write_msg(
+                                        w,
+                                        &ServerMsg::InterjectDecision {
+                                            action: InterjectAction::None,
+                                            text: String::new(),
+                                        },
+                                    )
+                                    .await;
+                                }
+                                PollOutcome::Message(text) => {
+                                    let _ = ipc::write_msg(
+                                        w,
+                                        &ServerMsg::InterjectDecision {
+                                            action: InterjectAction::Message,
+                                            text,
+                                        },
+                                    )
+                                    .await;
+                                    // 队列被消费：落盘 + 刷新徽标。
+                                    state.interject.persist();
+                                    broadcast_agents_state(state);
+                                }
+                                PollOutcome::Hold(rx) => {
+                                    let _ = ipc::write_msg(
+                                        w,
+                                        &ServerMsg::InterjectDecision {
+                                            action: InterjectAction::Hold,
+                                            text: String::new(),
+                                        },
+                                    )
+                                    .await;
+                                    // 接管连接等待提交/取消（非保活，可长达数小时）。
+                                    return Control::InterjectHold { session_id, rx };
+                                }
+                            }
+                        }
+                    } else if interject_poll {
+                        // 解析失败也必须回帧，hook 侧才能立即放行（否则空等 300ms）。
+                        let _ = ipc::write_msg(
+                            w,
+                            &ServerMsg::InterjectDecision {
+                                action: crate::ipc::InterjectAction::None,
+                                text: String::new(),
+                            },
+                        )
+                        .await;
                     }
                 }
                 // 状态窗口订阅：接管连接持续推送。
@@ -875,6 +960,32 @@ mod unix_impl {
                         state.agents.persist();
                         broadcast_agents_state(state);
                     }
+                }
+                // 插话 composer 窗口登记：接管连接（连接断开＝关闭，非保活）。
+                ClientMsg::InterjectComposer { session_id } => {
+                    return Control::InterjectComposer { session_id };
+                }
+                // 插话提交（独立连接形态；composer 连接上的提交在 handle_interject_composer 处理）。
+                ClientMsg::InterjectSubmit { session_id, text } => {
+                    interject_submit(state, &session_id, &text);
+                }
+                // 撤回待送达。
+                ClientMsg::InterjectClear { session_id } => {
+                    if state.interject.clear(&session_id) {
+                        state.interject.persist();
+                        broadcast_agents_state(state);
+                    }
+                }
+                // 查询待送达全文（composer 预填 / IM 回显）。
+                ClientMsg::InterjectQuery { session_id } => {
+                    let _ = ipc::write_msg(
+                        w,
+                        &ServerMsg::InterjectState {
+                            text: state.interject.full_text(&session_id),
+                            entries: state.interject.pending_count(&session_id),
+                        },
+                    )
+                    .await;
                 }
                 // 自动识别（Q6）：就地处理（可能阻塞至多 120s 等用户发码），完成后回结果继续循环。
                 // 排空期拒绝（兜底；正常情况下客户端在 Hello 即被挡住而回退进程内识别）。
@@ -1331,11 +1442,35 @@ mod unix_impl {
             .unwrap_or(false)
     }
 
+    /// 构造给状态窗口的 agent 全量快照：注册表 snapshot + 注入插话「待送达」徽标
+    /// （`pendingInterject: true`，spec agent-interject D7；IM /status 等其它 snapshot 消费方不注入）。
+    fn agents_snapshot_for_gui(state: &Arc<ServerState>) -> serde_json::Value {
+        let mut snap = state.agents.snapshot();
+        let pending = state.interject.pending_sessions();
+        if !pending.is_empty() {
+            if let Some(arr) = snap.as_array_mut() {
+                for rec in arr.iter_mut() {
+                    let hit = rec
+                        .get("sessionId")
+                        .and_then(|v| v.as_str())
+                        .map(|sid| pending.iter().any(|p| p == sid))
+                        .unwrap_or(false);
+                    if hit {
+                        if let Some(obj) = rec.as_object_mut() {
+                            obj.insert("pendingInterject".to_string(), serde_json::json!(true));
+                        }
+                    }
+                }
+            }
+        }
+        snap
+    }
+
     /// 向所有状态窗口推送一次 agent 全量快照（顺带剔除已断开的发送端）。
     /// agent 忙闲变化也影响菜单栏状态，故顺带刷新 TrayState。
     fn broadcast_agents_state(state: &Arc<ServerState>) {
         let msg = ServerMsg::AgentsState {
-            agents: state.agents.snapshot(),
+            agents: agents_snapshot_for_gui(state),
         };
         if let Ok(mut subs) = state.agent_subs.lock() {
             subs.retain(|tx| tx.send(msg.clone()).is_ok());
@@ -1360,7 +1495,7 @@ mod unix_impl {
             subs.push(tx.clone());
         }
         let _ = tx.send(ServerMsg::AgentsState {
-            agents: state.agents.snapshot(),
+            agents: agents_snapshot_for_gui(state),
         });
 
         // 读端仅用于探测断开；窗口正常不发消息。
@@ -1386,6 +1521,14 @@ mod unix_impl {
     /// 构造一帧整合的 `TrayState`（含 IM 连接、agent 忙闲、更新态）。需 await（读 tokio Mutex）。
     async fn build_tray_state(state: &Arc<ServerState>) -> ServerMsg {
         let u = { state.update.lock().unwrap().clone() };
+        // Agent 子菜单摘要（spec agent-interject D7）：注册表活动会话 + 插话「待送达」标记。
+        let mut agents = state.agents.tray_agent_infos();
+        let pending_ij = state.interject.pending_sessions();
+        for a in agents.iter_mut() {
+            if pending_ij.iter().any(|p| p == &a.session_id) {
+                a.pending_interject = true;
+            }
+        }
         ServerMsg::TrayState {
             running: true,
             version: version(),
@@ -1399,6 +1542,7 @@ mod unix_impl {
             update_latest: u.latest_version,
             pending: u.pending,
             pending_requests: state.registry.pending_infos(),
+            agents,
         }
     }
 
@@ -1450,6 +1594,100 @@ mod unix_impl {
         }
         drop(tx);
         let _ = writer.await;
+        state.active.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// 插话提交的统一处理：覆盖队列（有等待 hook 时立即交付）→ 落盘 → 刷新徽标。
+    fn interject_submit(state: &Arc<ServerState>, session_id: &str, text: &str) {
+        state.interject.submit(session_id, text);
+        state.interject.persist();
+        broadcast_agents_state(state);
+    }
+
+    /// 插话 composer 窗口连接（spec agent-interject D7）：登记「composer 打开」（此后到来的
+    /// PreToolUse poll 挂起等待），同连接上处理提交/查询；**连接断开＝关闭**（放行所有等待 hook）。
+    ///
+    /// **非保活**（同 `handle_tray_sub` 抵消法）：composer 可能开着放几个小时，不能借此续命 daemon。
+    async fn handle_interject_composer(
+        mut reader: Reader,
+        mut w: OwnedWriteHalf,
+        state: &Arc<ServerState>,
+        session_id: String,
+    ) {
+        state.active.fetch_sub(1, Ordering::SeqCst);
+        state.interject.composer_opened(&session_id);
+
+        loop {
+            match ipc::read_msg::<_, ClientMsg>(&mut reader).await {
+                Ok(Some(ClientMsg::InterjectSubmit { session_id: sid, text })) => {
+                    interject_submit(state, &sid, &text);
+                }
+                Ok(Some(ClientMsg::InterjectClear { session_id: sid })) => {
+                    if state.interject.clear(&sid) {
+                        state.interject.persist();
+                        broadcast_agents_state(state);
+                    }
+                }
+                Ok(Some(ClientMsg::InterjectQuery { session_id: sid })) => {
+                    let _ = ipc::write_msg(
+                        &mut w,
+                        &ServerMsg::InterjectState {
+                            text: state.interject.full_text(&sid),
+                            entries: state.interject.pending_count(&sid),
+                        },
+                    )
+                    .await;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => break, // 关窗 / 取消 / 宿主崩溃：连接断开即关闭。
+            }
+        }
+
+        state.interject.composer_closed(&session_id);
+        state.active.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// 插话 Hold：hook 连接已收到首帧 `hold`，在此等待 composer 提交/取消后回二帧
+    /// `message`/`release`（spec agent-interject D3/D4）。hook 断开（自身超时/被杀）则放弃；
+    /// 若消息已交付到本连接但写回失败，重新入队（不丢消息）。
+    ///
+    /// **非保活**（同 `handle_tray_sub` 抵消法）：等待可长达数小时，不能借此续命 daemon。
+    async fn handle_interject_hold(
+        mut reader: Reader,
+        mut w: OwnedWriteHalf,
+        state: &Arc<ServerState>,
+        session_id: String,
+        rx: tokio::sync::oneshot::Receiver<crate::agents::interject::WaitOutcome>,
+    ) {
+        use crate::agents::interject::WaitOutcome;
+        use crate::ipc::InterjectAction;
+
+        state.active.fetch_sub(1, Ordering::SeqCst);
+        tokio::select! {
+            outcome = rx => {
+                let (action, text) = match outcome {
+                    Ok(WaitOutcome::Message(text)) => (InterjectAction::Message, text),
+                    // Release / 发送端消失（会话清理）→ 放行。
+                    _ => (InterjectAction::Release, String::new()),
+                };
+                let delivered = ipc::write_msg(
+                    &mut w,
+                    &ServerMsg::InterjectDecision { action, text: text.clone() },
+                )
+                .await
+                .is_ok();
+                if action == InterjectAction::Message && !delivered {
+                    // 极端竞态：交付瞬间 hook 恰好断开 → 消息回队，等下一次工具调用送达。
+                    state.interject.submit(&session_id, &text);
+                    state.interject.persist();
+                    broadcast_agents_state(state);
+                }
+            }
+            _ = wait_cli_eof(&mut reader) => {
+                // hook 侧放弃（超时 fail-open / 进程被杀）：丢弃接收端即可——
+                // 交付时发送端 send 失败会自动跳过本等待者（消息不丢）。
+            }
+        }
         state.active.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -3159,6 +3397,116 @@ mod unix_impl {
         let _ = reply_channel_text(channel_id, config, &text).await;
     }
 
+    /// `/msg` 系命令的寻址公共段（spec agent-interject D9）：编号（复用 `/status` 稳定 seq）→
+    /// 注册表快照记录 → 校验可插话（grok 无传话通道、ended 无处送达）。失败时已回提示、返回 None。
+    async fn resolve_msg_target(
+        state: &Arc<ServerState>,
+        channel_id: &str,
+        sel: Option<u64>,
+        config: &AppConfig,
+        lang: Lang,
+    ) -> Option<String> {
+        let prefix = crate::autochannel::cmd_prefix(channel_id);
+        let Some(id) = sel else {
+            let text = crate::i18n::tr(lang, "autoChannel.msgUsage").replace("{p}", prefix);
+            let _ = reply_channel_text(channel_id, config, &text).await;
+            return None;
+        };
+        let snapshot = state.agents.snapshot();
+        let Some(rec) = crate::autochannel::find_by_seq(&snapshot, id) else {
+            let text = crate::i18n::tr(lang, "autoChannel.statusDetailNotFound")
+                .replace("{id}", &id.to_string())
+                .replace("{p}", prefix);
+            let _ = reply_channel_text(channel_id, config, &text).await;
+            return None;
+        };
+        if rec.get("kind").and_then(|v| v.as_str()) == Some("grok") {
+            let _ = reply_channel_text(
+                channel_id,
+                config,
+                crate::i18n::tr(lang, "autoChannel.msgGrokUnsupported"),
+            )
+            .await;
+            return None;
+        }
+        if rec.get("state").and_then(|v| v.as_str()) == Some("ended") {
+            let _ = reply_channel_text(
+                channel_id,
+                config,
+                crate::i18n::tr(lang, "autoChannel.msgEnded"),
+            )
+            .await;
+            return None;
+        }
+        rec.get("sessionId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    /// `/msg <编号> [内容]`（spec agent-interject D2/D9）：有内容 → **追加**排队（IM 看不到旧文本，
+    /// 覆盖会静默丢内容；恰有 hook 挂起等待则立即送达）；无内容 → 回显当前待送达全文。
+    async fn handle_msg_cmd(
+        state: &Arc<ServerState>,
+        channel_id: &str,
+        sel: Option<u64>,
+        content: Option<String>,
+        config: &AppConfig,
+        lang: Lang,
+    ) {
+        let Some(sid) = resolve_msg_target(state, channel_id, sel, config, lang).await else {
+            return;
+        };
+        let text = match content {
+            Some(content) => {
+                // n=0 ⇒ 被等待中的 hook 当场消费（已送达）；否则回执当前待送达条数。
+                let n = state.interject.append(&sid, &content);
+                state.interject.persist();
+                broadcast_agents_state(state);
+                if n == 0 {
+                    crate::i18n::tr(lang, "autoChannel.msgDeliveredNow").to_string()
+                } else {
+                    crate::i18n::tr(lang, "autoChannel.msgQueued").replace("{n}", &n.to_string())
+                }
+            }
+            None => {
+                let full = state.interject.full_text(&sid);
+                if full.is_empty() {
+                    crate::i18n::tr(lang, "autoChannel.msgNone").to_string()
+                } else {
+                    let n = state.interject.pending_count(&sid);
+                    format!(
+                        "{}\n{}",
+                        crate::i18n::tr(lang, "autoChannel.msgEchoHeader")
+                            .replace("{n}", &n.to_string()),
+                        full
+                    )
+                }
+            }
+        };
+        let _ = reply_channel_text(channel_id, config, &text).await;
+    }
+
+    /// `/msg-clear <编号>`（`/撤回`）：清空该 agent 的待送达插话 + 回执。
+    async fn handle_msg_clear_cmd(
+        state: &Arc<ServerState>,
+        channel_id: &str,
+        sel: Option<u64>,
+        config: &AppConfig,
+        lang: Lang,
+    ) {
+        let Some(sid) = resolve_msg_target(state, channel_id, sel, config, lang).await else {
+            return;
+        };
+        let text = if state.interject.clear(&sid) {
+            state.interject.persist();
+            broadcast_agents_state(state);
+            crate::i18n::tr(lang, "autoChannel.msgCleared")
+        } else {
+            crate::i18n::tr(lang, "autoChannel.msgNone")
+        };
+        let _ = reply_channel_text(channel_id, config, text).await;
+    }
+
     /// 统一入站分派（与渠道无关），spec R3/R4：
     /// - `/status`：始终回状态文本（开关开且因此切槽时附激活回执）。
     /// - `/here`：开关开时激活+补推+回执；开关关时改回**引导文案**（不再静默忽略）。
@@ -3242,6 +3590,13 @@ mod unix_impl {
             }
             Parsed::Command(Command::Unwatch(sel)) => {
                 handle_unwatch_cmd(state, channel_id, sel, &config, lang).await;
+            }
+            // /msg、/msg-clear：插话（spec agent-interject D9；与 /status 同门控，始终响应）。
+            Parsed::Command(Command::Msg(sel, content)) => {
+                handle_msg_cmd(state, channel_id, sel, content, &config, lang).await;
+            }
+            Parsed::Command(Command::MsgClear(sel)) => {
+                handle_msg_clear_cmd(state, channel_id, sel, &config, lang).await;
             }
             Parsed::Command(Command::Help) | Parsed::UnknownCommand => {
                 let has_q = has_active_question_on(state, channel_id);

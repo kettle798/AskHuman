@@ -366,6 +366,11 @@ export default {
     markIdleConfirm: "确认把此 Agent 置为空闲？",
     confirmOk: "置为空闲",
     confirmCancel: "取消",
+    sendMessage: "发送消息",
+    pendingInterject: "待送达",
+    revokeInterject: "撤回",
+    revokeConfirm: "撤回待送达的消息？",
+    revokeOk: "撤回",
     view: {
       status: "状态",
       type: "类型",
@@ -396,5 +401,13 @@ export default {
       hoursAgo: "{n} 小时前",
       daysAgo: "{n} 天前",
     },
+  },
+  interject: {
+    title: "给 Agent 发消息",
+    hint: "消息将在该 Agent 下一次工具调用时送达；本窗口打开期间 Agent 会暂停等待。",
+    placeholder: "输入要发给该 Agent 的消息…",
+    overwriteNote: "已预填 {n} 条待送达消息，提交将整体覆盖",
+    send: "发送",
+    cancel: "取消",
   },
 };

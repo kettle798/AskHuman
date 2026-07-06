@@ -1,0 +1,505 @@
+//! Agent 插话（Interject）队列：daemon 内存中按 session 维护「待送达消息 + composer 状态 +
+//! 等待中的 hook」（spec `docs/specs/agent-interject.md` D2/D3/D4/D8）。
+//!
+//! 性能红线（spec §4）：hook 热路径零文件 IO——队列常驻内存（O(1) 查表）；
+//! `~/.askhuman/state/interject.json` 只在**变更时**由调用方触发原子落盘（`persist`）、
+//! daemon 启动 `load()` 读一次。composer 打开状态是连接态，不持久化。
+//!
+//! 交付语义（D3）：hook poll 时「有消息 → 原子出队（并发只交付一个）；composer 打开 → 挂起等待；
+//! 都没有 → 立即放行」。提交时若有等待中的 hook，**只有一个**拿到消息、其余放行。
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
+
+use crate::paths;
+
+/// Hold 之后等待的结果（daemon 内部：提交/取消唤醒等待中的 hook 连接）。
+#[derive(Debug)]
+pub enum WaitOutcome {
+    /// 有消息 → hook 输出 deny+消息。
+    Message(String),
+    /// 放行（composer 取消 / 关窗 / 消息被并发的另一个 hook 拿走）。
+    Release,
+}
+
+/// 一次 hook poll 的即时结果（AgentEvent `interject_poll=true` 的处理产物）。
+pub enum PollOutcome {
+    /// 无消息且 composer 未打开 → hook 立即放行。
+    None,
+    /// 有已提交消息 → 原子出队交付（调用方随后 `persist` + 广播徽标变化）。
+    Message(String),
+    /// composer 打开中 → 挂起等待提交/取消（接收端由 hook 连接的处理任务持有）。
+    Hold(oneshot::Receiver<WaitOutcome>),
+}
+
+/// 单 session 的插话状态。
+#[derive(Default)]
+struct Entry {
+    /// 待送达条目（弹窗提交＝整体覆盖；IM `/msg`＝追加；消费时按空行拼接一次性送达）。
+    entries: Vec<String>,
+    /// composer 打开计数（连接态：连接断开＝关闭；正常每 session 至多 1，计数防重入）。
+    composers: usize,
+    /// 等待中的 hook（Hold 状态的连接）。提交时一个拿 Message、其余 Release；取消/关窗全 Release。
+    waiters: Vec<oneshot::Sender<WaitOutcome>>,
+}
+
+impl Entry {
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty() && self.composers == 0 && self.waiters.is_empty()
+    }
+}
+
+/// 持久化形态（只存 entries；composer/waiter 是连接态）。
+#[derive(Default, Serialize, Deserialize)]
+struct Persisted {
+    #[serde(default)]
+    sessions: HashMap<String, Vec<String>>,
+}
+
+/// daemon 内唯一的插话队列（线程安全）。
+#[derive(Default)]
+pub struct InterjectStore {
+    inner: Mutex<HashMap<String, Entry>>,
+}
+
+/// 条目拼接分隔（多条按空行合成一条消息一次性送达，D2）。
+const JOIN_SEP: &str = "\n\n";
+
+impl InterjectStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 从 `interject.json` 还原待送达条目（缺失/解析失败 → 空）。已结束会话的残留条目
+    /// 由 daemon 周期 tick 的 `retain_sessions` 与 session-end 事件清理。
+    pub fn load() -> Self {
+        Self::load_from(&paths::interject_file())
+    }
+
+    fn load_from(path: &std::path::Path) -> Self {
+        let store = Self::new();
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return store;
+        };
+        let Ok(parsed) = serde_json::from_str::<Persisted>(&text) else {
+            return store;
+        };
+        let mut map = store.inner.lock().unwrap();
+        for (sid, entries) in parsed.sessions {
+            let entries: Vec<String> = entries.into_iter().filter(|e| !e.trim().is_empty()).collect();
+            if !sid.is_empty() && !entries.is_empty() {
+                map.insert(
+                    sid,
+                    Entry {
+                        entries,
+                        ..Entry::default()
+                    },
+                );
+            }
+        }
+        drop(map);
+        store
+    }
+
+    /// 原子落盘（只在变更后由调用方触发；best-effort，失败静默）。
+    pub fn persist(&self) {
+        self.persist_to(&paths::interject_file());
+    }
+
+    fn persist_to(&self, path: &std::path::Path) {
+        let data = {
+            let map = self.inner.lock().unwrap();
+            Persisted {
+                sessions: map
+                    .iter()
+                    .filter(|(_, e)| !e.entries.is_empty())
+                    .map(|(k, e)| (k.clone(), e.entries.clone()))
+                    .collect(),
+            }
+        };
+        let Ok(json) = serde_json::to_string_pretty(&data) else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension(format!("json.tmp-{}", uuid::Uuid::new_v4()));
+        if std::fs::write(&tmp, json.as_bytes()).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+
+    /// composer 提交：**整体覆盖**队列（D2）。空文本＝清空。有等待中的 hook 时立即交付
+    /// （一个拿 Message、其余 Release，队列即被消费）；无等待者则留队等下一次 poll。
+    pub fn submit(&self, session_id: &str, text: &str) {
+        let text = text.trim();
+        let mut map = self.inner.lock().unwrap();
+        let e = map.entry(session_id.to_string()).or_default();
+        e.entries.clear();
+        if !text.is_empty() {
+            e.entries.push(text.to_string());
+        }
+        Self::try_deliver(e);
+        if e.is_empty() {
+            map.remove(session_id);
+        }
+    }
+
+    /// IM `/msg` 追加一条（D2）。交付语义同 `submit`。返回追加后的待送达条数（0＝已被
+    /// 等待中的 hook 立即消费）。
+    pub fn append(&self, session_id: &str, text: &str) -> usize {
+        let text = text.trim();
+        if text.is_empty() {
+            return self.pending_count(session_id);
+        }
+        let mut map = self.inner.lock().unwrap();
+        let e = map.entry(session_id.to_string()).or_default();
+        e.entries.push(text.to_string());
+        Self::try_deliver(e);
+        let n = e.entries.len();
+        if e.is_empty() {
+            map.remove(session_id);
+        }
+        n
+    }
+
+    /// 撤回：清空该 session 的待送达条目（不动 composer/waiter）。返回是否原有内容（供调用方
+    /// 决定 persist + 广播）。
+    pub fn clear(&self, session_id: &str) -> bool {
+        let mut map = self.inner.lock().unwrap();
+        let Some(e) = map.get_mut(session_id) else {
+            return false;
+        };
+        let had = !e.entries.is_empty();
+        e.entries.clear();
+        if e.is_empty() {
+            map.remove(session_id);
+        }
+        had
+    }
+
+    /// 待送达全文（composer 预填 / IM 回显）：条目按空行拼接；无则空串。
+    pub fn full_text(&self, session_id: &str) -> String {
+        let map = self.inner.lock().unwrap();
+        map.get(session_id)
+            .map(|e| e.entries.join(JOIN_SEP))
+            .unwrap_or_default()
+    }
+
+    /// 待送达条数（IM 回执用）。
+    pub fn pending_count(&self, session_id: &str) -> usize {
+        let map = self.inner.lock().unwrap();
+        map.get(session_id).map(|e| e.entries.len()).unwrap_or(0)
+    }
+
+    /// 有待送达条目的 session 集合（AgentsState 快照注入 `pendingInterject` 徽标）。
+    pub fn pending_sessions(&self) -> Vec<String> {
+        let map = self.inner.lock().unwrap();
+        map.iter()
+            .filter(|(_, e)| !e.entries.is_empty())
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// hook poll（D3 三态）：有消息 → 原子出队；composer 打开 → 挂起；都没有 → 放行。
+    /// Message 分支消费了队列，调用方需随后 `persist` + 广播徽标变化。
+    pub fn poll(&self, session_id: &str) -> PollOutcome {
+        let mut map = self.inner.lock().unwrap();
+        let Some(e) = map.get_mut(session_id) else {
+            return PollOutcome::None;
+        };
+        if !e.entries.is_empty() {
+            let text = e.entries.join(JOIN_SEP);
+            e.entries.clear();
+            if e.is_empty() {
+                map.remove(session_id);
+            }
+            return PollOutcome::Message(text);
+        }
+        if e.composers > 0 {
+            // 顺带清理已死的等待者（hook 连接断开后其接收端已 drop）。
+            e.waiters.retain(|w| !w.is_closed());
+            let (tx, rx) = oneshot::channel();
+            e.waiters.push(tx);
+            return PollOutcome::Hold(rx);
+        }
+        PollOutcome::None
+    }
+
+    /// composer 窗口打开（连接登记）。
+    pub fn composer_opened(&self, session_id: &str) {
+        let mut map = self.inner.lock().unwrap();
+        map.entry(session_id.to_string()).or_default().composers += 1;
+    }
+
+    /// composer 窗口关闭（取消 / 关窗 / 连接断开）：放行所有等待中的 hook。
+    pub fn composer_closed(&self, session_id: &str) {
+        let mut map = self.inner.lock().unwrap();
+        let Some(e) = map.get_mut(session_id) else {
+            return;
+        };
+        e.composers = e.composers.saturating_sub(1);
+        if e.composers == 0 {
+            for w in e.waiters.drain(..) {
+                let _ = w.send(WaitOutcome::Release);
+            }
+        }
+        if e.is_empty() {
+            map.remove(session_id);
+        }
+    }
+
+    /// 会话结束：清空条目 + 放行所有等待者。composer 计数是连接态、保留（窗口连接断开时自行归零）。
+    /// 返回是否清掉了待送达条目（供调用方决定 persist + 广播）。
+    pub fn remove_session(&self, session_id: &str) -> bool {
+        let mut map = self.inner.lock().unwrap();
+        let Some(e) = map.get_mut(session_id) else {
+            return false;
+        };
+        let had = !e.entries.is_empty();
+        e.entries.clear();
+        for w in e.waiters.drain(..) {
+            let _ = w.send(WaitOutcome::Release);
+        }
+        if e.is_empty() {
+            map.remove(session_id);
+        }
+        had
+    }
+
+    /// 周期清理：不在 `keep` 集合（注册表活动 session）里的会话按 `remove_session` 处理
+    /// （兜底漏 session-end 事件 / daemon 停机期间结束的会话）。返回是否有条目被清。
+    pub fn retain_sessions(&self, keep: &[String]) -> bool {
+        let sids: Vec<String> = {
+            let map = self.inner.lock().unwrap();
+            map.keys()
+                .filter(|k| !keep.iter().any(|s| s == *k))
+                .cloned()
+                .collect()
+        };
+        let mut changed = false;
+        for sid in sids {
+            changed |= self.remove_session(&sid);
+        }
+        changed
+    }
+
+    /// 若有存活的等待者则把当前队列整体交付给其中一个（其余 Release）并清空队列。
+    /// 无等待者 / 队列为空则不动。
+    fn try_deliver(e: &mut Entry) {
+        if e.entries.is_empty() || e.waiters.is_empty() {
+            // 无可交付内容时也顺带放行等待者？不——等待者由 composer 关闭事件放行；
+            // 空提交（=撤回）不代表 composer 关闭。这里只清理已死连接。
+            e.waiters.retain(|w| !w.is_closed());
+            return;
+        }
+        let text = e.entries.join(JOIN_SEP);
+        let mut delivered = false;
+        for w in e.waiters.drain(..) {
+            if !delivered {
+                // send 失败（接收端已 drop）→ 尝试下一个等待者。
+                if w.send(WaitOutcome::Message(text.clone())).is_ok() {
+                    delivered = true;
+                }
+            } else {
+                let _ = w.send(WaitOutcome::Release);
+            }
+        }
+        if delivered {
+            e.entries.clear();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poll_none_when_empty() {
+        let s = InterjectStore::new();
+        assert!(matches!(s.poll("s1"), PollOutcome::None));
+    }
+
+    #[test]
+    fn submit_then_poll_takes_atomically() {
+        let s = InterjectStore::new();
+        s.submit("s1", "调整方向");
+        assert_eq!(s.pending_count("s1"), 1);
+        // 首个 poll 拿到消息并清空。
+        match s.poll("s1") {
+            PollOutcome::Message(t) => assert_eq!(t, "调整方向"),
+            _ => panic!("expected message"),
+        }
+        // 第二个 poll（并发工具调用）拿不到 → 放行。
+        assert!(matches!(s.poll("s1"), PollOutcome::None));
+        assert_eq!(s.pending_count("s1"), 0);
+    }
+
+    #[test]
+    fn submit_overwrites_whole_queue() {
+        let s = InterjectStore::new();
+        s.append("s1", "第一条");
+        s.append("s1", "第二条");
+        assert_eq!(s.pending_count("s1"), 2);
+        assert_eq!(s.full_text("s1"), "第一条\n\n第二条");
+        // 弹窗提交＝整体覆盖。
+        s.submit("s1", "改成这个");
+        assert_eq!(s.pending_count("s1"), 1);
+        assert_eq!(s.full_text("s1"), "改成这个");
+        // 空提交＝清空。
+        s.submit("s1", "  ");
+        assert_eq!(s.pending_count("s1"), 0);
+    }
+
+    #[test]
+    fn append_joins_on_delivery() {
+        let s = InterjectStore::new();
+        assert_eq!(s.append("s1", "a"), 1);
+        assert_eq!(s.append("s1", "b"), 2);
+        match s.poll("s1") {
+            PollOutcome::Message(t) => assert_eq!(t, "a\n\nb"),
+            _ => panic!("expected message"),
+        }
+    }
+
+    #[test]
+    fn clear_revokes_pending() {
+        let s = InterjectStore::new();
+        s.submit("s1", "x");
+        assert!(s.clear("s1"));
+        assert!(!s.clear("s1")); // 已空 → 无变化
+        assert!(matches!(s.poll("s1"), PollOutcome::None));
+    }
+
+    #[test]
+    fn composer_open_holds_then_submit_delivers_one() {
+        let s = InterjectStore::new();
+        s.composer_opened("s1");
+        // 两个并发 hook 都进入等待。
+        let PollOutcome::Hold(rx1) = s.poll("s1") else {
+            panic!("expected hold")
+        };
+        let PollOutcome::Hold(rx2) = s.poll("s1") else {
+            panic!("expected hold")
+        };
+        // 提交：恰一个拿到消息、另一个被放行；队列被消费。
+        s.submit("s1", "停一下");
+        let o1 = rx1.blocking_recv().unwrap();
+        let o2 = rx2.blocking_recv().unwrap();
+        let (msgs, releases): (Vec<_>, Vec<_>) = [o1, o2]
+            .into_iter()
+            .partition(|o| matches!(o, WaitOutcome::Message(_)));
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(releases.len(), 1);
+        match &msgs[0] {
+            WaitOutcome::Message(t) => assert_eq!(t, "停一下"),
+            _ => unreachable!(),
+        }
+        assert_eq!(s.pending_count("s1"), 0);
+    }
+
+    #[test]
+    fn composer_close_releases_waiters() {
+        let s = InterjectStore::new();
+        s.composer_opened("s1");
+        let PollOutcome::Hold(rx) = s.poll("s1") else {
+            panic!("expected hold")
+        };
+        s.composer_closed("s1");
+        assert!(matches!(rx.blocking_recv().unwrap(), WaitOutcome::Release));
+        // 关闭后再 poll → 不再等待。
+        assert!(matches!(s.poll("s1"), PollOutcome::None));
+    }
+
+    #[test]
+    fn dead_waiter_skipped_on_delivery() {
+        let s = InterjectStore::new();
+        s.composer_opened("s1");
+        let PollOutcome::Hold(rx_dead) = s.poll("s1") else {
+            panic!("expected hold")
+        };
+        drop(rx_dead); // hook 连接死亡。
+        let PollOutcome::Hold(rx_live) = s.poll("s1") else {
+            panic!("expected hold")
+        };
+        s.submit("s1", "msg");
+        // 消息不会丢在死连接上：交付给存活的等待者。
+        match rx_live.blocking_recv().unwrap() {
+            WaitOutcome::Message(t) => assert_eq!(t, "msg"),
+            _ => panic!("expected message"),
+        }
+    }
+
+    #[test]
+    fn submit_without_waiters_stays_queued() {
+        let s = InterjectStore::new();
+        s.composer_opened("s1");
+        s.submit("s1", "留队");
+        s.composer_closed("s1");
+        assert_eq!(s.pending_count("s1"), 1);
+        match s.poll("s1") {
+            PollOutcome::Message(t) => assert_eq!(t, "留队"),
+            _ => panic!("expected message"),
+        }
+    }
+
+    #[test]
+    fn remove_session_clears_and_releases() {
+        let s = InterjectStore::new();
+        s.submit("s1", "x");
+        s.composer_opened("s1");
+        let PollOutcome::Message(_) = s.poll("s1") else {
+            panic!("expected message")
+        };
+        let PollOutcome::Hold(rx) = s.poll("s1") else {
+            panic!("expected hold")
+        };
+        assert!(!s.remove_session("s1")); // 条目已被消费 → 无条目变化，但等待者被放行
+        assert!(matches!(rx.blocking_recv().unwrap(), WaitOutcome::Release));
+        s.submit("s2", "y");
+        assert!(s.remove_session("s2"));
+        assert_eq!(s.pending_count("s2"), 0);
+    }
+
+    #[test]
+    fn retain_sessions_prunes_unknown() {
+        let s = InterjectStore::new();
+        s.submit("alive", "a");
+        s.submit("gone", "b");
+        assert!(s.retain_sessions(&["alive".to_string()]));
+        assert_eq!(s.pending_count("alive"), 1);
+        assert_eq!(s.pending_count("gone"), 0);
+        assert_eq!(s.pending_sessions(), vec!["alive".to_string()]);
+        // 再清一遍无变化。
+        assert!(!s.retain_sessions(&["alive".to_string()]));
+    }
+
+    #[test]
+    fn persist_roundtrip() {
+        // 用独立临时文件路径测试（不碰真实 `~/.askhuman/state/interject.json`）。
+        let dir = std::env::temp_dir().join(format!("ah-interject-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("interject.json");
+        let s = InterjectStore::new();
+        s.append("s1", "第一条");
+        s.append("s1", "第二条");
+        s.submit("s2", "另一会话");
+        s.persist_to(&path);
+        let restored = InterjectStore::load_from(&path);
+        assert_eq!(restored.pending_count("s1"), 2);
+        assert_eq!(restored.full_text("s1"), "第一条\n\n第二条");
+        assert_eq!(restored.full_text("s2"), "另一会话");
+        // 消费后 persist：条目消失。
+        let PollOutcome::Message(_) = restored.poll("s1") else {
+            panic!("expected message")
+        };
+        restored.persist_to(&path);
+        let again = InterjectStore::load_from(&path);
+        assert_eq!(again.pending_count("s1"), 0);
+        assert_eq!(again.pending_count("s2"), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
