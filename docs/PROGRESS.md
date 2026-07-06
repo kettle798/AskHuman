@@ -2,6 +2,34 @@
 
 按具体任务 / 需求记录待办与当前进展。任务 / 需求完成后删除其 section（历史留在 git）。
 
+## 待验收：「按需发送」子开关——活跃槽切走时自动结束该渠道的 watch（+ 修复：操作即激活）
+
+需求/决策 `docs/specs/im-auto-end-watch.md`（D1–D8），计划 `docs/plans/im-auto-end-watch.md`（P1–P4）。核心 +
+「操作即激活」修复均已 install 落盘（daemon 已重启用上新二进制）。`cargo test` 475 全绿。**待用户真机复验**。
+
+- **P1 配置/前端**：`config.rs` 增 `channels.auto_end_watch: bool`，**默认开**（`ChannelsConfig` 改手写
+  `impl Default`，容器级 `#[serde(default)]` 使缺字段回退到 `true`）+ 2 单测；`types.ts`/`SettingsView.vue`
+  （实验区「按需发送」卡内子开关，父关时置灰禁用）/ i18n zh+en（`autoEndWatch{Title,Desc}`）。
+- **P2 新终态**：`watch.rs` 增 `FinalKind::AutoStopped(String)`（携带切换目标渠道展示名 `{to}`）——因带 String，
+  `FinalKind`/`CardMode` 去 `Copy` 改 `Clone`；`final_label_text(&FinalKind, …)` 增 arm；修各渠道渲染器
+  （telegram/slack/dingtalk `match &mode`、`WatchClient::{edit,send}` 的 TG 臂先取 markup 再移动 mode）+ i18n
+  `watch.btnAutoStopped`「已切换到 {to} · 自动结束关注」+ 单测。
+- **P3 daemon**：抽共享 `finalize_and_drop_watches`（`/unwatch` 收尾复用，行为不变——渠道客户端不可用则整段
+  跳过、订阅保留）；`set_active_channel` 在「旧渠道反激活」同条件下、若 `auto_activation && auto_end_watch`，
+  对旧渠道全部订阅调 `finalize_and_drop_watches(FinalKind::AutoStopped(channel_label(new_id)))`，不发额外文字（D4）。
+- **根因（真机不生效）**：D2 只结束「刚失去活跃槽的渠道（prev）」的 watch，但 **`/watch` 不设活跃槽**（watch 与
+  活跃槽解耦）。故被 watch 的渠道通常根本不是活跃槽（多为上次弹窗作答留下的 `popup`），永远不会「从活跃槽被切走」→
+  永不触发。用户在 Slack 发消息（prev=popup）时飞书 watch 完全没被波及即此因。
+- **修复（用户决策：「在某渠道操作即把它设为活跃槽」）**：新增 `daemon/mod.rs::activate_channel_on_action`
+  （`auto_activation` 开→`set_active_channel` 切到本渠道，真切换则回激活回执），接到用户勾选的这几处（均在
+  「点选/命令输出**之后**」调用，避免拖慢飞书同步 ACK）：`/watch` 命令 + 三渠道单选卡「关注」点选
+  （`handle_select_card_action`/`handle_select_dd_action`/`dispatch_select_pick`）+ 单选卡「查看」点选（补齐与
+  `/status` 文本命令一致）+ `/msg`·`/msg-clear` 插话。`/unwatch`、`/help`、非文本消息**不**激活（用户明确不选）。
+  这样 `/watch 某渠道` 使其成活跃槽，之后回弹窗作答 / 切他渠道即让它作为 prev 被 D2 自动结束。
+- **已知局限**（spec 已记）：触发＝活跃槽切换；回到电脑但无任何切槽动作时不触发（本期不补 GUI 焦点触发）。
+- **未做**：install + 真机复验（`/watch 飞书`→飞书成活跃槽 & 收激活回执；再弹窗作答 → 飞书 watch 卡定格
+  「已切换到『弹窗』· 自动结束关注」、订阅清空）。
+
 ## 待验收：通用「单选卡」+ /watch·/status·/unwatch 可点选（飞书 MVP 已落地）
 
 用户诉求：三个命令无参时不再回纯文本编号列表（需再敲一次带编号命令），而是**推一张通用单选卡**列出可选

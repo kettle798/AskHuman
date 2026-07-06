@@ -1692,6 +1692,32 @@ onBeforeUnmount(() => unlistenProgress?.());
           <p class="card-desc hint">
             {{ t("settings.channels.autoActivationLifecycleHint") }}
           </p>
+          <!-- 子开关：自动结束 watch（仅「按需发送」开时可用，父关时置灰禁用） -->
+          <div
+            class="row"
+            style="margin-top: 12px"
+            :style="{ opacity: config.channels.autoActivation ? 1 : 0.5 }"
+          >
+            <p class="card-title">
+              {{ t("settings.channels.autoEndWatchTitle") }}
+            </p>
+            <span class="spacer"></span>
+            <label class="switch">
+              <input
+                type="checkbox"
+                v-model="config.channels.autoEndWatch"
+                :disabled="!config.channels.autoActivation"
+                @change="persist"
+              />
+              <span class="track"></span>
+            </label>
+          </div>
+          <p
+            class="card-desc"
+            :style="{ opacity: config.channels.autoActivation ? 1 : 0.5 }"
+          >
+            {{ t("settings.channels.autoEndWatchDesc") }}
+          </p>
         </div>
 
         <!-- 多问题纵向同时显示（实验，置于实验区最后） -->
