@@ -116,7 +116,7 @@ export default {
       emptyDesc: "There are no features under experimentation right now. Future experimental features will show up here.",
       lifecycleTitle: "Agent lifecycle tracking",
       lifecycleDesc:
-        "Install user-level hooks so AskHuman can track each agent's sessions (working / idle / ended). While agent activity is tracked, AskHuman stays on standby in the background to receive proactive IM commands (e.g. /status to check status, or activate on-demand sending). Once enabled, run `AskHuman agents monitor` to open the live status window.",
+        "Install user-level hooks for each agent to detect whether it is working, idle, or ended. The Agent status window, menu bar agent status, IM /status, /watch live tracking, and /msg message delivery depend on this capability. When enabled, the daemon can also start and stay alive more accurately based on agent activity.",
       claude: "Claude Code",
       codex: "Codex",
       cursor: "Cursor",
