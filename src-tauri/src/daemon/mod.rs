@@ -949,7 +949,10 @@ mod unix_impl {
                                     )
                                     .await;
                                 }
-                                PollOutcome::Message(text) => {
+                                PollOutcome::Message {
+                                    text,
+                                    receipt_channels,
+                                } => {
                                     let _ = ipc::write_msg(
                                         w,
                                         &ServerMsg::InterjectDecision {
@@ -961,6 +964,8 @@ mod unix_impl {
                                     // 队列被消费：落盘 + 刷新徽标。
                                     state.interject.persist();
                                     broadcast_agents_state(state);
+                                    // 排队插话被 agent 真正消费＝已读 → 给来源渠道各回一条「已阅读」回执（D9）。
+                                    spawn_read_receipts(state, &session_id, receipt_channels);
                                 }
                                 PollOutcome::Hold(rx) => {
                                     let _ = ipc::write_msg(
@@ -4014,7 +4019,7 @@ mod unix_impl {
     ) {
         let snapshot = state.agents.snapshot();
         let rec = find_agent_by_session(&snapshot, session_id);
-        let label = msg_pick_deliver(state, session_id, rec, content, lang);
+        let label = msg_pick_deliver(state, channel_id, session_id, rec, content, lang);
         let card =
             crate::feishu::card::build_select_final_card(&crate::select::title_msg(lang), &label);
         let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
@@ -4025,6 +4030,7 @@ mod unix_impl {
     /// 否则返回「已不在工作中，未发送」。渲染层各渠道自行把该文案落进定格卡。
     fn msg_pick_deliver(
         state: &Arc<ServerState>,
+        channel_id: &str,
         session_id: &str,
         rec: Option<&serde_json::Value>,
         content: &str,
@@ -4042,7 +4048,7 @@ mod unix_impl {
         let seq = rec
             .and_then(|r| r.get("seq").and_then(|v| v.as_u64()))
             .unwrap_or(0);
-        let note = deliver_msg(state, session_id, content, lang);
+        let note = deliver_msg(state, channel_id, session_id, content, lang);
         crate::i18n::tr(lang, "select.msgSentCard")
             .replace("{id}", &seq.to_string())
             .replace("{note}", &note)
@@ -4284,7 +4290,7 @@ mod unix_impl {
     ) {
         let snapshot = state.agents.snapshot();
         let rec = find_agent_by_session(&snapshot, session_id);
-        let label = msg_pick_deliver(state, session_id, rec, content, lang);
+        let label = msg_pick_deliver(state, "dingding", session_id, rec, content, lang);
         dd_finalize_select_card(config, otid, &label).await;
         remove_picker(state, "dingding", otid);
     }
@@ -4573,7 +4579,7 @@ mod unix_impl {
     ) {
         let snapshot = state.agents.snapshot();
         let rec = find_agent_by_session(&snapshot, session_id);
-        let label = msg_pick_deliver(state, session_id, rec, content, lang);
+        let label = msg_pick_deliver(state, channel_id, session_id, rec, content, lang);
         finalize_select_card_edit(channel_id, config, mid, &crate::select::title_msg(lang), &label)
             .await;
         remove_picker(state, channel_id, mid);
@@ -4921,7 +4927,7 @@ mod unix_impl {
                 else {
                     return;
                 };
-                let text = deliver_msg(state, &sid, &content, lang);
+                let text = deliver_msg(state, channel_id, &sid, &content, lang);
                 let _ = reply_channel_text(channel_id, config, &text).await;
             }
             // 显式编号无内容 → 回显待送达（不限工作中）。
@@ -4947,9 +4953,16 @@ mod unix_impl {
     }
 
     /// 追加一条插话并回执文案（`n==0` ⇒ 恰有 hook 挂起等待 → 立即送达）。发送三路径共用
-    /// （显式编号 / 无编号直发 / 单选卡点「发送」）。
-    fn deliver_msg(state: &Arc<ServerState>, session_id: &str, content: &str, lang: Lang) -> String {
-        let n = state.interject.append(session_id, content);
+    /// （显式编号 / 无编号直发 / 单选卡点「发送」）。`channel_id`＝来源渠道：排队时登记，供消息被
+    /// agent 消费后回推「已阅读」回执（D9）。
+    fn deliver_msg(
+        state: &Arc<ServerState>,
+        channel_id: &str,
+        session_id: &str,
+        content: &str,
+        lang: Lang,
+    ) -> String {
+        let n = state.interject.append(session_id, content, Some(channel_id));
         state.interject.persist();
         broadcast_agents_state(state);
         if n == 0 {
@@ -4957,6 +4970,29 @@ mod unix_impl {
         } else {
             crate::i18n::tr(lang, "autoChannel.msgQueued").replace("{n}", &n.to_string())
         }
+    }
+
+    /// 排队插话被消费后，给各来源渠道回推一条「已阅读」回执（编号按当前快照现算）。仅在有待回执
+    /// 渠道时才 spawn（罕见），不拖慢 hook 热路径。
+    fn spawn_read_receipts(state: &Arc<ServerState>, session_id: &str, channels: Vec<String>) {
+        if channels.is_empty() {
+            return;
+        }
+        let state = state.clone();
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            let lang = Lang::current();
+            let snapshot = state.agents.snapshot();
+            let seq = find_agent_by_session(&snapshot, &session_id)
+                .and_then(|r| r.get("seq").and_then(|v| v.as_u64()))
+                .unwrap_or(0);
+            let text =
+                crate::i18n::tr(lang, "autoChannel.msgReadReceipt").replace("{id}", &seq.to_string());
+            let config = AppConfig::load();
+            for ch in channels {
+                let _ = reply_channel_text(&ch, &config, &text).await;
+            }
+        });
     }
 
     /// `/msg <编号>`（无内容）回显该 agent 待送达全文（无则「暂无待送达」）。
@@ -5033,7 +5069,7 @@ mod unix_impl {
         if watching.len() == 1 {
             if let Some(sid) = watching.iter().next().cloned() {
                 if is_working_non_grok(&snapshot, &sid) {
-                    let text = deliver_msg(state, &sid, &content, lang);
+                    let text = deliver_msg(state, channel_id, &sid, &content, lang);
                     let _ = reply_channel_text(channel_id, config, &text).await;
                     return;
                 }

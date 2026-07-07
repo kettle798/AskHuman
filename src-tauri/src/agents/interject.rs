@@ -30,7 +30,12 @@ pub enum PollOutcome {
     /// 无消息且 composer 未打开 → hook 立即放行。
     None,
     /// 有已提交消息 → 原子出队交付（调用方随后 `persist` + 广播徽标变化）。
-    Message(String),
+    /// `receipt_channels`＝该批插话中「排队等待被消费」时登记的来源渠道（去重）：消费即代表
+    /// agent 已读，调用方逐渠道回推「已阅读」回执后即消（spec agent-interject D9 追加）。
+    Message {
+        text: String,
+        receipt_channels: Vec<String>,
+    },
     /// composer 打开中 → 挂起等待提交/取消（接收端由 hook 连接的处理任务持有）。
     Hold(oneshot::Receiver<WaitOutcome>),
 }
@@ -40,6 +45,9 @@ pub enum PollOutcome {
 struct Entry {
     /// 待送达条目（弹窗提交＝整体覆盖；IM `/msg`＝追加；消费时按空行拼接一次性送达）。
     entries: Vec<String>,
+    /// 待「已阅读」回执的来源渠道（去重，spec agent-interject D9 追加）：仅 IM `/msg` **排队**
+    /// 时登记；被消费（`poll`）时随消息取出、逐渠道回推后清空。不变式：仅当 `entries` 非空时可非空。
+    receipt_channels: Vec<String>,
     /// composer 打开计数（连接态：连接断开＝关闭；正常每 session 至多 1，计数防重入）。
     composers: usize,
     /// 等待中的 hook（Hold 状态的连接）。提交时一个拿 Message、其余 Release；取消/关窗全 Release。
@@ -52,11 +60,14 @@ impl Entry {
     }
 }
 
-/// 持久化形态（只存 entries；composer/waiter 是连接态）。
+/// 持久化形态（只存 entries + 待回执来源渠道；composer/waiter 是连接态）。
 #[derive(Default, Serialize, Deserialize)]
 struct Persisted {
     #[serde(default)]
     sessions: HashMap<String, Vec<String>>,
+    /// session → 待「已阅读」回执的来源渠道。老文件无此字段 → 默认空（向后兼容，不动 `sessions` 格式）。
+    #[serde(default)]
+    receipt_channels: HashMap<String, Vec<String>>,
 }
 
 /// daemon 内唯一的插话队列（线程安全）。
@@ -91,10 +102,20 @@ impl InterjectStore {
         for (sid, entries) in parsed.sessions {
             let entries: Vec<String> = entries.into_iter().filter(|e| !e.trim().is_empty()).collect();
             if !sid.is_empty() && !entries.is_empty() {
+                // 仅为仍有待送达条目的 session 恢复来源渠道（回执只在消息被消费时才有意义）。
+                let receipt_channels: Vec<String> = parsed
+                    .receipt_channels
+                    .get(&sid)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|c| !c.trim().is_empty())
+                    .collect();
                 map.insert(
                     sid,
                     Entry {
                         entries,
+                        receipt_channels,
                         ..Entry::default()
                     },
                 );
@@ -118,6 +139,11 @@ impl InterjectStore {
                     .filter(|(_, e)| !e.entries.is_empty())
                     .map(|(k, e)| (k.clone(), e.entries.clone()))
                     .collect(),
+                receipt_channels: map
+                    .iter()
+                    .filter(|(_, e)| !e.entries.is_empty() && !e.receipt_channels.is_empty())
+                    .map(|(k, e)| (k.clone(), e.receipt_channels.clone()))
+                    .collect(),
             }
         };
         let Ok(json) = serde_json::to_string_pretty(&data) else {
@@ -138,7 +164,9 @@ impl InterjectStore {
         let text = text.trim();
         let mut map = self.inner.lock().unwrap();
         let e = map.entry(session_id.to_string()).or_default();
+        // GUI 覆盖会丢弃排队的 IM 插话 → 那些消息永不被消费，清掉其待回执登记（Q2：不回执）。
         e.entries.clear();
+        e.receipt_channels.clear();
         if !text.is_empty() {
             e.entries.push(text.to_string());
         }
@@ -149,8 +177,9 @@ impl InterjectStore {
     }
 
     /// IM `/msg` 追加一条（D2）。交付语义同 `submit`。返回追加后的待送达条数（0＝已被
-    /// 等待中的 hook 立即消费）。
-    pub fn append(&self, session_id: &str, text: &str) -> usize {
+    /// 等待中的 hook 立即消费）。`receipt_channel`＝该条的来源渠道：**排队**（返回 >0）时登记，
+    /// 以便被 agent 消费后回推「已阅读」回执（D9）；即时送达（返回 0）不登记（已有「已送达」回执）。
+    pub fn append(&self, session_id: &str, text: &str, receipt_channel: Option<&str>) -> usize {
         let text = text.trim();
         if text.is_empty() {
             return self.pending_count(session_id);
@@ -159,6 +188,15 @@ impl InterjectStore {
         let e = map.entry(session_id.to_string()).or_default();
         e.entries.push(text.to_string());
         Self::try_deliver(e);
+        if e.entries.is_empty() {
+            // 恰有 hook 在等 → 立即送达：不登记回执（即时送达已由「已送达」覆盖，Q1）。
+            e.receipt_channels.clear();
+        } else if let Some(ch) = receipt_channel {
+            let ch = ch.trim();
+            if !ch.is_empty() && !e.receipt_channels.iter().any(|c| c == ch) {
+                e.receipt_channels.push(ch.to_string());
+            }
+        }
         let n = e.entries.len();
         if e.is_empty() {
             map.remove(session_id);
@@ -174,7 +212,9 @@ impl InterjectStore {
             return false;
         };
         let had = !e.entries.is_empty();
+        // 撤回＝这些消息不会被消费 → 不回执（Q2）。
         e.entries.clear();
+        e.receipt_channels.clear();
         if e.is_empty() {
             map.remove(session_id);
         }
@@ -213,11 +253,16 @@ impl InterjectStore {
         };
         if !e.entries.is_empty() {
             let text = e.entries.join(JOIN_SEP);
+            // 消费＝agent 已读：取出待回执来源渠道随消息交给调用方回推（D9）。
+            let receipt_channels = std::mem::take(&mut e.receipt_channels);
             e.entries.clear();
             if e.is_empty() {
                 map.remove(session_id);
             }
-            return PollOutcome::Message(text);
+            return PollOutcome::Message {
+                text,
+                receipt_channels,
+            };
         }
         if e.composers > 0 {
             // 顺带清理已死的等待者（hook 连接断开后其接收端已 drop）。
@@ -260,7 +305,9 @@ impl InterjectStore {
             return false;
         };
         let had = !e.entries.is_empty();
+        // 会话结束＝残留消息不会被消费 → 不回执（Q2）。
         e.entries.clear();
+        e.receipt_channels.clear();
         for w in e.waiters.drain(..) {
             let _ = w.send(WaitOutcome::Release);
         }
@@ -309,7 +356,9 @@ impl InterjectStore {
             }
         }
         if delivered {
+            // 即时送达（有 hook 在等）走「已送达」回执，不留待「已阅读」回执（Q1）。
             e.entries.clear();
+            e.receipt_channels.clear();
         }
     }
 }
@@ -331,7 +380,7 @@ mod tests {
         assert_eq!(s.pending_count("s1"), 1);
         // 首个 poll 拿到消息并清空。
         match s.poll("s1") {
-            PollOutcome::Message(t) => assert_eq!(t, "调整方向"),
+            PollOutcome::Message { text, .. } => assert_eq!(text, "调整方向"),
             _ => panic!("expected message"),
         }
         // 第二个 poll（并发工具调用）拿不到 → 放行。
@@ -342,8 +391,8 @@ mod tests {
     #[test]
     fn submit_overwrites_whole_queue() {
         let s = InterjectStore::new();
-        s.append("s1", "第一条");
-        s.append("s1", "第二条");
+        s.append("s1", "第一条", None);
+        s.append("s1", "第二条", None);
         assert_eq!(s.pending_count("s1"), 2);
         assert_eq!(s.full_text("s1"), "第一条\n\n第二条");
         // 弹窗提交＝整体覆盖。
@@ -358,10 +407,10 @@ mod tests {
     #[test]
     fn append_joins_on_delivery() {
         let s = InterjectStore::new();
-        assert_eq!(s.append("s1", "a"), 1);
-        assert_eq!(s.append("s1", "b"), 2);
+        assert_eq!(s.append("s1", "a", None), 1);
+        assert_eq!(s.append("s1", "b", None), 2);
         match s.poll("s1") {
-            PollOutcome::Message(t) => assert_eq!(t, "a\n\nb"),
+            PollOutcome::Message { text, .. } => assert_eq!(text, "a\n\nb"),
             _ => panic!("expected message"),
         }
     }
@@ -442,7 +491,7 @@ mod tests {
         s.composer_closed("s1");
         assert_eq!(s.pending_count("s1"), 1);
         match s.poll("s1") {
-            PollOutcome::Message(t) => assert_eq!(t, "留队"),
+            PollOutcome::Message { text, .. } => assert_eq!(text, "留队"),
             _ => panic!("expected message"),
         }
     }
@@ -452,7 +501,7 @@ mod tests {
         let s = InterjectStore::new();
         s.submit("s1", "x");
         s.composer_opened("s1");
-        let PollOutcome::Message(_) = s.poll("s1") else {
+        let PollOutcome::Message { .. } = s.poll("s1") else {
             panic!("expected message")
         };
         let PollOutcome::Hold(rx) = s.poll("s1") else {
@@ -484,8 +533,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ah-interject-test-{}", uuid::Uuid::new_v4()));
         let path = dir.join("interject.json");
         let s = InterjectStore::new();
-        s.append("s1", "第一条");
-        s.append("s1", "第二条");
+        s.append("s1", "第一条", None);
+        s.append("s1", "第二条", None);
         s.submit("s2", "另一会话");
         s.persist_to(&path);
         let restored = InterjectStore::load_from(&path);
@@ -493,13 +542,121 @@ mod tests {
         assert_eq!(restored.full_text("s1"), "第一条\n\n第二条");
         assert_eq!(restored.full_text("s2"), "另一会话");
         // 消费后 persist：条目消失。
-        let PollOutcome::Message(_) = restored.poll("s1") else {
+        let PollOutcome::Message { .. } = restored.poll("s1") else {
             panic!("expected message")
         };
         restored.persist_to(&path);
         let again = InterjectStore::load_from(&path);
         assert_eq!(again.pending_count("s1"), 0);
         assert_eq!(again.pending_count("s2"), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn queued_append_records_receipt_channels_deduped() {
+        let s = InterjectStore::new();
+        // 排队（无 hook 在等）→ 登记来源渠道；同渠道去重、不同渠道累加。
+        assert_eq!(s.append("s1", "a", Some("feishu")), 1);
+        assert_eq!(s.append("s1", "b", Some("feishu")), 2);
+        assert_eq!(s.append("s1", "c", Some("telegram")), 3);
+        match s.poll("s1") {
+            PollOutcome::Message {
+                text,
+                receipt_channels,
+            } => {
+                assert_eq!(text, "a\n\nb\n\nc");
+                assert_eq!(
+                    receipt_channels,
+                    vec!["feishu".to_string(), "telegram".to_string()]
+                );
+            }
+            _ => panic!("expected message"),
+        }
+        // 消费后再 poll 无回执渠道。
+        assert!(matches!(s.poll("s1"), PollOutcome::None));
+    }
+
+    #[test]
+    fn immediate_delivery_records_no_receipt() {
+        let s = InterjectStore::new();
+        s.composer_opened("s1");
+        let PollOutcome::Hold(rx) = s.poll("s1") else {
+            panic!("expected hold")
+        };
+        // 有 hook 在等 → 立即送达（返回 0），不登记回执。
+        assert_eq!(s.append("s1", "hi", Some("feishu")), 0);
+        assert!(matches!(rx.blocking_recv().unwrap(), WaitOutcome::Message(_)));
+    }
+
+    #[test]
+    fn overwrite_revoke_end_drop_receipt_channels() {
+        for op in ["submit", "clear", "remove"] {
+            let s = InterjectStore::new();
+            s.append("s1", "queued", Some("feishu"));
+            match op {
+                "submit" => {
+                    s.submit("s1", "gui text");
+                    // 覆盖后仍有条目，但回执渠道被清空。
+                    match s.poll("s1") {
+                        PollOutcome::Message {
+                            receipt_channels, ..
+                        } => assert!(receipt_channels.is_empty(), "submit should drop receipts"),
+                        _ => panic!("expected message"),
+                    }
+                }
+                "clear" => {
+                    assert!(s.clear("s1"));
+                    assert!(matches!(s.poll("s1"), PollOutcome::None));
+                }
+                "remove" => {
+                    assert!(s.remove_session("s1"));
+                    assert!(matches!(s.poll("s1"), PollOutcome::None));
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn receipt_channels_persist_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("ah-interject-rc-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("interject.json");
+        let s = InterjectStore::new();
+        s.append("s1", "a", Some("feishu"));
+        s.append("s1", "b", Some("slack"));
+        s.persist_to(&path);
+        let restored = InterjectStore::load_from(&path);
+        match restored.poll("s1") {
+            PollOutcome::Message {
+                receipt_channels, ..
+            } => assert_eq!(
+                receipt_channels,
+                vec!["feishu".to_string(), "slack".to_string()]
+            ),
+            _ => panic!("expected message"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loads_legacy_file_without_receipt_channels() {
+        // 老格式（只有 sessions、无 receipt_channels 字段）须能无损加载（向后兼容，不丢队列）。
+        let dir = std::env::temp_dir().join(format!("ah-interject-legacy-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("interject.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, r#"{"sessions":{"s1":["旧消息"]}}"#).unwrap();
+        let s = InterjectStore::load_from(&path);
+        assert_eq!(s.pending_count("s1"), 1);
+        match s.poll("s1") {
+            PollOutcome::Message {
+                text,
+                receipt_channels,
+            } => {
+                assert_eq!(text, "旧消息");
+                assert!(receipt_channels.is_empty());
+            }
+            _ => panic!("expected message"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

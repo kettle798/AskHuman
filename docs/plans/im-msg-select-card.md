@@ -109,3 +109,33 @@
 - 显式 `/msg <编号>` 发送一并收紧为仅工作中；回显/撤回不受限。
 - 单独 `/msg` 回「用法示例 + 当前工作中 agent 列表（带编号）」。
 - 状态窗口与状态栏菜单：仅工作中的 agent 显示「发送消息」。
+
+## 追加需求 D：插话「已阅读」回执（排队消息被消费后回推来源渠道）
+
+**动机**：`/msg` 排队后（回执「已排队 N 条」）目前对方无从得知消息是否被 agent 真正看到。补一条**异步回执**：
+排队消息在 agent 下一次工具调用被消费时，回推来源渠道「✅ 你发给 [编号] 的插话已被 Agent 阅读」。
+
+**消费点分析**：`InterjectStore::append` 返回 0＝恰有 hook 在等（即时送达，已回「已送达」）；返回 N>0＝排队。
+排队消息的「被消费」唯一发生在 `poll()==Message`（`daemon/mod.rs` AgentEvent `interject_poll` 分支）——
+即时送达那条不在此路径。故回执**只覆盖排队→稍后被消费**这一情形。
+
+**数据模型**（`agents/interject.rs`）：
+- `Entry` 增 `receipt_channels: Vec<String>`（去重的待回执来源渠道）。不变式：仅当 `entries` 非空时可非空。
+- `append(session_id, text, receipt_channel: Option<&str>)`：`try_deliver` 后若 `entries` 仍非空（排队）且给了渠道 →
+  去重登记；若已被即时送达（`entries` 空）→ 清空 `receipt_channels`（Q1：即时不回执）。
+- `poll()` 的 `Message` 分支：`std::mem::take` 取出 `receipt_channels` 随 `Message` 返回，然后清 `entries`。
+- `submit`（GUI 覆盖）/`clear`（撤回）/`remove_session`（结束）/`try_deliver`（即时送达）：清 `entries` 处一并清
+  `receipt_channels`（Q2：覆盖/撤回/结束均不回执）。
+- `PollOutcome::Message` 由 `Message(String)` 改为 `Message { text, receipt_channels }`。
+- 持久化：`Persisted` 增 `receipt_channels: HashMap<sid, Vec<渠道>>`，`#[serde(default)]` 向后兼容
+  （不动老 `sessions: HashMap<sid, Vec<String>>` 格式，避免升级丢队列）。
+
+**daemon**：
+- `deliver_msg(state, channel_id, session_id, content, lang)` 新增 `channel_id`，内部 `append(.., Some(channel_id))`。
+  三条发送路径（显式编号 / 无编号直发 / 单选卡「发送」`msg_pick_deliver`）都带上来源渠道。
+- 消费点（`PollOutcome::Message { text, receipt_channels }`）：写回裁决 + persist + 广播后，若 `receipt_channels`
+  非空 → `tokio::spawn` 一个任务，按当前快照算 `seq`、`AppConfig::load()`、逐渠道 `reply_channel_text`
+  推「autoChannel.msgReadReceipt」（`{id}`＝seq）。热路径仅在有待回执渠道时才 spawn（罕见），零额外开销。
+
+**用户定案（AskHuman）**：Q1 仅排队→消费才回执；Q2 未消费（结束）不回执；Q3 来源渠道持久化；
+Q4 文案用「**阅读**」而非「接收/接受」，新推一条、不带内容摘要。

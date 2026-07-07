@@ -411,6 +411,12 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "Pending message revoked.",
             "已撤回待送达插话。",
         ),
+        // 排队插话被 agent 真正消费（下一次工具调用）后回推来源渠道的「已阅读」回执（{id}=编号）。
+        "autoChannel.msgReadReceipt" => pick(
+            lang,
+            "✅ Your message to [{id}] was read by the agent.",
+            "✅ 你发给 [{id}] 的插话已被 Agent 阅读。",
+        ),
         // grok 不支持插话（无可靠传话通道，spec agent-interject D1）。
         "autoChannel.msgGrokUnsupported" => pick(
             lang,
