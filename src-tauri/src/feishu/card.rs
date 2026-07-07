@@ -505,7 +505,7 @@ const SELECT_ACTION_KEY: &str = "select";
 /// 飞书按钮样式（`type`）按单选卡动作种类映射（用户定稿：watch=蓝主色、status=默认、unwatch=红）。
 fn select_button_type(action: crate::select::SelectAction) -> &'static str {
     match action {
-        crate::select::SelectAction::Watch => "primary",
+        crate::select::SelectAction::Watch | crate::select::SelectAction::Msg => "primary",
         crate::select::SelectAction::Status => "default",
         crate::select::SelectAction::Unwatch => "danger",
     }

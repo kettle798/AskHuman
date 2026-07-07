@@ -31,6 +31,8 @@ pub enum SelectAction {
     Watch,
     Status,
     Unwatch,
+    /// 发送插话（`/msg` 无编号时的选择卡；按钮「发送」，点它把预存内容发给该 agent）。
+    Msg,
 }
 
 impl SelectAction {
@@ -40,6 +42,7 @@ impl SelectAction {
             SelectAction::Watch => "select.btnWatch",
             SelectAction::Status => "select.btnStatus",
             SelectAction::Unwatch => "select.btnUnwatch",
+            SelectAction::Msg => "select.btnMsg",
         };
         i18n::tr(lang, key).to_string()
     }
@@ -106,6 +109,9 @@ pub fn title_status(lang: Lang) -> String {
 }
 pub fn title_unwatch(lang: Lang) -> String {
     i18n::tr(lang, "select.titleUnwatch").to_string()
+}
+pub fn title_msg(lang: Lang) -> String {
+    i18n::tr(lang, "select.titleMsg").to_string()
 }
 
 /// 由一条注册表快照记录组装选项字段（`dot / seq / primary=类型·工作目录名 / secondary=标题`）；
@@ -194,6 +200,32 @@ pub fn agent_options(snapshot: &Value, watching: &HashSet<String>, lang: Lang) -
     }
     working.extend(idle);
     working
+}
+
+/// 由注册表快照组装「可发送插话」的候选选项（`/msg` 无编号单选卡）：**仅列「工作中」且非 grok**
+/// 的 agent（插话只对工作中有意义、grok 无可靠传话通道）。`watching` 命中仍加「· 关注中」徽标。
+pub fn msg_options(snapshot: &Value, watching: &HashSet<String>, lang: Lang) -> Vec<SelectOption> {
+    let empty = Vec::new();
+    let list = snapshot.as_array().unwrap_or(&empty);
+    let mut out: Vec<SelectOption> = Vec::new();
+    for rec in list {
+        if rec.get("state").and_then(|v| v.as_str()) != Some("working") {
+            continue; // 仅工作中。
+        }
+        if rec.get("kind").and_then(|v| v.as_str()) == Some("grok") {
+            continue; // grok 无法插话。
+        }
+        let sid = rec
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if sid.is_empty() {
+            continue;
+        }
+        out.push(option_from_record(rec, sid, watching, lang));
+    }
+    out
 }
 
 /// 组装单个 agent 选项（`/unwatch` 单选卡按订阅列举时用）：按 session_id 在快照定位记录；
@@ -302,5 +334,24 @@ mod tests {
         assert_eq!(SelectAction::Watch.button_label(Lang::Zh), "关注");
         assert_eq!(SelectAction::Status.button_label(Lang::Zh), "查看");
         assert_eq!(SelectAction::Unwatch.button_label(Lang::Zh), "取消");
+        assert_eq!(SelectAction::Msg.button_label(Lang::Zh), "发送");
+    }
+
+    #[test]
+    fn msg_options_only_working_non_grok() {
+        // 快照含：working cursor / idle claude / ended codex（见 snap）+ 追加一个 working grok。
+        let mut snap = snap();
+        snap.as_array_mut().unwrap().push(json!({
+            "seq":4,"kind":"grok","sessionId":"s-grok","state":"working","title":"g","cwd":"/tmp/g"
+        }));
+        let opts = msg_options(&snap, &HashSet::new(), Lang::Zh);
+        // 仅剩工作中·非 grok 的那一个（claude s-work）。
+        assert_eq!(opts.len(), 1);
+        assert_eq!(opts[0].id, "s-work");
+        // 关注徽标仍生效。
+        let mut watching = HashSet::new();
+        watching.insert("s-work".to_string());
+        let opts2 = msg_options(&snap, &watching, Lang::Zh);
+        assert_eq!(opts2[0].badge.as_deref(), Some("· 关注中"));
     }
 }

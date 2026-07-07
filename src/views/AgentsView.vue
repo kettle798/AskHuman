@@ -222,9 +222,10 @@ async function confirmForceIdle(a: AgentRecord): Promise<void> {
   }
 }
 
-// 「发送消息」（插话）：非 grok（无可靠传话通道，首期排除）、非已结束。
+// 「发送消息」（插话）：非 grok（无可靠传话通道，首期排除）、且仅「工作中」——插话只在 agent
+// 的下一次工具调用时送达，对空闲/已结束的 agent 发无意义（用户定案）。
 function canSendMessage(a: AgentRecord): boolean {
-  return a.kind !== "grok" && a.state !== "ended";
+  return a.kind !== "grok" && a.state === "working";
 }
 
 async function onSendMessage(a: AgentRecord): Promise<void> {

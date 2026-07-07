@@ -574,10 +574,17 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         ),
         "select.titleStatus" => pick(lang, "Pick an agent to view:", "选择要查看的 Agent："),
         "select.titleUnwatch" => pick(lang, "Pick an agent to unwatch:", "选择要取消关注的 Agent："),
+        // `/msg` 无编号选择卡标题（发送插话；仅列工作中·非 grok）。
+        "select.titleMsg" => pick(
+            lang,
+            "Pick an agent to message (tap Send):",
+            "选择要发送消息的 Agent（点「发送」）：",
+        ),
         // 每行触发按钮文案（按动作种类）。
         "select.btnWatch" => pick(lang, "Watch", "关注"),
         "select.btnStatus" => pick(lang, "View", "查看"),
         "select.btnUnwatch" => pick(lang, "Unwatch", "取消"),
+        "select.btnMsg" => pick(lang, "Send", "发送"),
         // 选项徽标：已在本渠道关注中（`/watch` 卡；点它＝换新卡）。前后空格由渲染器按需拼接。
         "select.watchingBadge" => pick(lang, "· watching", "· 关注中"),
         // 选项超上限截断说明（{n} = 实际展示数）。
@@ -587,6 +594,26 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         // 钉钉 `/watch` 单选卡点选后定格文案（{id} = 所选 agent 展示编号）：钉钉不能就地变身，
         // 单选卡定格为「已选择 [n]」、另发一张新的实时 watch 卡。
         "select.pickedCard" => pick(lang, "Selected [{id}]", "已选择 [{id}]"),
+        // `/msg` 选择卡点「发送」后定格（{id} = 展示编号；{note} = 送达/排队回执）。
+        "select.msgSentCard" => pick(lang, "Sent to [{id}] · {note}", "已发送给 [{id}] · {note}"),
+        // 点「发送」瞬间目标已不在工作中（状态漂移）→ 定格提示、不发送。
+        "select.msgTargetGone" => pick(
+            lang,
+            "That agent is no longer working; not sent.",
+            "该 Agent 已不在工作中，未发送。",
+        ),
+        // `/msg` 无编号但当前没有可发送对象（无工作中·非 grok）。
+        "select.msgNoWorking" => pick(
+            lang,
+            "No working agents to message right now.",
+            "当前没有工作中的 Agent，无法发送。",
+        ),
+        // 显式 `/msg <编号>` 发送但目标不在工作中（仅工作中可发）。
+        "select.msgNoWorkingTarget" => pick(
+            lang,
+            "That agent is idle; you can only message a working agent.",
+            "该 Agent 当前空闲，只能给工作中的 Agent 发送。",
+        ),
 
         // —— Slack 渠道：发给用户的文案 + 本地诊断 ——
         // 静态终态卡片状态行（无 emoji 前缀，与飞书/钉钉一致）。

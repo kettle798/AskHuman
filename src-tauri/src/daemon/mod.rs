@@ -314,6 +314,8 @@ mod unix_impl {
         Watch,
         Status,
         Unwatch,
+        /// 发送插话（`/msg` 无编号）：点选把 `PickerEntry::payload` 发给该 agent。
+        Msg,
     }
 
     /// 一条活动的单选卡台账。选项快照仅存各选项的 session_id（下标即按钮 idx），点击时按下标取 id、
@@ -325,6 +327,8 @@ mod unix_impl {
         kind: PickerKind,
         /// 各选项的 session_id（下标 = 按钮 `select:<idx>`）。
         options: Vec<String>,
+        /// `Msg` 卡的待发送内容（点「发送」时投递）；其它 kind 恒 `None`。
+        payload: Option<String>,
         created_at: u64,
     }
 
@@ -2308,6 +2312,19 @@ mod unix_impl {
             .any(|e| e.coordinator.has_channel(channel_id))
     }
 
+    /// 该渠道当前是否有在途单选卡（picker 未被消费）。与「在途提问」同样抑制 watch 卡「跟底」：
+    /// 用户正在做单选时，watch 卡只就地编辑、不重发到会话底部（免打断单选交互）；单选完成
+    /// （picker 移除）后由 `remove_picker` 清零跟底节流放开重发。
+    fn has_active_select_on(state: &Arc<ServerState>, channel_id: &str) -> bool {
+        state
+            .select
+            .pickers
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.channel == channel_id)
+    }
+
     // ===== /watch 实时关注引擎（spec docs/specs/im-watch.md，P1 仅飞书）=====
 
     /// 从注册表快照数组中按 session_id 找记录。
@@ -2588,8 +2605,8 @@ mod unix_impl {
             let Some(client) = WatchClient::for_channel(&ch, &config).await else {
                 continue;
             };
-            // 跟底判定的两个渠道量：淹没水位线 + 是否有在途提问（提问期间抑制跟底，只就地编辑，
-            // 不打断问答会话；答复完结时 last_move_ms 已被清零，下一次内容变化立即跟底）。
+            // 跟底判定的渠道量：淹没水位线 + 是否有在途提问 / 在途单选卡（二者期间均抑制跟底，只就地
+            // 编辑，不打断问答 / 单选交互；完结时 last_move_ms 已被清零，下一次内容变化立即跟底）。
             let disturb = state
                 .watch
                 .disturb
@@ -2599,6 +2616,7 @@ mod unix_impl {
                 .copied()
                 .unwrap_or(0);
             let ask_active = has_active_question_on(state, &ch);
+            let select_active = has_active_select_on(state, &ch);
             for e in entries.iter().filter(|e| e.channel == ch) {
                 let rec = find_agent_by_session(&snapshot, &e.session_id);
                 let frame =
@@ -2619,11 +2637,13 @@ mod unix_impl {
                 } else {
                     crate::watch::CardMode::Active
                 };
-                // 跟底：卡已被非 watch 消息淹没 + 无在途提问 + 30s 节流（`last_move_ms == 0`
-                // 豁免：答复完结 / 重启恢复）→ 发新卡到会话底部，旧卡定格「已移至最新卡片」。
+                // 跟底：卡已被非 watch 消息淹没 + 无在途提问 + 无在途单选卡 + 30s 节流
+                // （`last_move_ms == 0` 豁免：答复 / 单选完结、重启恢复）→ 发新卡到会话底部，
+                // 旧卡定格「已移至最新卡片」。
                 let buried = disturb > e.sent_at_ms;
                 let move_ok = buried
                     && !ask_active
+                    && !select_active
                     && (e.last_move_ms == 0
                         || now_ms().saturating_sub(e.last_move_ms) >= WATCH_MOVE_THROTTLE_MS);
                 if move_ok {
@@ -3598,6 +3618,7 @@ mod unix_impl {
     }
 
     /// 组装并发一张 agent 单选卡：空选项 / 非支持渠道（send 失败）→ 返回 false（调用方回文本兜底）。
+    /// `payload` 仅 `PickerKind::Msg` 用（待发送内容随卡登记，点「发送」时投递）。
     async fn send_agent_picker(
         state: &Arc<ServerState>,
         channel_id: &str,
@@ -3605,6 +3626,7 @@ mod unix_impl {
         kind: PickerKind,
         title: String,
         options: Vec<crate::select::SelectOption>,
+        payload: Option<String>,
         lang: Lang,
     ) -> bool {
         if options.is_empty() {
@@ -3614,6 +3636,7 @@ mod unix_impl {
             PickerKind::Watch => crate::select::SelectAction::Watch,
             PickerKind::Status => crate::select::SelectAction::Status,
             PickerKind::Unwatch => crate::select::SelectAction::Unwatch,
+            PickerKind::Msg => crate::select::SelectAction::Msg,
         };
         let view = crate::select::build_view(title, options, action, lang);
         let session_ids: Vec<String> = view.options.iter().map(|o| o.id.clone()).collect();
@@ -3627,6 +3650,7 @@ mod unix_impl {
                 message_id: mid,
                 kind,
                 options: session_ids,
+                payload,
                 created_at: now_secs(),
             },
         );
@@ -3690,14 +3714,37 @@ mod unix_impl {
         }
     }
 
-    /// 从单选卡台账移除某条卡。
+    /// 从单选卡台账移除某条卡。移除即视为「单选完结」：清零本渠道全部 watch 订阅的跟底节流
+    /// （`last_move_ms=0`）并唤醒引擎——单选期间被抑制的跟底在下一次内容变化时立即重发到会话底部
+    /// （用户定案，与「提问完结」一致；此处覆盖到钉钉，补上提问路径遗漏 dingding 的口径差）。
     fn remove_picker(state: &Arc<ServerState>, channel_id: &str, message_id: &str) {
-        state
-            .select
-            .pickers
-            .lock()
-            .unwrap()
-            .retain(|p| !(p.channel == channel_id && p.message_id == message_id));
+        let removed = {
+            let mut pickers = state.select.pickers.lock().unwrap();
+            let before = pickers.len();
+            pickers.retain(|p| !(p.channel == channel_id && p.message_id == message_id));
+            pickers.len() != before
+        };
+        if !removed {
+            return;
+        }
+        // 本渠道若已无其它在途单选卡，放开跟底：清零节流 + 唤醒引擎。
+        if !has_active_select_on(state, channel_id) {
+            let mut cleared = false;
+            for s in state
+                .watch
+                .subs
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .filter(|s| s.channel == channel_id)
+            {
+                s.last_move_ms = 0;
+                cleared = true;
+            }
+            if cleared {
+                state.watch.notify.notify_one();
+            }
+        }
     }
 
     /// 幂等确保各渠道的单选卡回调路由任务在位（撤掉已无 picker 的渠道路由）。飞书 / 钉钉 / TG / Slack。
@@ -3944,7 +3991,61 @@ mod unix_impl {
             PickerKind::Unwatch => {
                 select_pick_unwatch(state, channel_id, &mid, &session_id, &config, lang, ack).await;
             }
+            PickerKind::Msg => {
+                let content = picker.payload.clone().unwrap_or_default();
+                select_pick_msg(state, channel_id, &mid, &session_id, &content, lang, ack).await;
+                // 卡片点『发送』＝在该渠道操作 → 设为活跃槽（与 /msg 一致，用户决策）。
+                activate_channel_on_action(state, channel_id, &config, lang).await;
+            }
         }
+    }
+
+    /// 单选卡点选「发送」（飞书就地定格）：校验目标工作中·非 grok → 投递 + 定格「已发送给 [编号]」；
+    /// 目标已漂移（不在工作中 / 已结束 / 消失）→ 定格「已不在工作中，未发送」。定格文案随卡回（ack）。
+    #[allow(clippy::too_many_arguments)]
+    async fn select_pick_msg(
+        state: &Arc<ServerState>,
+        channel_id: &str,
+        mid: &str,
+        session_id: &str,
+        content: &str,
+        lang: Lang,
+        ack: tokio::sync::oneshot::Sender<Option<serde_json::Value>>,
+    ) {
+        let snapshot = state.agents.snapshot();
+        let rec = find_agent_by_session(&snapshot, session_id);
+        let label = msg_pick_deliver(state, session_id, rec, content, lang);
+        let card =
+            crate::feishu::card::build_select_final_card(&crate::select::title_msg(lang), &label);
+        let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
+        remove_picker(state, channel_id, mid);
+    }
+
+    /// 单选卡「发送」的共享收尾：目标仍工作中·非 grok → 投递并返回「已发送给 [编号] · 回执」定格文案；
+    /// 否则返回「已不在工作中，未发送」。渲染层各渠道自行把该文案落进定格卡。
+    fn msg_pick_deliver(
+        state: &Arc<ServerState>,
+        session_id: &str,
+        rec: Option<&serde_json::Value>,
+        content: &str,
+        lang: Lang,
+    ) -> String {
+        let ok = rec
+            .map(|r| {
+                r.get("state").and_then(|v| v.as_str()) == Some("working")
+                    && r.get("kind").and_then(|v| v.as_str()) != Some("grok")
+            })
+            .unwrap_or(false);
+        if !ok {
+            return crate::i18n::tr(lang, "select.msgTargetGone").to_string();
+        }
+        let seq = rec
+            .and_then(|r| r.get("seq").and_then(|v| v.as_u64()))
+            .unwrap_or(0);
+        let note = deliver_msg(state, session_id, content, lang);
+        crate::i18n::tr(lang, "select.msgSentCard")
+            .replace("{id}", &seq.to_string())
+            .replace("{note}", &note)
     }
 
     /// 单选卡点选「watch」：就地把这张卡编辑成实时 watch 卡（经 oneshot 同步回卡）。
@@ -4163,7 +4264,29 @@ mod unix_impl {
             PickerKind::Unwatch => {
                 dd_select_pick_unwatch(state, &otid, &session_id, &config, lang).await;
             }
+            PickerKind::Msg => {
+                let content = picker.payload.clone().unwrap_or_default();
+                dd_select_pick_msg(state, &otid, &session_id, &content, &config, lang).await;
+                // 卡片点『发送』＝在该渠道操作 → 设为活跃槽（与 /msg 一致，用户决策）。
+                activate_channel_on_action(state, "dingding", &config, lang).await;
+            }
         }
+    }
+
+    /// 钉钉单选卡点选「发送」：投递（若目标仍工作中·非 grok）+ 单选卡定格（OpenAPI 更新）。
+    async fn dd_select_pick_msg(
+        state: &Arc<ServerState>,
+        otid: &str,
+        session_id: &str,
+        content: &str,
+        config: &AppConfig,
+        lang: Lang,
+    ) {
+        let snapshot = state.agents.snapshot();
+        let rec = find_agent_by_session(&snapshot, session_id);
+        let label = msg_pick_deliver(state, session_id, rec, content, lang);
+        dd_finalize_select_card(config, otid, &label).await;
+        remove_picker(state, "dingding", otid);
     }
 
     /// 钉钉单选卡点选「watch」：钉钉不能就地变身（模板固定），故**另发一张新的实时 watch 卡** +
@@ -4428,7 +4551,32 @@ mod unix_impl {
             PickerKind::Unwatch => {
                 select_pick_unwatch_inplace(state, channel_id, mid, &session_id, config, lang).await;
             }
+            PickerKind::Msg => {
+                let content = picker.payload.clone().unwrap_or_default();
+                select_pick_msg_inplace(state, channel_id, mid, &session_id, &content, config, lang)
+                    .await;
+                // 卡片点『发送』＝在该渠道操作 → 设为活跃槽（与 /msg 一致，用户决策）。
+                activate_channel_on_action(state, channel_id, config, lang).await;
+            }
         }
+    }
+
+    /// 单选卡点选「发送」（TG/Slack 就地定格）：投递（若目标仍工作中·非 grok）+ 定格本单选卡。
+    async fn select_pick_msg_inplace(
+        state: &Arc<ServerState>,
+        channel_id: &str,
+        mid: &str,
+        session_id: &str,
+        content: &str,
+        config: &AppConfig,
+        lang: Lang,
+    ) {
+        let snapshot = state.agents.snapshot();
+        let rec = find_agent_by_session(&snapshot, session_id);
+        let label = msg_pick_deliver(state, session_id, rec, content, lang);
+        finalize_select_card_edit(channel_id, config, mid, &crate::select::title_msg(lang), &label)
+            .await;
+        remove_picker(state, channel_id, mid);
     }
 
     /// 单选卡点选「watch」（TG/Slack 可就地编辑）：把本消息编辑成实时 watch 卡（`WatchClient::edit`），
@@ -4697,10 +4845,13 @@ mod unix_impl {
 
     /// `/msg` 系命令的寻址公共段（spec agent-interject D9）：编号（复用 `/status` 稳定 seq）→
     /// 注册表快照记录 → 校验可插话（grok 无传话通道、ended 无处送达）。失败时已回提示、返回 None。
+    /// `require_working`：为真时（发送场景）目标必须「工作中」，否则回提示（用户定案：只能给工作中的
+    /// agent 发送插话）；回显 / 撤回场景传 false（对空闲也可操作）。
     async fn resolve_msg_target(
         state: &Arc<ServerState>,
         channel_id: &str,
         sel: Option<u64>,
+        require_working: bool,
         config: &AppConfig,
         lang: Lang,
     ) -> Option<String> {
@@ -4736,6 +4887,15 @@ mod unix_impl {
             .await;
             return None;
         }
+        if require_working && rec.get("state").and_then(|v| v.as_str()) != Some("working") {
+            let _ = reply_channel_text(
+                channel_id,
+                config,
+                crate::i18n::tr(lang, "select.msgNoWorkingTarget"),
+            )
+            .await;
+            return None;
+        }
         rec.get("sessionId")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
@@ -4753,37 +4913,159 @@ mod unix_impl {
     ) {
         // `/msg` 插话＝在该渠道主动参与 → 设为活跃槽（用户决策）。
         activate_channel_on_action(state, channel_id, config, lang).await;
-        let Some(sid) = resolve_msg_target(state, channel_id, sel, config, lang).await else {
+        match (sel, content) {
+            // 显式编号 + 内容 → 发送（收紧为仅工作中）。
+            (Some(_), Some(content)) => {
+                let Some(sid) =
+                    resolve_msg_target(state, channel_id, sel, true, config, lang).await
+                else {
+                    return;
+                };
+                let text = deliver_msg(state, &sid, &content, lang);
+                let _ = reply_channel_text(channel_id, config, &text).await;
+            }
+            // 显式编号无内容 → 回显待送达（不限工作中）。
+            (Some(_), None) => {
+                let Some(sid) =
+                    resolve_msg_target(state, channel_id, sel, false, config, lang).await
+                else {
+                    return;
+                };
+                let text = msg_echo_text(state, &sid, lang);
+                let _ = reply_channel_text(channel_id, config, &text).await;
+            }
+            // 无编号 + 内容 → 自动选择（关注恰 1 个且工作中直发；否则弹选择卡）。
+            (None, Some(content)) => {
+                handle_msg_auto(state, channel_id, content, config, lang).await;
+            }
+            // 无编号无内容 → 增强用法提示（用法示例 + 当前工作中 agent 列表）。
+            (None, None) => {
+                let text = msg_usage_hint(state, channel_id, lang);
+                let _ = reply_channel_text(channel_id, config, &text).await;
+            }
+        }
+    }
+
+    /// 追加一条插话并回执文案（`n==0` ⇒ 恰有 hook 挂起等待 → 立即送达）。发送三路径共用
+    /// （显式编号 / 无编号直发 / 单选卡点「发送」）。
+    fn deliver_msg(state: &Arc<ServerState>, session_id: &str, content: &str, lang: Lang) -> String {
+        let n = state.interject.append(session_id, content);
+        state.interject.persist();
+        broadcast_agents_state(state);
+        if n == 0 {
+            crate::i18n::tr(lang, "autoChannel.msgDeliveredNow").to_string()
+        } else {
+            crate::i18n::tr(lang, "autoChannel.msgQueued").replace("{n}", &n.to_string())
+        }
+    }
+
+    /// `/msg <编号>`（无内容）回显该 agent 待送达全文（无则「暂无待送达」）。
+    fn msg_echo_text(state: &Arc<ServerState>, session_id: &str, lang: Lang) -> String {
+        let full = state.interject.full_text(session_id);
+        if full.is_empty() {
+            crate::i18n::tr(lang, "autoChannel.msgNone").to_string()
+        } else {
+            let n = state.interject.pending_count(session_id);
+            format!(
+                "{}\n{}",
+                crate::i18n::tr(lang, "autoChannel.msgEchoHeader").replace("{n}", &n.to_string()),
+                full
+            )
+        }
+    }
+
+    /// 快照中该 session 是否「工作中·非 grok」（插话可发的前提；直发短路判定用）。
+    fn is_working_non_grok(snapshot: &serde_json::Value, session_id: &str) -> bool {
+        find_agent_by_session(snapshot, session_id)
+            .map(|r| {
+                r.get("state").and_then(|v| v.as_str()) == Some("working")
+                    && r.get("kind").and_then(|v| v.as_str()) != Some("grok")
+            })
+            .unwrap_or(false)
+    }
+
+    /// 工作中·非 grok 的 agent 列表行（`[编号] 类型 — 标题（项目）`；用法提示 / 兜底文本用）。
+    fn working_agent_lines(snapshot: &serde_json::Value, lang: Lang) -> Vec<String> {
+        let empty = Vec::new();
+        snapshot
+            .as_array()
+            .unwrap_or(&empty)
+            .iter()
+            .filter(|r| {
+                r.get("state").and_then(|v| v.as_str()) == Some("working")
+                    && r.get("kind").and_then(|v| v.as_str()) != Some("grok")
+            })
+            .map(|r| {
+                let seq = r.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
+                format!("[{}] {}", seq, crate::autochannel::kind_title_project(r, lang))
+            })
+            .collect()
+    }
+
+    /// `/msg`（无编号无内容）增强用法提示：用法示例 + 当前工作中 agent 列表（带编号，可直接
+    /// `/msg <编号> <内容>` 定向）。无工作中 → 附一行「当前没有工作中的 Agent」。
+    fn msg_usage_hint(state: &Arc<ServerState>, channel_id: &str, lang: Lang) -> String {
+        let prefix = crate::autochannel::cmd_prefix(channel_id);
+        let mut out = crate::i18n::tr(lang, "autoChannel.msgUsage").replace("{p}", prefix);
+        let snapshot = state.agents.snapshot();
+        let lines = working_agent_lines(&snapshot, lang);
+        out.push_str("\n\n");
+        if lines.is_empty() {
+            out.push_str(crate::i18n::tr(lang, "select.msgNoWorking"));
+        } else {
+            out.push_str(&lines.join("\n"));
+        }
+        out
+    }
+
+    /// `/msg <内容>`（无编号）：本渠道关注恰 1 个且该 agent 工作中·非 grok → 直发；否则弹选择卡
+    /// （列工作中·非 grok，每行「发送」按钮）；无可发对象 → 提示、不弹卡。
+    async fn handle_msg_auto(
+        state: &Arc<ServerState>,
+        channel_id: &str,
+        content: String,
+        config: &AppConfig,
+        lang: Lang,
+    ) {
+        let snapshot = state.agents.snapshot();
+        let watching = watching_sessions(state, channel_id);
+        // 直发条件（用户定案）：只有明确关注恰 1 个、且它工作中·非 grok 时才直发，避免发错。
+        if watching.len() == 1 {
+            if let Some(sid) = watching.iter().next().cloned() {
+                if is_working_non_grok(&snapshot, &sid) {
+                    let text = deliver_msg(state, &sid, &content, lang);
+                    let _ = reply_channel_text(channel_id, config, &text).await;
+                    return;
+                }
+            }
+        }
+        // 否则弹选择卡（列工作中·非 grok）；关注中的仍带「· 关注中」徽标。
+        let opts = crate::select::msg_options(&snapshot, &watching, lang);
+        if opts.is_empty() {
+            let _ = reply_channel_text(
+                channel_id,
+                config,
+                crate::i18n::tr(lang, "select.msgNoWorking"),
+            )
+            .await;
             return;
-        };
-        let text = match content {
-            Some(content) => {
-                // n=0 ⇒ 被等待中的 hook 当场消费（已送达）；否则回执当前待送达条数。
-                let n = state.interject.append(&sid, &content);
-                state.interject.persist();
-                broadcast_agents_state(state);
-                if n == 0 {
-                    crate::i18n::tr(lang, "autoChannel.msgDeliveredNow").to_string()
-                } else {
-                    crate::i18n::tr(lang, "autoChannel.msgQueued").replace("{n}", &n.to_string())
-                }
-            }
-            None => {
-                let full = state.interject.full_text(&sid);
-                if full.is_empty() {
-                    crate::i18n::tr(lang, "autoChannel.msgNone").to_string()
-                } else {
-                    let n = state.interject.pending_count(&sid);
-                    format!(
-                        "{}\n{}",
-                        crate::i18n::tr(lang, "autoChannel.msgEchoHeader")
-                            .replace("{n}", &n.to_string()),
-                        full
-                    )
-                }
-            }
-        };
-        let _ = reply_channel_text(channel_id, config, &text).await;
+        }
+        let sent = send_agent_picker(
+            state,
+            channel_id,
+            config,
+            PickerKind::Msg,
+            crate::select::title_msg(lang),
+            opts,
+            Some(content),
+            lang,
+        )
+        .await;
+        if !sent {
+            // 发卡失败（非支持渠道 / API 失败）：回工作中列表兜底，用户可 `/msg <编号> <内容>` 定向。
+            let text = msg_usage_hint(state, channel_id, lang);
+            let _ = reply_channel_text(channel_id, config, &text).await;
+        }
     }
 
     /// `/msg-clear <编号>`（`/撤回`）：清空该 agent 的待送达插话 + 回执。
@@ -4796,7 +5078,7 @@ mod unix_impl {
     ) {
         // `/msg-clear` 撤回插话＝在该渠道操作 → 设为活跃槽（用户决策）。
         activate_channel_on_action(state, channel_id, config, lang).await;
-        let Some(sid) = resolve_msg_target(state, channel_id, sel, config, lang).await else {
+        let Some(sid) = resolve_msg_target(state, channel_id, sel, false, config, lang).await else {
             return;
         };
         let text = if state.interject.clear(&sid) {
@@ -4886,6 +5168,7 @@ mod unix_impl {
                             PickerKind::Status,
                             crate::select::title_status(lang),
                             opts,
+                            None,
                             lang,
                         )
                         .await;
@@ -4941,6 +5224,7 @@ mod unix_impl {
                             PickerKind::Watch,
                             crate::select::title_watch(lang),
                             opts,
+                            None,
                             lang,
                         )
                         .await;
@@ -4973,6 +5257,7 @@ mod unix_impl {
                         PickerKind::Unwatch,
                         crate::select::title_unwatch(lang),
                         opts,
+                        None,
                         lang,
                     )
                     .await

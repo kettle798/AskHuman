@@ -59,7 +59,8 @@ pub enum Command {
     /// `/unwatch`、`/取消关注`：取消关注（编号 / 全部 / 缺省自动）。
     Unwatch(WatchSel),
     /// `/msg <编号> <内容>`、`/插话`：给该 agent 排队一条插话（spec agent-interject D2/D9）。
-    /// 编号缺省/非数字 → `(None, None)`（回用法提示）；有编号无内容 → 回显当前待送达全文。
+    /// 有编号无内容 → 回显当前待送达全文；**无编号有内容** → 自动选择目标（关注恰 1 个且工作中直发，
+    /// 否则弹选择卡，见 `docs/plans/im-msg-select-card.md`）；无编号无内容 → 回增强用法提示。
     /// 内容保留原始换行（多行插话原样送达）。
     Msg(Option<u64>, Option<String>),
     /// `/msg-clear <编号>`、`/撤回`：清空该 agent 的待送达插话。编号缺省 → 回用法提示。
@@ -137,7 +138,8 @@ pub fn classify(text: &str) -> Parsed {
             Parsed::Command(Command::Unwatch(sel))
         }
         "msg" | "插话" => {
-            // `<编号> <内容>`：编号后的原文（含换行）整体为内容；编号缺省/非数字 → (None, None)。
+            // 首 token 为纯数字 → 编号 + 其后原文（含换行）为内容；首 token 非数字 → 整段 rest 作为内容
+            // （无编号，交自动选择流程：关注恰 1 个且工作中直发，否则弹选择卡）；空 → (None, None)。
             let (first, content) = match rest.find(char::is_whitespace) {
                 Some(i) => (&rest[..i], rest[i..].trim_start()),
                 None => (rest, ""),
@@ -147,7 +149,10 @@ pub fn classify(text: &str) -> Parsed {
                     let content = (!content.is_empty()).then(|| content.to_string());
                     Parsed::Command(Command::Msg(Some(n), content))
                 }
-                Err(_) => Parsed::Command(Command::Msg(None, None)),
+                Err(_) => {
+                    let content = (!rest.is_empty()).then(|| rest.to_string());
+                    Parsed::Command(Command::Msg(None, content))
+                }
             }
         }
         "msg-clear" | "撤回" => {
@@ -820,9 +825,17 @@ mod tests {
         );
         // 有编号无内容 → 回显。
         assert_eq!(classify("/msg 3"), Parsed::Command(Command::Msg(Some(3), None)));
-        // 编号缺省 / 非数字 → (None, None)（用法提示）。
+        // 无编号无内容 → (None, None)（增强用法提示）。
         assert_eq!(classify("/msg"), Parsed::Command(Command::Msg(None, None)));
-        assert_eq!(classify("/msg hello"), Parsed::Command(Command::Msg(None, None)));
+        // 无编号有内容（首 token 非数字）→ 整段作内容，交自动选择流程。
+        assert_eq!(
+            classify("/msg hello"),
+            Parsed::Command(Command::Msg(None, Some("hello".to_string())))
+        );
+        assert_eq!(
+            classify("/msg 停一下，先看测试"),
+            Parsed::Command(Command::Msg(None, Some("停一下，先看测试".to_string())))
+        );
         // 中文别名 + `!` 备用前缀（Slack）。
         assert_eq!(
             classify("/插话 2 换个方案"),

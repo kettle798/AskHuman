@@ -510,8 +510,9 @@ fn build_specs(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> Vec
                     project
                 );
                 let mut sub: Vec<Node> = Vec::new();
-                // 「发送消息」：grok 无可靠传话通道，首期排除（spec agent-interject D1）。
-                if a.kind != "grok" {
+                // 「发送消息」：grok 无可靠传话通道（首期排除，spec agent-interject D1），且仅「工作中」
+                // 才显示——插话在 agent 下一次工具调用时送达，对空闲无意义（用户定案）。
+                if a.kind != "grok" && a.state == "working" {
                     let text = if a.pending_interject {
                         i18n::tr(lang, "tray.agentSendMessagePending").to_string()
                     } else {

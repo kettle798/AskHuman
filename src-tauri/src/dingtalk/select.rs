@@ -48,7 +48,9 @@ fn font(text: &str, size: Option<&str>, color: Option<&str>) -> String {
 /// 每行触发按钮的颜色（钉钉 SingleButton color 枚举）：关注/查看=蓝、取消=红。
 fn button_color(action: crate::select::SelectAction) -> &'static str {
     match action {
-        crate::select::SelectAction::Watch | crate::select::SelectAction::Status => "blue",
+        crate::select::SelectAction::Watch
+        | crate::select::SelectAction::Status
+        | crate::select::SelectAction::Msg => "blue",
         crate::select::SelectAction::Unwatch => "red",
     }
 }
