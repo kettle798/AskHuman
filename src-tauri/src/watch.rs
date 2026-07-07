@@ -83,6 +83,8 @@ pub enum FinalKind {
     /// 「按需发送」下活跃槽切走本渠道时自动结束关注（`String` = 切换目标渠道展示名 `{to}`）。
     /// 见 `docs/specs/im-auto-end-watch.md`。
     AutoStopped(String),
+    /// agent 转为空闲后自动结束关注。
+    Idle,
 }
 
 /// 卡片渲染模式：活动（可交互按钮）或终态（禁用按钮 + 终态文案）。
@@ -291,6 +293,7 @@ pub fn final_label_text(kind: &FinalKind, lang: Lang) -> String {
             FinalKind::Cancelled => "watch.btnCancelled",
             FinalKind::Replaced => "watch.btnReplaced",
             FinalKind::Moved => "watch.btnMoved",
+            FinalKind::Idle => "watch.btnIdle",
             FinalKind::AutoStopped(_) => unreachable!("handled above"),
         },
     )
@@ -556,6 +559,12 @@ mod tests {
             final_label_text(&kind, Lang::En),
             "Auto-stopped (switched to 本地弹窗)"
         );
+    }
+
+    #[test]
+    fn idle_label_text() {
+        assert_eq!(final_label_text(&FinalKind::Idle, Lang::Zh), "已空闲 · 已自动取消关注");
+        assert_eq!(final_label_text(&FinalKind::Idle, Lang::En), "Idle · auto-unwatched");
     }
 
     #[test]

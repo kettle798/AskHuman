@@ -521,6 +521,11 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "Send {p}watch <n> to follow one with a live status card.",
             "发送 {p}watch <编号> 即可用一张实时状态卡关注该 agent。",
         ),
+        "watch.pickHintWorkingOnly" => pick(
+            lang,
+            "Send {p}watch <n> to follow a working agent with a live status card.",
+            "发送 {p}watch <编号> 可关注一个工作中的 Agent，获取实时状态卡片。",
+        ),
         "watch.listTitle" => pick(lang, "Watching:", "正在关注："),
         // /unwatch：确认与提示。
         "watch.unwatchDone" => pick(lang, "Stopped watching [{id}].", "已取消关注 [{id}]。"),
@@ -567,6 +572,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "watch.btnCancelled" => pick(lang, "Unwatched", "已取消关注"),
         "watch.btnReplaced" => pick(lang, "Replaced by a newer card", "已由新卡片接替"),
         "watch.btnMoved" => pick(lang, "Moved to the latest card ⬇", "已移至最新卡片 ⬇"),
+        "watch.btnIdle" => pick(lang, "Idle · auto-unwatched", "已空闲 · 已自动取消关注"),
         "watch.btnAutoStopped" => {
             pick(lang, "Auto-stopped (switched to {to})", "已切换到 {to} · 自动结束关注")
         }

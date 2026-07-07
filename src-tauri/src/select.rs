@@ -228,6 +228,34 @@ pub fn agent_options(
     working
 }
 
+/// 由注册表快照组装 `/watch` 单选卡选项：**仅列「工作中」** 的 agent（含 grok，区别于
+/// `msg_options` 排除 grok）。空闲 agent 关注没有实际意义，故不列出。
+pub fn watch_options(
+    snapshot: &Value,
+    watching: &HashSet<String>,
+    now: u64,
+    lang: Lang,
+) -> Vec<SelectOption> {
+    let empty = Vec::new();
+    let list = snapshot.as_array().unwrap_or(&empty);
+    let mut out: Vec<SelectOption> = Vec::new();
+    for rec in list {
+        if rec.get("state").and_then(|v| v.as_str()) != Some("working") {
+            continue;
+        }
+        let sid = rec
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if sid.is_empty() {
+            continue;
+        }
+        out.push(option_from_record(rec, sid, watching, now, lang));
+    }
+    out
+}
+
 /// 由注册表快照组装「可发送插话」的候选选项（`/msg` 无编号单选卡）：**仅列「工作中」且非 grok**
 /// 的 agent（插话只对工作中有意义、grok 无可靠传话通道）。`watching` 命中仍加「· 关注中」徽标。
 pub fn msg_options(
@@ -391,6 +419,29 @@ mod tests {
         assert_eq!(SelectAction::Status.button_label(Lang::Zh), "查看");
         assert_eq!(SelectAction::Unwatch.button_label(Lang::Zh), "取消");
         assert_eq!(SelectAction::Msg.button_label(Lang::Zh), "发送");
+    }
+
+    #[test]
+    fn watch_options_only_working_including_grok() {
+        let mut snap = snap();
+        snap.as_array_mut().unwrap().push(json!({
+            "seq":4,"kind":"grok","sessionId":"s-grok","state":"working","title":"g","cwd":"/tmp/g","startedAt": NOW - 120
+        }));
+        let opts = watch_options(&snap, &HashSet::new(), NOW, Lang::Zh);
+        // working cursor (s-work) 不在 snap() 默认里——snap() 里 claude s-work 是 working。
+        // snap() = idle cursor + working claude + ended codex + 追加 working grok。
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].id, "s-work"); // claude，working
+        assert_eq!(opts[1].id, "s-grok"); // grok，working（不排除）
+        // idle 的 s-idle 不在列表中。
+        assert!(!opts.iter().any(|o| o.id == "s-idle"));
+        // ended 的 s-end 不在列表中。
+        assert!(!opts.iter().any(|o| o.id == "s-end"));
+        // 关注徽标生效。
+        let mut watching = HashSet::new();
+        watching.insert("s-grok".to_string());
+        let opts2 = watch_options(&snap, &watching, NOW, Lang::Zh);
+        assert_eq!(opts2[1].badge.as_deref(), Some("· 关注中"));
     }
 
     #[test]

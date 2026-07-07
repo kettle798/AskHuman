@@ -2651,18 +2651,22 @@ mod unix_impl {
                 let frame =
                     crate::watch::build_frame(e.seq, rec, waiting.contains(&e.session_id));
                 let ended = frame.phase == crate::watch::WatchPhase::Ended;
+                let idle = frame.phase == crate::watch::WatchPhase::Idle;
+                let finalize = ended || idle;
                 let sig = crate::watch::signature(&frame);
-                if !ended && sig == e.last_sig {
+                if !finalize && sig == e.last_sig {
                     continue; // 内容没变，不编辑。
                 }
                 // 每卡最短编辑间隔按渠道（终态豁免：定格必须落地）；漏掉的变化下一拍补上。
-                if !ended
+                if !finalize
                     && now_ms().saturating_sub(e.last_edit_ms) < client.min_edit_interval_ms()
                 {
                     continue;
                 }
                 let mode = if ended {
                     crate::watch::CardMode::Final(crate::watch::FinalKind::Ended)
+                } else if idle {
+                    crate::watch::CardMode::Final(crate::watch::FinalKind::Idle)
                 } else {
                     crate::watch::CardMode::Active
                 };
@@ -2692,8 +2696,8 @@ mod unix_impl {
                                 log(&format!("watch: finalize moved card failed: {}", err));
                             }
                             let mut subs = state.watch.subs.lock().unwrap();
-                            if ended {
-                                // 新卡即终态卡：定格已随发送完成 → 退订。
+                            if finalize {
+                                // 新卡即终态卡（ended / idle）：定格已随发送完成 → 退订。
                                 subs.retain(|s| s.message_id != e.message_id);
                             } else if let Some(s) =
                                 subs.iter_mut().find(|s| s.message_id == e.message_id)
@@ -2731,8 +2735,8 @@ mod unix_impl {
                 match client.edit(&e.message_id, &frame, mode, now, lang).await {
                     Ok(()) => {
                         let mut subs = state.watch.subs.lock().unwrap();
-                        if ended {
-                            // 定格成功 → 自动退订。
+                        if finalize {
+                            // 定格成功（ended / idle）→ 自动退订。
                             subs.retain(|s| s.message_id != e.message_id);
                             changed = true;
                         } else if let Some(s) =
@@ -3224,24 +3228,21 @@ mod unix_impl {
             return;
         }
         let Some(id) = sel else {
-            // `/watch` 无参：首行「发 /watch <编号> 关注」提示 + 与 `/status` 相同的 agent 列表；
-            // 已有关注时附加「正在关注」段（仅本渠道的）。无 agent 时列表部分与 /status 同样给空提示。
+            // `/watch` 无参文本回退：首行提示 + agent 列表 + 已关注段。仅工作中 agent 时才显示
+            // 关注提示（空闲 agent 关注没有意义）。列表仍含全部 working + idle 便于了解全貌。
             let snapshot = state.agents.snapshot();
-            let has_agents = snapshot
+            let has_working = snapshot
                 .as_array()
                 .map(|l| {
                     l.iter().any(|r| {
-                        matches!(
-                            r.get("state").and_then(|v| v.as_str()),
-                            Some("working") | Some("idle")
-                        )
+                        r.get("state").and_then(|v| v.as_str()) == Some("working")
                     })
                 })
                 .unwrap_or(false);
             let mut out = String::new();
-            if has_agents {
+            if has_working {
                 out.push_str(
-                    &crate::i18n::tr(lang, "watch.pickHint")
+                    &crate::i18n::tr(lang, "watch.pickHintWorkingOnly")
                         .replace("{p}", crate::autochannel::cmd_prefix(channel_id)),
                 );
                 out.push_str("\n\n");
@@ -3318,10 +3319,15 @@ mod unix_impl {
             .contains(&session_id);
         let now = now_secs();
         let frame = crate::watch::build_frame(id, Some(rec), waiting);
-        // 已结束的 agent 也可 watch：直接发一张定格终态卡（不订阅）。
+        // 已结束 / 空闲的 agent：直接发一张定格终态卡（回顾当前状态，不订阅后续更新）。
+        // Waiting（有在途 AskHuman 提问）不算空闲。
         let ended = frame.phase == crate::watch::WatchPhase::Ended;
+        let idle = frame.phase == crate::watch::WatchPhase::Idle;
+        let one_shot = ended || idle;
         let mode = if ended {
             crate::watch::CardMode::Final(crate::watch::FinalKind::Ended)
+        } else if idle {
+            crate::watch::CardMode::Final(crate::watch::FinalKind::Idle)
         } else {
             crate::watch::CardMode::Active
         };
@@ -3337,7 +3343,7 @@ mod unix_impl {
         // 与「单选卡点选就地变卡」共用同一套 bookkeeping；`replaced` 仅供上面的上限判定，收尾在
         // helper 内按 session 重算）。
         register_watch_at(
-            state, channel_id, &session_id, id, &message_id, &frame, ended, config, lang,
+            state, channel_id, &session_id, id, &message_id, &frame, one_shot, config, lang,
         )
         .await;
     }
@@ -5274,12 +5280,12 @@ mod unix_impl {
                 match sel {
                     // /watch <编号>：直达关注（不弹卡）。
                     Some(_) => handle_watch_cmd(state, channel_id, sel, &config, lang).await,
-                    // /watch（无参）：推「选择要关注的 Agent」单选卡（已关注者带「· 关注中」徽标，
-                    // 点它＝换新卡）。无 agent / 非飞书 → 回既有无参列表兜底。
+                    // /watch（无参）：推「选择要关注的 Agent」单选卡（仅工作中；已关注者带
+                    // 「· 关注中」徽标，点它＝换新卡）。无工作中 agent → 回文本列表兜底。
                     None => {
                         let snapshot = state.agents.snapshot();
                         let watching = watching_sessions(state, channel_id);
-                        let opts = crate::select::agent_options(&snapshot, &watching, now_secs(), lang);
+                        let opts = crate::select::watch_options(&snapshot, &watching, now_secs(), lang);
                         let sent = send_agent_picker(
                             state,
                             channel_id,
