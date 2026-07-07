@@ -490,7 +490,7 @@ fn build_specs(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> Vec
             )];
             children.push(Node::separator("sep.agents"));
             for a in &data.agents {
-                // 条目文案与 IM `/status` 列表行同构：`[编号] 类型 — 标题（项目）`（用户定案）。
+                // Agent 条目前缀用与 /watch 卡片一致的状态圆点，避免仅靠排序区分工作中/空闲。
                 // 编号可直接用于 `/msg <编号>`；标题截断 24 字符防菜单过宽。
                 let project = if a.project_name.is_empty() {
                     i18n::tr(lang, "autoChannel.noProject").to_string()
@@ -503,7 +503,8 @@ fn build_specs(up: bool, lang: Lang, data: &TrayData, lifecycle_on: bool) -> Vec
                     truncate_chars(a.title.trim(), AGENT_TITLE_MAX_CHARS)
                 };
                 let title = format!(
-                    "[{}] {} — {}（{}）",
+                    "{} · [{}] {} — {}（{}）",
+                    agent_state_label(&a.state, lang),
                     a.seq,
                     agent_kind_label(&a.kind),
                     session_title,
@@ -587,6 +588,14 @@ fn agent_kind_label(kind: &str) -> &str {
     match crate::agents::AgentKind::parse(kind) {
         Some(k) => k.label(),
         None => kind,
+    }
+}
+
+/// 托盘 Agent 条目的状态前缀；复用 /watch 卡片的状态文案与圆点。
+fn agent_state_label(state: &str, lang: Lang) -> &'static str {
+    match state {
+        "working" => i18n::tr(lang, "watch.stateWorking"),
+        _ => i18n::tr(lang, "watch.stateIdle"),
     }
 }
 
