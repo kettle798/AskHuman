@@ -1,0 +1,13 @@
+[package]
+name = "tray_menu_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSThread"] }
+libc = "0.2"
+
+[build-dependencies]
+tauri-build = { version = "2" }

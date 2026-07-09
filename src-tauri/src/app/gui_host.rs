@@ -178,6 +178,17 @@ pub fn setup(app: &mut tauri::App, config: &AppConfig) -> tauri::Result<()> {
             tauri::ActivationPolicy::Accessory
         };
         app.set_activation_policy(policy);
+
+        // tao launched() 在 setup hook 之前以 .regular + activateIgnoringOtherApps(true)
+        // 激活了应用。对无窗口的状态栏 app，这导致 macOS 在首次展开子菜单时隐式关闭菜单。
+        // 详见 docs/investigations/tray-menu-close-on-first-hover.md
+        if mode != MenuBarIconMode::Off {
+            let mtm = objc2_foundation::MainThreadMarker::new().unwrap();
+            let ns_app = objc2_app_kit::NSApp(mtm);
+            ns_app.deactivate();
+            #[allow(deprecated)]
+            ns_app.activateIgnoringOtherApps(false);
+        }
     }
 
     // 有图标且托盘可用 → 建托盘（初始 idle 图标，随后由状态订阅刷新）。

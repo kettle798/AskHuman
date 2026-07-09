@@ -1,0 +1,7 @@
+{
+  "productName": "tray-menu-test",
+  "identifier": "com.test.traymenutest",
+  "build": { "frontendDist": "./frontend" },
+  "app": { "withGlobalTauri": false, "windows": [] },
+  "bundle": { "active": false }
+}

@@ -2,7 +2,13 @@
 
 按具体任务 / 需求记录待办与当前进展。任务 / 需求完成后删除其 section（历史留在 git）。
 
-## ⏳ 进行中：Hook 性能优化 —— 进程树遍历移至 Daemon
+## 已完成：状态栏菜单 install 后首次展开自动关闭
+
+根因已定位并修复。详见 `docs/investigations/tray-menu-close-on-first-hover.md`。
+tao `launched()` 以 `.regular` + `activateIgnoringOtherApps(true)` 激活应用导致异常状态；
+修复：setup hook 切到 `.accessory` 后 `deactivate()` + `activate(false)` 重置。
+
+## Hook 性能优化 —— 进程树遍历移至 Daemon
 
 计划 `docs/plans/hook-perf-walk-optimization.md`。PreToolUse hook 耗时从 ~300ms 降至 ~33ms。
 代码已完成（IPC hint_pid + daemon 缓存 + interject 优先响应），待用户确认后清除。

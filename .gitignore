@@ -14,5 +14,19 @@ src-tauri/gen/schemas/
 # npm 平台子包二进制（由 CI 在发布时注入，不提交到仓库）
 packaging/npm/platforms/*/bin/
 
+# Demo 编译产物
+demo/**/target/
+demo/**/*.o
+demo/**/*.d
+demo/**/*.swp
+# Tauri demo gen schemas（cargo build 自动生成）
+demo/**/gen/
+# Swift 编译的裸二进制（无扩展名，按名字排除）
+demo/tray-menu-close/swift/tray-swift-demo
+demo/tray-menu-close/swift/minimal
+demo/tray-menu-close/swift/test_policy
+demo/tray-menu-close/swift/test_timing
+demo/tray-menu-close/swift/test_fix
+
 # 杂项
 .DS_Store
