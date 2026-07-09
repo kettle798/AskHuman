@@ -835,15 +835,11 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
     }
 }
 
-/// 实时切换弹窗背景效果（玻璃/模糊）到所有已打开窗口（仅 macOS 26+ 真正切换）。
-/// 持久化由前端 `save_settings` 负责；此命令只负责对当前窗口即时生效。
+/// 实时切换弹窗背景效果（玻璃/模糊）到本进程**全部**已打开 WebView 窗口（含 history/agents 等）。
+/// 仅 macOS 真正切换材质。持久化由前端 `save_settings` 负责；此命令只负责即时生效。
 #[tauri::command]
 pub fn apply_window_effect(app: AppHandle, effect: WindowEffect) {
-    for label in ["popup", "settings"] {
-        if let Some(w) = app.get_webview_window(label) {
-            crate::app::set_runtime_window_effect(&w, effect);
-        }
-    }
+    crate::app::apply_window_effect_to_all(&app, effect);
 }
 
 // ===== 语音输入（macOS 26 SpeechAnalyzer，离线，经 Swift 桥） =====

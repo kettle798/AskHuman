@@ -141,7 +141,7 @@ impl GuiBridge {
 }
 
 /// 方案6：预热弹窗领用 + 前端把本次请求内容绘制完成后，由 `popup_show_window` 命令在主线程调用本函数，
-/// 把一直隐藏待命的弹窗上屏：按**当前** config 兜底重设尺寸/置顶/出现动画/玻璃，再 `show()` + 提示音 +
+/// 把一直隐藏待命的弹窗上屏：按**当前** config 兜底重设尺寸/置顶/出现动画/窗口效果，再 `show()` + 提示音 +
 /// 聚焦 + Dock 角标。延后到此刻 show 可杜绝「空白/旧内容闪现」（窗口隐藏到本次内容已绘制才出现）。
 #[cfg(unix)]
 pub(crate) fn finalize_popup_show(app: &tauri::AppHandle) {
@@ -171,9 +171,9 @@ pub(crate) fn finalize_popup_show(app: &tauri::AppHandle) {
                 config.general.appear_animation.ns_animation_behavior(),
             );
         }
-        if matches!(config.general.window_effect, WindowEffect::Glass) {
-            apply_liquid_glass(&win);
-        }
+        // 必须按**当前** window_effect 完整套材质：热进程建窗时可能仍是旧效果（Glass 路径不挂
+        // vibrancy），若待命期间用户切到 Blur 而这里只处理 Glass，会得到「透明 + 无材质」看不清。
+        set_runtime_window_effect(&win, config.general.window_effect);
         let count = if let Some(w) = app.try_state::<WarmPopup>() {
             w.show
                 .lock()
@@ -1076,6 +1076,16 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                                                     theme,
                                                 );
                                             }
+                                            // windowEffect 热同步：在途 helper 收到后即时切 glass/blur
+                                            //（热待命进程不在 broadcast 列表，靠 finalize 领用时兜底）。
+                                            // apply_window_effect_to_all 内部 hop 主线程（本 reader 在 tokio worker）。
+                                            if let Some(effect) = general
+                                                .get("windowEffect")
+                                                .and_then(|v| v.as_str())
+                                                .and_then(parse_window_effect)
+                                            {
+                                                apply_window_effect_to_all(&app_handle, effect);
+                                            }
                                             let _ = app_handle.emit("settings-updated", general);
                                         }
                                         // 版本自更新态（D→GUI）：缓存进程内 + emit 给弹窗前端
@@ -1446,6 +1456,33 @@ pub(crate) fn set_runtime_window_effect<R: tauri::Runtime>(
     _window: &tauri::WebviewWindow<R>,
     _effect: WindowEffect,
 ) {
+}
+
+/// 对本进程内**全部** WebView 窗口套用窗口背景效果（设置页即时切换 + ConfigChanged 热同步）。
+///
+/// **必须 hop 到主线程**：AppKit 的 `removeFromSuperview` / `NSVisualEffectView` /
+/// Liquid Glass 视图层级操作在非主线程会触发 AutoLayout 断言并 abort（实测 blur→glass 崩在
+/// tokio-rt-worker）。调用方可在任意线程；本函数只把闭包投递到主 runloop，不阻塞等待。
+pub(crate) fn apply_window_effect_to_all<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    effect: WindowEffect,
+) {
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        use tauri::Manager;
+        for (_label, w) in app2.webview_windows() {
+            set_runtime_window_effect(&w, effect);
+        }
+    });
+}
+
+/// 解析 general 配置里的 `windowEffect` 字符串（`"glass"` / `"blur"`）。
+pub(crate) fn parse_window_effect(s: &str) -> Option<WindowEffect> {
+    match s {
+        "glass" => Some(WindowEffect::Glass),
+        "blur" => Some(WindowEffect::Blur),
+        _ => None,
+    }
 }
 
 /// 「设置/历史窗口是否应浮于置顶弹窗之上」的进程内判定：当前进程内存在 popup 窗口且弹窗置顶。
