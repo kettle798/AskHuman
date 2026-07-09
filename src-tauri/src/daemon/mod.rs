@@ -2018,7 +2018,7 @@ mod unix_impl {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|s| &s.session_id == sid)
+                .filter(|s| &s.session_id == sid && !s.rewatchable)
                 .map(|s| s.channel.clone())
                 .collect(),
             None => Vec::new(),
@@ -2621,6 +2621,7 @@ mod unix_impl {
             if !subs.is_empty() {
                 log(&format!("watch: restored {} subscription(s)", subs.len()));
                 *state.watch.subs.lock().unwrap() = subs;
+                ensure_watch_routes(&state).await;
             }
         }
         loop {
