@@ -576,6 +576,15 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "watch.btnAutoStopped" => {
             pick(lang, "Auto-stopped (switched to {to})", "已切换到 {to} · 自动结束关注")
         }
+        // 可重新关注（可点击，非 disabled）。
+        "watch.btnRewatch" => {
+            pick(lang, "Switched to {to} · Click to re-watch", "已切换到 {to} · 点击重新关注")
+        }
+        "watch.btnRewatchCancelled" => {
+            pick(lang, "Unwatched · Click to re-watch", "已取消关注 · 点击重新关注")
+        }
+        // 已完成重新关注（disabled）。
+        "watch.btnRewatched" => pick(lang, "⬇ Re-watched in new card", "⬇ 已在新卡片重新关注"),
 
         // —— 通用「单选卡」（spec docs/specs/im-select-card.md）——
         // 卡片标题（按命令种类）。

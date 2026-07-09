@@ -33,6 +33,9 @@ pub struct PersistedWatch {
     pub message_id: String,
     #[serde(default)]
     pub created_at: u64,
+    /// 终态已定格但保留路由供重新关注（仅 AutoStopped；引擎/上限/空闲退出跳过此类 entry）。
+    #[serde(default)]
+    pub rewatchable: bool,
 }
 
 /// 读取持久化订阅（缺失 / 解析失败 → 空）。
@@ -85,6 +88,16 @@ pub enum FinalKind {
     AutoStopped(String),
     /// agent 转为空闲后自动结束关注。
     Idle,
+    /// 用户已从该卡点击「重新关注」（旧卡定格用）。
+    Rewatched,
+}
+
+impl FinalKind {
+    /// 该终态是否支持「重新关注」按钮（可点击而非 disabled）。
+    /// `AutoStopped`：活跃渠道切走；`Cancelled`：用户主动取消关注。
+    pub fn is_rewatchable(&self) -> bool {
+        matches!(self, FinalKind::AutoStopped(_) | FinalKind::Cancelled)
+    }
 }
 
 /// 卡片渲染模式：活动（可交互按钮）或终态（禁用按钮 + 终态文案）。
@@ -294,18 +307,30 @@ pub fn final_label_text(kind: &FinalKind, lang: Lang) -> String {
             FinalKind::Replaced => "watch.btnReplaced",
             FinalKind::Moved => "watch.btnMoved",
             FinalKind::Idle => "watch.btnIdle",
+            FinalKind::Rewatched => "watch.btnRewatched",
             FinalKind::AutoStopped(_) => unreachable!("handled above"),
         },
     )
     .to_string()
 }
 
+/// 可重新关注终态的按钮文案（可点击，非 disabled）。
+pub fn rewatch_label_text(kind: &FinalKind, lang: Lang) -> String {
+    match kind {
+        FinalKind::AutoStopped(to) => i18n::tr(lang, "watch.btnRewatch").replace("{to}", to),
+        FinalKind::Cancelled => i18n::tr(lang, "watch.btnRewatchCancelled").to_string(),
+        _ => final_label_text(kind, lang),
+    }
+}
+
 /// 组装飞书卡片视图（本地化文案在此完成）。`now` 为渲染时刻（Unix 秒，进「最后更新」行）。
+/// `session_id`：当 `mode` 为可重新关注终态时需传入以嵌入重新关注按钮的回调数据。
 pub fn card_view(
     f: &WatchFrame,
     mode: CardMode,
     now: u64,
     lang: Lang,
+    session_id: Option<&str>,
 ) -> crate::feishu::card::WatchCardView {
     use crate::feishu::card::{WatchButtons, WatchCardView};
 
@@ -320,6 +345,12 @@ pub fn card_view(
             unwatch: i18n::tr(lang, "watch.btnUnwatch").to_string(),
             refresh: i18n::tr(lang, "watch.btnRefresh").to_string(),
         },
+        CardMode::Final(ref kind) if kind.is_rewatchable() && session_id.is_some() => {
+            WatchButtons::Rewatch {
+                label: rewatch_label_text(kind, lang),
+                session_id: session_id.unwrap().to_string(),
+            }
+        }
         CardMode::Final(kind) => WatchButtons::Final {
             label: final_label_text(&kind, lang),
         },
@@ -525,7 +556,7 @@ mod tests {
     fn card_view_localizes_and_maps_buttons() {
         let f = build_frame(3, Some(&rec("working")), false);
         let now = 1_700_000_000;
-        let v = card_view(&f, CardMode::Active, now, Lang::Zh);
+        let v = card_view(&f, CardMode::Active, now, Lang::Zh, None);
         assert!(v.header.contains("[3]"));
         assert!(v.header.contains("Cursor"));
         assert!(v.header.contains("HumanInLoop"));
@@ -541,7 +572,7 @@ mod tests {
             _ => panic!("expected active buttons"),
         }
         // 终态：单个禁用按钮 + 对应文案。
-        let fin = card_view(&f, CardMode::Final(FinalKind::Cancelled), now, Lang::Zh);
+        let fin = card_view(&f, CardMode::Final(FinalKind::Cancelled), now, Lang::Zh, None);
         match fin.buttons {
             crate::feishu::card::WatchButtons::Final { ref label } => {
                 assert_eq!(label, "已取消关注")
@@ -574,14 +605,14 @@ mod tests {
         let mut r = rec("working");
         r["startedAt"] = json!(now - 6 * 60);
         let f = build_frame(3, Some(&r), false);
-        let v = card_view(&f, CardMode::Active, now, Lang::Zh);
+        let v = card_view(&f, CardMode::Active, now, Lang::Zh, None);
         assert_eq!(v.state_line, "🟢 工作中 · 已运行 6 分钟");
         // 不足 1 分钟不显示时长。
         let mut r2 = rec("working");
         r2["startedAt"] = json!(now - 30);
         let f2 = build_frame(3, Some(&r2), false);
         assert_eq!(
-            card_view(&f2, CardMode::Active, now, Lang::Zh).state_line,
+            card_view(&f2, CardMode::Active, now, Lang::Zh, None).state_line,
             "🟢 工作中"
         );
         // 空闲态也显示（agent 仍在运行）；已结束不显示（运行已停止）。
@@ -589,14 +620,14 @@ mod tests {
         r4["startedAt"] = json!(now - 600);
         let f4 = build_frame(3, Some(&r4), false);
         assert_eq!(
-            card_view(&f4, CardMode::Active, now, Lang::Zh).state_line,
+            card_view(&f4, CardMode::Active, now, Lang::Zh, None).state_line,
             "⚪ 空闲 · 已运行 10 分钟"
         );
         let mut r5 = rec("ended");
         r5["startedAt"] = json!(now - 600);
         let f5 = build_frame(3, Some(&r5), false);
         assert_eq!(
-            card_view(&f5, CardMode::Active, now, Lang::Zh).state_line,
+            card_view(&f5, CardMode::Active, now, Lang::Zh, None).state_line,
             "⏹ 已结束"
         );
         // 运行起点不入签名（时长走字不应触发编辑）：startedAt 变化签名不变。
@@ -647,6 +678,7 @@ mod tests {
             session_id: "s1".into(),
             message_id: "om_1".into(),
             created_at: 42,
+            rewatchable: false,
         }];
         let text = serde_json::to_string(&items).unwrap();
         let back: Vec<PersistedWatch> = serde_json::from_str(&text).unwrap();

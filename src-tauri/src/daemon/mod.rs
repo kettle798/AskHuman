@@ -207,6 +207,9 @@ mod unix_impl {
     /// 「跟底」重发节流：同一订阅两次跟底之间的最短间隔（用户定案 30s）。
     const WATCH_MOVE_THROTTLE_MS: u64 = 30_000;
 
+    /// rewatchable entry 保留时限（秒）：超时后自动清理（路由失效、按钮不再可用）。
+    const REWATCHABLE_TTL_SECS: u64 = 600;
+
     /// `/watch` 实时关注子系统的 daemon 侧状态。
     #[derive(Default)]
     struct WatchState {
@@ -246,6 +249,8 @@ mod unix_impl {
         sent_at_ms: u64,
         /// 上次跟底重发时刻（Unix 毫秒）：30s 节流；提问答复完结时清零（下次更新立即跟底）。
         last_move_ms: u64,
+        /// 终态已定格但保留路由供重新关注（仅 AutoStopped；引擎/上限/空闲退出跳过此类 entry）。
+        rewatchable: bool,
     }
 
     /// watch 卡片回调路由任务的句柄：绑定特定 Router 实例与注册的卡片集合，
@@ -577,7 +582,7 @@ mod unix_impl {
                     if state.active.load(Ordering::SeqCst) == 0
                         && state.agents.working_count() == 0
                         && !has_agent_subs(&state)
-                        && state.watch.subs.lock().unwrap().is_empty()
+                        && !state.watch.subs.lock().unwrap().iter().any(|s| !s.rewatchable)
                     {
                         let idle = state
                             .last_active
@@ -2455,7 +2460,7 @@ mod unix_impl {
             match self {
                 WatchClient::Feishu(c) => {
                     let card = crate::feishu::card::build_watch_card(&crate::watch::card_view(
-                        frame, mode, now, lang,
+                        frame, mode, now, lang, None,
                     ));
                     c.send_card(&card).await.map_err(|e| e.to_string())
                 }
@@ -2494,7 +2499,7 @@ mod unix_impl {
             }
         }
 
-        /// 就地编辑已发出的卡。
+        /// 就地编辑已发出的卡。`session_id`：`AutoStopped` 终态需传入以嵌入重新关注按钮。
         async fn edit(
             &self,
             message_id: &str,
@@ -2502,11 +2507,12 @@ mod unix_impl {
             mode: crate::watch::CardMode,
             now: u64,
             lang: Lang,
+            session_id: Option<&str>,
         ) -> Result<(), String> {
             match self {
                 WatchClient::Feishu(c) => {
                     let card = crate::feishu::card::build_watch_card(&crate::watch::card_view(
-                        frame, mode, now, lang,
+                        frame, mode, now, lang, session_id,
                     ));
                     c.patch_card(message_id, &card)
                         .await
@@ -2554,6 +2560,7 @@ mod unix_impl {
                 session_id: s.session_id.clone(),
                 message_id: s.message_id.clone(),
                 created_at: s.created_at,
+                rewatchable: s.rewatchable,
             })
             .collect();
         crate::watch::save(&items);
@@ -2588,6 +2595,7 @@ mod unix_impl {
                     // 重启后 disturb 从 0 起算，恢复的卡先视为未淹没；一有新扰动即可跟底（不节流）。
                     sent_at_ms: p.created_at.saturating_mul(1000),
                     last_move_ms: 0,
+                    rewatchable: p.rewatchable,
                 });
             }
             if !subs.is_empty() {
@@ -2598,9 +2606,10 @@ mod unix_impl {
         loop {
             let wait = {
                 let subs = state.watch.subs.lock().unwrap();
-                if subs.is_empty() {
+                let has_active = subs.iter().any(|s| !s.rewatchable);
+                if !has_active {
                     None
-                } else if subs.iter().any(|s| s.working) {
+                } else if subs.iter().any(|s| !s.rewatchable && s.working) {
                     Some(Duration::from_secs(2))
                 } else {
                     Some(Duration::from_secs(10))
@@ -2623,9 +2632,11 @@ mod unix_impl {
     /// agent 结束 → 终态定格 + 自动退订；连续失败 ≥5 退订。按渠道分组：每渠道各建一次
     /// 传输客户端、各取各的淹没水位与在途提问。末尾幂等确保回调路由在位。
     async fn watch_tick(state: &Arc<ServerState>) {
-        let entries: Vec<WatchEntry> = state.watch.subs.lock().unwrap().clone();
+        let all_entries: Vec<WatchEntry> = state.watch.subs.lock().unwrap().clone();
+        // 活跃 entry：引擎只驱动非 rewatchable 的订阅（rewatchable 保留仅供回调路由）。
+        let entries: Vec<&WatchEntry> = all_entries.iter().filter(|e| !e.rewatchable).collect();
         if entries.is_empty() {
-            ensure_watch_routes(state).await; // 撤掉遗留路由任务。
+            ensure_watch_routes(state).await;
             return;
         }
         let config = AppConfig::load();
@@ -2699,6 +2710,7 @@ mod unix_impl {
                                     crate::watch::CardMode::Final(crate::watch::FinalKind::Moved),
                                     now,
                                     lang,
+                                    None,
                                 )
                                 .await
                             {
@@ -2741,7 +2753,7 @@ mod unix_impl {
                     }
                     continue;
                 }
-                match client.edit(&e.message_id, &frame, mode, now, lang).await {
+                match client.edit(&e.message_id, &frame, mode, now, lang, None).await {
                     Ok(()) => {
                         let mut subs = state.watch.subs.lock().unwrap();
                         if finalize {
@@ -2772,6 +2784,18 @@ mod unix_impl {
                         }
                     }
                 }
+            }
+        }
+        // rewatchable entry TTL 清理。
+        {
+            let now = now_secs();
+            let mut subs = state.watch.subs.lock().unwrap();
+            let before = subs.len();
+            subs.retain(|s| {
+                !s.rewatchable || now.saturating_sub(s.created_at) < REWATCHABLE_TTL_SECS
+            });
+            if subs.len() != before {
+                changed = true;
             }
         }
         if changed {
@@ -3025,14 +3049,15 @@ mod unix_impl {
                     crate::watch::CardMode::Final(crate::watch::FinalKind::Cancelled),
                     now,
                     lang,
+                    Some(&entry.session_id),
                 ));
                 let _ = ack.send(Some(callback_update_card(card)));
-                state
-                    .watch
-                    .subs
-                    .lock()
-                    .unwrap()
-                    .retain(|s| s.message_id != mid);
+                {
+                    let mut subs = state.watch.subs.lock().unwrap();
+                    if let Some(s) = subs.iter_mut().find(|s| s.message_id == mid) {
+                        s.rewatchable = true;
+                    }
+                }
                 persist_watch_subs(state);
                 state.watch.notify.notify_one();
             }
@@ -3042,7 +3067,8 @@ mod unix_impl {
                 } else {
                     crate::watch::CardMode::Active
                 };
-                let card = build_watch_card(&crate::watch::card_view(&frame, mode, now, lang));
+                let card =
+                    build_watch_card(&crate::watch::card_view(&frame, mode, now, lang, None));
                 let _ = ack.send(Some(callback_update_card(card)));
                 {
                     let mut subs = state.watch.subs.lock().unwrap();
@@ -3059,6 +3085,42 @@ mod unix_impl {
                     persist_watch_subs(state);
                 }
                 state.watch.notify.notify_one();
+            }
+            WatchAction::Rewatch(session_id) => {
+                // 旧卡立即 ACK 为「已重新关注」禁用态。
+                let card = build_watch_card(&crate::watch::card_view(
+                    &frame,
+                    crate::watch::CardMode::Final(crate::watch::FinalKind::Rewatched),
+                    now,
+                    lang,
+                    None,
+                ));
+                let _ = ack.send(Some(callback_update_card(card)));
+                // 移除旧的 rewatchable entry。
+                state
+                    .watch
+                    .subs
+                    .lock()
+                    .unwrap()
+                    .retain(|s| s.message_id != mid);
+                persist_watch_subs(state);
+                // 异步发新 watch 卡（复用 handle_watch_cmd 路径）。
+                let state = Arc::clone(state);
+                let sid = session_id;
+                tokio::spawn(async move {
+                    let config = AppConfig::load();
+                    let lang = Lang::current();
+                    let snapshot = state.agents.snapshot();
+                    let rec = find_agent_by_session(&snapshot, &sid);
+                    let seq = rec
+                        .and_then(|r| r.get("seq").and_then(|v| v.as_u64()))
+                        .unwrap_or(0);
+                    if seq == 0 {
+                        log("watch: rewatch target session not found, skipping");
+                        return;
+                    }
+                    handle_watch_cmd(&state, "feishu", Some(seq), &config, lang).await;
+                });
             }
         }
     }
@@ -3109,17 +3171,18 @@ mod unix_impl {
                         crate::watch::CardMode::Final(crate::watch::FinalKind::Cancelled),
                         now,
                         lang,
+                        Some(&entry.session_id),
                     )
                     .await
                 {
                     log(&format!("watch: finalize cancelled card failed: {}", err));
                 }
-                state
-                    .watch
-                    .subs
-                    .lock()
-                    .unwrap()
-                    .retain(|s| s.message_id != mid);
+                {
+                    let mut subs = state.watch.subs.lock().unwrap();
+                    if let Some(s) = subs.iter_mut().find(|s| s.message_id == mid) {
+                        s.rewatchable = true;
+                    }
+                }
                 persist_watch_subs(state);
                 state.watch.notify.notify_one();
             }
@@ -3129,7 +3192,7 @@ mod unix_impl {
                 } else {
                     crate::watch::CardMode::Active
                 };
-                if let Err(err) = client.edit(mid, &frame, mode, now, lang).await {
+                if let Err(err) = client.edit(mid, &frame, mode, now, lang, None).await {
                     log(&format!("watch: refresh card failed: {}", err));
                     return;
                 }
@@ -3263,7 +3326,7 @@ mod unix_impl {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|e| e.channel == channel_id)
+                .filter(|e| e.channel == channel_id && !e.rewatchable)
                 .cloned()
                 .collect();
             if !entries.is_empty() {
@@ -3309,7 +3372,7 @@ mod unix_impl {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|s| s.channel == channel_id)
+                .filter(|s| s.channel == channel_id && !s.rewatchable)
                 .count()
                 >= crate::watch::MAX_WATCHES
         {
@@ -3404,6 +3467,7 @@ mod unix_impl {
                         crate::watch::CardMode::Final(crate::watch::FinalKind::Replaced),
                         now,
                         lang,
+                        None,
                     )
                     .await
                 {
@@ -3431,6 +3495,7 @@ mod unix_impl {
                 sent_at_ms: now_ms(),
                 // 从创建起算 30s 节流（新卡本就在底部，避免刚发就跟底重发）。
                 last_move_ms: now_ms(),
+                rewatchable: false,
             });
         }
         persist_watch_subs(state);
@@ -3453,14 +3518,14 @@ mod unix_impl {
                     .await;
             return;
         }
-        // 只操作本渠道的订阅（`/unwatch all` 也不动别的渠道）。
+        // 只操作本渠道的活跃订阅（rewatchable 已是终态，不参与 unwatch）。
         let entries: Vec<WatchEntry> = state
             .watch
             .subs
             .lock()
             .unwrap()
             .iter()
-            .filter(|e| e.channel == channel_id)
+            .filter(|e| e.channel == channel_id && !e.rewatchable)
             .cloned()
             .collect();
         let targets: Vec<WatchEntry> = match sel {
@@ -3535,9 +3600,9 @@ mod unix_impl {
         let _ = reply_channel_text(channel_id, config, &text).await;
     }
 
-    /// 对某渠道的一批 watch 订阅统一收尾：逐个把卡片定格为 `final_kind` → 从 `subs` 移除 → 持久化 + 通知。
-    /// 与 `handle_unwatch_cmd` 旧内联逻辑等价：渠道客户端不可用则**整段跳过**（订阅保留、返回 0）。
-    /// 供 `/unwatch`（Cancelled）与「按需发送」活跃槽切走自动结束（AutoStopped）复用。
+    /// 对某渠道的一批 watch 订阅统一收尾：逐个把卡片定格为 `final_kind`。
+    /// `AutoStopped` 的 entry 标记 `rewatchable`（保留路由供重新关注）而非移除；其余终态移除。
+    /// 渠道客户端不可用则**整段跳过**（订阅保留、返回 0）。
     async fn finalize_and_drop_watches(
         state: &Arc<ServerState>,
         channel_id: &str,
@@ -3552,12 +3617,18 @@ mod unix_impl {
         let Some(client) = WatchClient::for_channel(channel_id, config).await else {
             return 0;
         };
+        let keep_rewatchable = final_kind.is_rewatchable();
         let snapshot = state.agents.snapshot();
         let waiting = state.registry.in_flight_agent_session_ids();
         let now = now_secs();
         for e in targets {
             let rec = find_agent_by_session(&snapshot, &e.session_id);
             let frame = crate::watch::build_frame(e.seq, rec, waiting.contains(&e.session_id));
+            let sid = if keep_rewatchable {
+                Some(e.session_id.as_str())
+            } else {
+                None
+            };
             if let Err(err) = client
                 .edit(
                     &e.message_id,
@@ -3565,18 +3636,25 @@ mod unix_impl {
                     crate::watch::CardMode::Final(final_kind.clone()),
                     now,
                     lang,
+                    sid,
                 )
                 .await
             {
                 log(&format!("watch: finalize card failed ({}): {}", channel_id, err));
             }
         }
-        state
-            .watch
-            .subs
-            .lock()
-            .unwrap()
-            .retain(|s| !targets.iter().any(|t| t.message_id == s.message_id));
+        {
+            let mut subs = state.watch.subs.lock().unwrap();
+            if keep_rewatchable {
+                for s in subs.iter_mut() {
+                    if targets.iter().any(|t| t.message_id == s.message_id) {
+                        s.rewatchable = true;
+                    }
+                }
+            } else {
+                subs.retain(|s| !targets.iter().any(|t| t.message_id == s.message_id));
+            }
+        }
         persist_watch_subs(state);
         state.watch.notify.notify_one();
         targets.len()
@@ -4125,6 +4203,7 @@ mod unix_impl {
                 crate::watch::CardMode::Final(crate::watch::FinalKind::Ended),
                 now,
                 lang,
+                None,
             ));
             let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
             remove_picker(state, channel_id, mid);
@@ -4147,7 +4226,7 @@ mod unix_impl {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|s| s.channel == channel_id)
+                .filter(|s| s.channel == channel_id && !s.rewatchable)
                 .count();
             if count >= crate::watch::MAX_WATCHES {
                 let _ = ack.send(None);
@@ -4164,6 +4243,7 @@ mod unix_impl {
             crate::watch::CardMode::Active,
             now,
             lang,
+            None,
         ));
         let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
         // 登记订阅（含换新卡收尾）+ 消费 picker + 让 watch 立即认领本消息（`ensure_watch_routes` 不会递归
@@ -4197,7 +4277,7 @@ mod unix_impl {
             .find(|s| s.channel == channel_id && s.session_id == session_id)
             .cloned();
         if let Some(entry) = entry {
-            // 旧 watch 卡定格「已取消关注」。
+            // 旧 watch 卡定格「已取消关注」（可重新关注）。
             if let Some(client) = WatchClient::for_channel(channel_id, config).await {
                 let snapshot = state.agents.snapshot();
                 let waiting = state
@@ -4216,18 +4296,19 @@ mod unix_impl {
                         crate::watch::CardMode::Final(crate::watch::FinalKind::Cancelled),
                         now,
                         lang,
+                        Some(&entry.session_id),
                     )
                     .await
                 {
                     log(&format!("select: finalize unwatch card failed: {}", err));
                 }
             }
-            state
-                .watch
-                .subs
-                .lock()
-                .unwrap()
-                .retain(|s| s.message_id != entry.message_id);
+            {
+                let mut subs = state.watch.subs.lock().unwrap();
+                if let Some(s) = subs.iter_mut().find(|s| s.message_id == entry.message_id) {
+                    s.rewatchable = true;
+                }
+            }
             persist_watch_subs(state);
             state.watch.notify.notify_one();
             ensure_watch_routes(state).await;
@@ -4372,7 +4453,7 @@ mod unix_impl {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|s| s.channel == "dingding")
+                .filter(|s| s.channel == "dingding" && !s.rewatchable)
                 .count();
             if count >= crate::watch::MAX_WATCHES {
                 let text = crate::i18n::tr(lang, "watch.limit")
@@ -4445,18 +4526,19 @@ mod unix_impl {
                         crate::watch::CardMode::Final(crate::watch::FinalKind::Cancelled),
                         now,
                         lang,
+                        Some(&entry.session_id),
                     )
                     .await
                 {
                     log(&format!("select: finalize dingtalk unwatch card failed: {}", err));
                 }
             }
-            state
-                .watch
-                .subs
-                .lock()
-                .unwrap()
-                .retain(|s| s.message_id != entry.message_id);
+            {
+                let mut subs = state.watch.subs.lock().unwrap();
+                if let Some(s) = subs.iter_mut().find(|s| s.message_id == entry.message_id) {
+                    s.rewatchable = true;
+                }
+            }
             persist_watch_subs(state);
             state.watch.notify.notify_one();
             ensure_watch_routes(state).await;
@@ -4658,6 +4740,7 @@ mod unix_impl {
                         crate::watch::CardMode::Final(crate::watch::FinalKind::Ended),
                         now,
                         lang,
+                        None,
                     )
                     .await
                 {
@@ -4686,7 +4769,7 @@ mod unix_impl {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|s| s.channel == channel_id)
+                .filter(|s| s.channel == channel_id && !s.rewatchable)
                 .count();
             if count >= crate::watch::MAX_WATCHES {
                 let text = crate::i18n::tr(lang, "watch.limit")
@@ -4701,7 +4784,7 @@ mod unix_impl {
             return;
         };
         if let Err(err) = client
-            .edit(mid, &frame, crate::watch::CardMode::Active, now, lang)
+            .edit(mid, &frame, crate::watch::CardMode::Active, now, lang, None)
             .await
         {
             log(&format!(
@@ -4754,18 +4837,19 @@ mod unix_impl {
                         crate::watch::CardMode::Final(crate::watch::FinalKind::Cancelled),
                         now,
                         lang,
+                        Some(&entry.session_id),
                     )
                     .await
                 {
                     log(&format!("select: finalize unwatch card failed ({}): {}", channel_id, err));
                 }
             }
-            state
-                .watch
-                .subs
-                .lock()
-                .unwrap()
-                .retain(|s| s.message_id != entry.message_id);
+            {
+                let mut subs = state.watch.subs.lock().unwrap();
+                if let Some(s) = subs.iter_mut().find(|s| s.message_id == entry.message_id) {
+                    s.rewatchable = true;
+                }
+            }
             persist_watch_subs(state);
             state.watch.notify.notify_one();
             ensure_watch_routes(state).await;

@@ -309,12 +309,14 @@ fn body_text(text: &str, is_markdown: bool) -> Value {
 const WATCH_ACTION_KEY: &str = "watch";
 
 /// watch 卡的一次按钮动作。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WatchAction {
     /// 取消关注（卡片定格 + 退订）。
     Unwatch,
     /// 立即刷新（按当前状态重算一帧）。
     Refresh,
+    /// 重新关注（从 AutoStopped 终态卡点击；携带 session_id）。
+    Rewatch(String),
 }
 
 /// watch 卡片视图（纯字符串，本地化由 `watch::card_view` 完成）。
@@ -342,10 +344,12 @@ pub struct WatchCardView {
     pub buttons: WatchButtons,
 }
 
-/// watch 卡按钮区：活动态（取消关注 + 立即刷新，可点）或终态（单个禁用按钮）。
+/// watch 卡按钮区：活动态（取消关注 + 立即刷新，可点）/ 终态（单个禁用按钮）/
+/// 可重新关注终态（可点击按钮，携带 session_id 回调数据）。
 pub enum WatchButtons {
     Active { unwatch: String, refresh: String },
     Final { label: String },
+    Rewatch { label: String, session_id: String },
 }
 
 /// 组装 watch 实时状态卡（卡片 JSON 2.0，`update_multi` 开启供后续 PATCH）。
@@ -441,7 +445,8 @@ pub fn build_watch_card(v: &WatchCardView) -> Value {
 }
 
 /// 按钮区元素：活动态 = column_set 两列（取消关注 danger + 立即刷新 default，均挂 callback）；
-/// 终态 = 单个禁用按钮（文案标示 已结束/已取消/已接替）。
+/// 终态 = 单个禁用按钮（文案标示 已结束/已取消/已接替）；
+/// 可重新关注 = 单个可点击按钮（default 样式，携带 session_id 的 rewatch 回调）。
 fn watch_buttons_element(buttons: &WatchButtons) -> Value {
     match buttons {
         WatchButtons::Active { unwatch, refresh } => {
@@ -470,6 +475,12 @@ fn watch_buttons_element(buttons: &WatchButtons) -> Value {
             "type": "default",
             "disabled": true,
         }),
+        WatchButtons::Rewatch { label, session_id } => json!({
+            "tag": "button",
+            "text": { "tag": "plain_text", "content": label },
+            "type": "default",
+            "behaviors": [ { "type": "callback", "value": { WATCH_ACTION_KEY: "rewatch", "sid": session_id } } ],
+        }),
     }
 }
 
@@ -485,6 +496,10 @@ pub fn parse_watch_action(event: &Value) -> Option<(String, WatchAction)> {
     let act = match obj.get(WATCH_ACTION_KEY).and_then(|a| a.as_str()) {
         Some("unwatch") => WatchAction::Unwatch,
         Some("refresh") => WatchAction::Refresh,
+        Some("rewatch") => {
+            let sid = obj.get("sid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            WatchAction::Rewatch(sid)
+        }
         _ => return None,
     };
     let message_id = event
