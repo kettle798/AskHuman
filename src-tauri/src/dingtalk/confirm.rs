@@ -70,6 +70,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn param_maps_keep_published_template_variables() {
+        let view = ConfirmView {
+            title: "Approve?".into(),
+            body: "Run command".into(),
+            confirm: crate::confirm::ConfirmAction {
+                id: "approve_once".into(),
+                label: "Approve once".into(),
+                role: crate::confirm::ActionRole::Primary,
+            },
+            cancel: crate::confirm::ConfirmAction {
+                id: "deny".into(),
+                label: "Deny".into(),
+                role: crate::confirm::ActionRole::Destructive,
+            },
+        };
+        assert_eq!(
+            build_param_map(&view),
+            json!({
+                "title": "Approve?",
+                "markdown": "Run command",
+                "btn_primary": "Approve once",
+                "btn_secondary": "Deny",
+                "finalized": "false",
+                "final_label": "",
+            })
+        );
+        assert_eq!(
+            build_final_param_map("Approve?", "Approved", "Done"),
+            json!({
+                "title": "Approve?",
+                "markdown": "Approved",
+                "btn_primary": "",
+                "btn_secondary": "",
+                "finalized": "true",
+                "final_label": "Done",
+            })
+        );
+    }
+
+    #[test]
     fn parse_confirm_roundtrip() {
         let data = json!({
             "outTrackId": "c1",

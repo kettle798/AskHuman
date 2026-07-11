@@ -1413,4 +1413,67 @@ mod tests {
         });
         assert!(parse_select_action(&watch).is_none());
     }
+
+    #[test]
+    fn confirm_card_uses_roles_and_wire_slots() {
+        let view = crate::confirm::ConfirmView {
+            title: "Approve?".into(),
+            body: "Run command".into(),
+            confirm: crate::confirm::ConfirmAction {
+                id: "approve_once".into(),
+                label: "Approve once".into(),
+                role: crate::confirm::ActionRole::Primary,
+            },
+            cancel: crate::confirm::ConfirmAction {
+                id: "deny".into(),
+                label: "Deny".into(),
+                role: crate::confirm::ActionRole::Destructive,
+            },
+        };
+        let card = build_confirm_card(&view);
+        let actions = &card["body"]["elements"][3]["columns"];
+        assert_eq!(actions[0]["elements"][0]["type"], "primary");
+        assert_eq!(
+            actions[0]["elements"][0]["behaviors"][0]["value"]["confirm"],
+            "ok"
+        );
+        assert_eq!(actions[1]["elements"][0]["type"], "danger");
+        assert_eq!(
+            actions[1]["elements"][0]["behaviors"][0]["value"]["confirm"],
+            "cancel"
+        );
+    }
+
+    #[test]
+    fn parse_confirm_action_maps_only_wire_slots() {
+        let primary = json!({
+            "context": { "open_message_id": "om_confirm" },
+            "action": { "value": { "confirm": "ok" } }
+        });
+        assert_eq!(
+            parse_confirm_action(&primary),
+            Some((
+                "om_confirm".to_string(),
+                crate::confirm::ConfirmSlot::Primary
+            ))
+        );
+
+        let secondary = json!({
+            "context": { "open_message_id": "om_confirm" },
+            "action": { "value": "{\"confirm\":\"cancel\"}" }
+        });
+        assert_eq!(
+            parse_confirm_action(&secondary),
+            Some((
+                "om_confirm".to_string(),
+                crate::confirm::ConfirmSlot::Secondary
+            ))
+        );
+
+        let injected = json!({
+            "context": { "open_message_id": "om_confirm" },
+            "action": { "value": { "confirm": "approve_once" } }
+        });
+        assert!(parse_confirm_action(&injected).is_none());
+    }
 }

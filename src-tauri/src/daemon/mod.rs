@@ -341,7 +341,7 @@ mod unix_impl {
         Transcript,
     }
 
-    /// `/stage` 确认卡台账（不持久化）。用提问卡模板：单选「暂存/取消」+ 提交，无输入框。
+    /// `/stage` 确认卡台账（不持久化）。业务状态留在此处；通用 view 只负责展示与动作槽映射。
     #[derive(Clone)]
     struct ConfirmEntry {
         channel: String,
@@ -349,11 +349,8 @@ mod unix_impl {
         session_id: String,
         git_root: std::path::PathBuf,
         paths_fp: String,
-        title: String,
-        /// 文件列表正文（markdown），用于 toggle 重渲染。
-        body: String,
-        /// 单选已选原文（飞书表单外勾选器；钉钉由提交 payload 带上）。
-        selected: Option<String>,
+        /// 通用展示模型；wire slot 必须经它映射回 `/stage` 的稳定业务 action id。
+        view: crate::confirm::ConfirmView,
         created_at: u64,
     }
 
@@ -6356,9 +6353,7 @@ mod unix_impl {
                 session_id: session_id.to_string(),
                 git_root: root,
                 paths_fp: crate::gitutil::paths_fingerprint(&preview.paths),
-                title: view.title.clone(),
-                body: view.body.clone(),
-                selected: None,
+                view,
                 created_at: now,
             });
         }
@@ -6404,16 +6399,22 @@ mod unix_impl {
             }
             return;
         };
-        let is_confirm = slot == crate::confirm::ConfirmSlot::Primary;
-        if !is_confirm {
+        let action_id = entry.view.action_id_for_slot(slot).to_string();
+        if action_id == crate::confirm::STAGE_CANCEL_ACTION_ID {
             let text = crate::i18n::tr(lang, "confirm.stageCancelled").to_string();
             let fv = crate::confirm::ConfirmFinalView {
-                title: entry.title.clone(),
+                title: entry.view.title.clone(),
                 body: text.clone(),
                 label: crate::confirm::transport::truncate_for_label(&text),
             };
             crate::confirm::transport::finalize(channel_id, &config, mid, &fv, ack).await;
             state.select.route_refresh.notify_one();
+            return;
+        }
+        if action_id != crate::confirm::STAGE_CONFIRM_ACTION_ID {
+            if let Some(ack) = ack {
+                let _ = ack.send(None);
+            }
             return;
         }
         // Re-check paths fingerprint.
@@ -6422,7 +6423,7 @@ mod unix_impl {
             Err(e) => {
                 let text = crate::i18n::tr(lang, "confirm.stageFailed").replace("{err}", &e);
                 let fv = crate::confirm::ConfirmFinalView {
-                    title: entry.title.clone(),
+                    title: entry.view.title.clone(),
                     body: text.clone(),
                     label: crate::confirm::transport::truncate_for_label(&text),
                 };
@@ -6435,7 +6436,7 @@ mod unix_impl {
         if fp != entry.paths_fp {
             let text = crate::i18n::tr(lang, "confirm.stageChanged").to_string();
             let fv = crate::confirm::ConfirmFinalView {
-                title: entry.title.clone(),
+                title: entry.view.title.clone(),
                 body: text.clone(),
                 label: crate::confirm::transport::truncate_for_label(&text),
             };
@@ -6449,7 +6450,7 @@ mod unix_impl {
                 let text = crate::i18n::tr(lang, "confirm.stageDone")
                     .replace("{n}", &r.paths.len().to_string());
                 let fv = crate::confirm::ConfirmFinalView {
-                    title: entry.title.clone(),
+                    title: entry.view.title.clone(),
                     body: text.clone(),
                     label: crate::confirm::transport::truncate_for_label(&text),
                 };
@@ -6473,7 +6474,7 @@ mod unix_impl {
             Err(e) => {
                 let text = crate::i18n::tr(lang, "confirm.stageFailed").replace("{err}", &e);
                 let fv = crate::confirm::ConfirmFinalView {
-                    title: entry.title.clone(),
+                    title: entry.view.title.clone(),
                     body: text.clone(),
                     label: crate::confirm::transport::truncate_for_label(&text),
                 };
