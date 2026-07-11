@@ -229,6 +229,10 @@ export default {
         "When on, questions are no longer broadcast to every IM channel; the local popup always receives them. To receive on an IM channel, send /here (or /这里) in that channel while an agent is working; subsequent questions and any pending ones will be routed there.",
       autoActivationLifecycleHint:
         "Tip: also enable Lifecycle tracking above for more accurate working/idle agent state detection.",
+      /** Channels tab · tip card below Local popup (shown only when on-demand delivery is off). */
+      autoActivationChannelsHintTitle: "Recommended: On-demand IM delivery",
+      autoActivationChannelsHint:
+        "Enable it under Advanced to switch seamlessly between IM and the local popup, and avoid flooding IM while you work at your computer.",
       autoEndWatchTitle: "Auto-stop watches when the active channel switches",
       autoEndWatchDesc:
         "When on, if an IM channel is no longer the active channel (e.g. you return to your computer and answer in the local popup, or send a message on another channel that switches the active slot away), all live watches on that channel are stopped automatically—no manual /unwatch needed. Only effective when On-demand IM delivery is enabled.",

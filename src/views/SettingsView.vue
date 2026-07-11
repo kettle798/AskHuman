@@ -2227,6 +2227,19 @@ onBeforeUnmount(() => unlistenProgress?.());
           </template>
         </div>
 
+        <!-- 引导到「高级 · 按需发送」：独立 tip 卡，走 .card+.card 间距；仅未开启时显示（默认关时的发现性） -->
+        <div
+          v-if="!isWindows && !config.channels.autoActivation"
+          class="card channels-tip"
+        >
+          <p class="channels-tip-title">
+            {{ t("settings.channels.autoActivationChannelsHintTitle") }}
+          </p>
+          <p class="channels-tip-body">
+            {{ t("settings.channels.autoActivationChannelsHint") }}
+          </p>
+        </div>
+
         <div class="card">
           <div class="row">
             <p class="card-title">{{ t("settings.channels.telegramTitle") }}</p>
@@ -2743,6 +2756,24 @@ onBeforeUnmount(() => unlistenProgress?.());
 .card-desc.hint {
   margin-top: 6px;
   opacity: 0.85;
+}
+/* 渠道 Tab：引导开启「按需发送」的 tip 卡（accent 描边 + 淡底，与普通卡同间距） */
+.channels-tip {
+  border-color: color-mix(in srgb, var(--accent, #3b82f6) 40%, var(--border));
+  background: color-mix(in srgb, var(--accent, #3b82f6) 12%, var(--card-bg));
+}
+.channels-tip-title {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.channels-tip-body {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  opacity: 0.88;
 }
 /* 关于区：版本值、发布链接、更新日志容器 */
 .row .value {

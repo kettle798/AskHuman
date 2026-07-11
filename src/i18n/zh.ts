@@ -223,6 +223,10 @@ export default {
         "开启后不再向所有 IM 渠道群发提问；本地弹窗始终会收到。需要某个 IM 渠道接收时，在 agent 工作期间于该渠道发送 /here（或 /这里），之后的提问与当前待答都会改走该渠道。",
       autoActivationLifecycleHint:
         "建议同时开启上方的「生命周期追踪」，以提高 agent 工作/空闲状态识别的准确性。",
+      /** 渠道 Tab · 本地弹窗下方 tip 卡（仅未开启按需发送时显示）。 */
+      autoActivationChannelsHintTitle: "建议开启「IM 渠道按需发送」",
+      autoActivationChannelsHint:
+        "在「高级」中开启后，可在 IM 与本地弹窗之间无缝切换，并避免在本地工作时 IM 收到大量重复消息。",
       autoEndWatchTitle: "切换渠道时自动结束关注",
       autoEndWatchDesc:
         "开启后，当某个 IM 渠道不再是当前活跃渠道时（例如你回到电脑在本地弹窗作答，或在别的渠道发消息把活跃渠道切走），自动结束该渠道上的所有实时关注（watch），无需手动 /unwatch。仅在「按需发送」开启时生效。",
