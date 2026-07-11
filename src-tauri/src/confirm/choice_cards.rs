@@ -26,6 +26,11 @@ pub enum CardAction {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelegramAction {
+    Decide(usize),
+}
+
 fn bounded(input: &str, max: usize) -> String {
     let mut chars = input.chars();
     let head: String = chars.by_ref().take(max).collect();
@@ -51,16 +56,26 @@ fn context_markdown(request: &ConfirmRequest) -> String {
         .join("\n")
 }
 
-pub(crate) fn compact_tool_markdown(request: &ConfirmRequest, max: usize) -> String {
-    let mut body = format!("**{}**", tool_name(request));
+fn reason_label(lang: Lang) -> &'static str {
+    match lang {
+        Lang::Zh => "理由：",
+        Lang::En => "Reason:",
+    }
+}
+
+pub(crate) fn compact_tool_markdown(request: &ConfirmRequest, max: usize, lang: Lang) -> String {
+    let mut body = String::new();
+    if !request.detail.summary.trim().is_empty() {
+        body.push_str(&format!(
+            "**{}** {}\n\n",
+            reason_label(lang),
+            request.detail.summary
+        ));
+    }
+    body.push_str(&format!("**{}**", tool_name(request)));
     if !request.detail.body_md.trim().is_empty() {
         body.push_str("\n\n");
         body.push_str(&request.detail.body_md);
-    }
-    if !request.detail.summary.trim().is_empty() {
-        body.push_str("\n\n*");
-        body.push_str(&request.detail.summary.replace('*', "\\*"));
-        body.push('*');
     }
     bounded(&body, max)
 }
@@ -100,26 +115,22 @@ pub(crate) fn tool_name(request: &ConfirmRequest) -> &str {
         .unwrap_or("Tool")
 }
 
-fn feishu_tool_elements(request: &ConfirmRequest) -> Vec<Value> {
-    let mut elements = vec![json!({
+fn feishu_tool_elements(request: &ConfirmRequest, lang: Lang) -> Vec<Value> {
+    let mut elements = Vec::new();
+    if !request.detail.summary.trim().is_empty() {
+        elements.push(json!({
+            "tag": "markdown",
+            "content": format!("**{}** {}", reason_label(lang), request.detail.summary),
+        }));
+    }
+    elements.push(json!({
         "tag": "markdown",
         "content": format!("**{}**", tool_name(request)),
-    })];
+    }));
     if !request.detail.body_md.trim().is_empty() {
         elements.push(json!({
             "tag": "markdown",
             "content": bounded(&request.detail.body_md, 12_000),
-        }));
-    }
-    if !request.detail.summary.trim().is_empty() {
-        elements.push(json!({
-            "tag": "div",
-            "text": {
-                "tag": "plain_text",
-                "content": request.detail.summary,
-                "text_size": "notation",
-                "text_color": "grey",
-            },
         }));
     }
     elements
@@ -136,8 +147,13 @@ fn feishu_choice_text(choice: &crate::models::ConfirmChoice) -> String {
     }
 }
 
-pub fn feishu_card(request: &ConfirmRequest, selected: Option<usize>, comment: &str) -> Value {
-    let mut elements = feishu_tool_elements(request);
+pub fn feishu_card(
+    request: &ConfirmRequest,
+    selected: Option<usize>,
+    comment: &str,
+    lang: Lang,
+) -> Value {
+    let mut elements = feishu_tool_elements(request, lang);
     elements.push(json!({ "tag": "hr", "margin": "0px 0px 0px 0px" }));
     for (index, choice) in request.choices.iter().enumerate() {
         let checked = selected == Some(index);
@@ -182,8 +198,8 @@ pub fn feishu_card(request: &ConfirmRequest, selected: Option<usize>, comment: &
     crate::feishu::card::assemble_styled_card(&request.title, elements)
 }
 
-pub fn feishu_final_card(request: &ConfirmRequest, status: &str) -> Value {
-    let mut elements = feishu_tool_elements(request);
+pub fn feishu_final_card(request: &ConfirmRequest, status: &str, lang: Lang) -> Value {
+    let mut elements = feishu_tool_elements(request, lang);
     elements.push(json!({ "tag": "hr", "margin": "0px 0px 0px 0px" }));
     elements.push(json!({
         "tag": "div",
@@ -396,36 +412,43 @@ pub fn telegram_html(
     selected: Option<usize>,
     comment: &str,
     status: Option<&str>,
+    lang: Lang,
 ) -> String {
     use crate::telegram::markdown::{escape_html, to_html};
-    let mut out = format!("<b>{}</b>", escape_html(&request.title));
-    for field in &request.context {
+    let mut out = format!("<b>❓ {}</b>", escape_html(&request.title));
+    if !request.detail.summary.trim().is_empty() {
         out.push_str(&format!(
-            "\n<b>{}:</b> {}",
-            escape_html(&field.label),
-            escape_html(&field.value)
+            "\n\n<b>{}</b> {}",
+            escape_html(reason_label(lang)),
+            escape_html(&request.detail.summary)
         ));
     }
-    out.push_str(&format!(
-        "\n\n<b>{}</b>",
-        escape_html(&request.detail.summary)
-    ));
+    out.push_str(&format!("\n\n<b>{}</b>", escape_html(tool_name(request))));
     if !request.detail.body_md.trim().is_empty() {
         out.push_str("\n\n");
         out.push_str(&to_html(&bounded(&request.detail.body_md, 2200)));
     }
-    for (index, choice) in request.choices.iter().enumerate() {
-        out.push_str(&format!(
-            "\n\n{} <b>{}</b>",
-            if selected == Some(index) {
-                "●"
+    let full_labels = telegram_uses_full_labels(request);
+    let show_choice_list = !full_labels
+        || request
+            .choices
+            .iter()
+            .any(|choice| !choice.description.trim().is_empty());
+    if show_choice_list {
+        for (index, choice) in request.choices.iter().enumerate() {
+            let marker = if full_labels {
+                "•".to_string()
             } else {
-                "○"
-            },
-            escape_html(&choice.label)
-        ));
-        if !choice.description.trim().is_empty() {
-            out.push_str(&format!("\n<i>{}</i>", escape_html(&choice.description)));
+                crate::channels::telegram::option_label(index)
+            };
+            out.push_str(&format!(
+                "\n\n{} <b>{}</b>",
+                marker,
+                escape_html(&choice.label)
+            ));
+            if !choice.description.trim().is_empty() {
+                out.push_str(&format!("\n<i>{}</i>", escape_html(&choice.description)));
+            }
         }
     }
     if let Some(input) = input_for_selected(request, selected) {
@@ -437,42 +460,77 @@ pub fn telegram_html(
             ));
         }
     }
+    if status.is_none() && comment.trim().is_empty() && request.presentation.input().is_some() {
+        let hint = match lang {
+            Lang::Zh => "如需说明拒绝原因，请先回复本消息，再点“拒绝”。",
+            Lang::En => "To include a denial reason, reply to this message before tapping Deny.",
+        };
+        out.push_str(&format!("\n\n<i>{}</i>", escape_html(hint)));
+    }
     if let Some(status) = status {
         out.push_str(&format!("\n\n<i>{}</i>", escape_html(status)));
     }
     bounded(&out, 3900)
 }
 
+fn telegram_uses_full_labels(request: &ConfirmRequest) -> bool {
+    request.choices.len() <= 3
+        && request
+            .choices
+            .iter()
+            .all(|choice| choice.label.chars().count() <= 12)
+        && request
+            .choices
+            .iter()
+            .map(|choice| choice.label.chars().count())
+            .sum::<usize>()
+            <= 24
+}
+
 pub fn telegram_keyboard(request: &ConfirmRequest, selected: Option<usize>) -> Value {
-    let mut rows: Vec<Value> = request
-        .choices
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            json!([{ "text": if selected == Some(index) { format!("✓ {}", index + 1) } else { (index + 1).to_string() }, "callback_data": format!("pc:s:{index}") }])
+    let indices: Vec<usize> = (0..request.choices.len()).collect();
+    let full_labels = telegram_uses_full_labels(request);
+    let width = if full_labels {
+        request.choices.len().max(1)
+    } else {
+        crate::channels::telegram::KEYBOARD_ROW_WIDTH
+    };
+    let rows = indices
+        .chunks(width)
+        .map(|indices| {
+            Value::Array(
+            indices
+                .iter()
+                .map(|index| {
+                    let label = if full_labels {
+                        request.choices[*index].label.clone()
+                    } else {
+                        crate::channels::telegram::option_label(*index)
+                    };
+                    json!({
+                        "text": if selected == Some(*index) { format!("✅ {label}") } else { label },
+                        "callback_data": format!("pc:do:{index}"),
+                    })
+                })
+                .collect(),
+        )
         })
-        .collect();
-    rows.push(
-        json!([{ "text": request.presentation.submit_label(), "callback_data": "pc:submit" }]),
-    );
+        .collect::<Vec<_>>();
     json!({ "inline_keyboard": rows })
 }
 
-pub fn parse_telegram_callback(data: &str) -> Option<Option<usize>> {
-    if data == "pc:submit" {
-        return Some(None);
-    }
-    data.strip_prefix("pc:s:")
+pub fn parse_telegram_callback(data: &str) -> Option<TelegramAction> {
+    data.strip_prefix("pc:do:")
         .and_then(|value| value.parse().ok())
-        .map(Some)
+        .map(TelegramAction::Decide)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::{
-        ConfirmChoice, ConfirmDetail, ConfirmField, ConfirmFieldKind, ConfirmPresentation,
-        ConfirmSpec,
+        ConfirmChoice, ConfirmDetail, ConfirmField, ConfirmFieldKind, ConfirmInput,
+        ConfirmPresentation, ConfirmSpec,
     };
 
     fn request() -> ConfirmRequest {
@@ -503,7 +561,13 @@ mod tests {
                 },
             ],
             presentation: ConfirmPresentation::SingleSelectSubmit {
-                input: None,
+                input: Some(ConfirmInput {
+                    id: "reason".into(),
+                    visible_when_action_id: "deny".into(),
+                    label: "Reason".into(),
+                    placeholder: "Tell the Agent what it should do".into(),
+                    max_chars: 1000,
+                }),
                 submit_label: "Submit".into(),
                 default_action_id: None,
             },
@@ -515,17 +579,17 @@ mod tests {
 
     #[test]
     fn feishu_uses_ask_checker_and_tool_first_hierarchy() {
-        let card = feishu_card(&request(), Some(1), "");
+        let card = feishu_card(&request(), Some(1), "", Lang::En);
         let elements = card["body"]["elements"].as_array().unwrap();
         assert_eq!(elements[0]["tag"], "div");
         assert_eq!(elements[0]["text"]["content"], "Permission");
         assert_eq!(elements[2]["tag"], "markdown");
-        assert_eq!(elements[2]["content"], "**Bash**");
-        assert!(elements[3]["content"]
+        assert_eq!(elements[2]["content"], "**Reason:** Run");
+        assert_eq!(elements[3]["content"], "**Bash**");
+        assert!(elements[4]["content"]
             .as_str()
             .unwrap()
             .contains("git status"));
-        assert_eq!(elements[4]["text"]["content"], "Run");
         let checkers: Vec<&Value> = elements
             .iter()
             .filter(|element| element["tag"] == "checker")
@@ -543,7 +607,7 @@ mod tests {
 
     #[test]
     fn feishu_final_keeps_compact_tool_hierarchy_without_context() {
-        let card = feishu_final_card(&request(), "Submitted");
+        let card = feishu_final_card(&request(), "Submitted", Lang::En);
         let text = card.to_string();
         assert!(text.contains("**Bash**"));
         assert!(text.contains("git status"));
@@ -563,9 +627,48 @@ mod tests {
 
     #[test]
     fn telegram_callbacks_carry_only_wire_indices() {
-        assert_eq!(parse_telegram_callback("pc:s:7"), Some(Some(7)));
-        assert_eq!(parse_telegram_callback("pc:submit"), Some(None));
+        assert_eq!(
+            parse_telegram_callback("pc:do:7"),
+            Some(TelegramAction::Decide(7))
+        );
+        assert_eq!(parse_telegram_callback("pc:s:7"), None);
+        assert_eq!(parse_telegram_callback("pc:submit"), None);
         assert_eq!(parse_telegram_callback("approve_once"), None);
+    }
+
+    #[test]
+    fn telegram_uses_tool_first_hierarchy_and_ask_keycaps() {
+        let request = request();
+        let html = telegram_html(&request, Some(1), "", None, Lang::En);
+        assert!(html.starts_with("<b>❓ Permission</b>"));
+        let summary = html.find("<b>Reason:</b> Run").unwrap();
+        let tool = html.find("<b>Bash</b>").unwrap();
+        let body = html.find("git status").unwrap();
+        assert!(summary < tool && tool < body);
+        assert!(!html.contains("<b>Tool:</b>"));
+        let keyboard = telegram_keyboard(&request, Some(1));
+        let rows = keyboard["inline_keyboard"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].as_array().unwrap().len(), 2);
+        assert_eq!(rows[0][0]["text"], "1️⃣");
+        assert_eq!(rows[0][1]["text"], "✅ 2️⃣");
+        assert_eq!(rows[0][1]["callback_data"], "pc:do:1");
+        assert!(html.contains("reply to this message before tapping Deny"));
+    }
+
+    #[test]
+    fn telegram_short_choices_use_direct_full_label_buttons() {
+        let mut request = request();
+        request.choices[0].label = "Approve".into();
+        request.choices[0].description.clear();
+        let html = telegram_html(&request, None, "", None, Lang::En);
+        assert!(!html.contains("1️⃣ <b>Approve</b>"));
+        let keyboard = telegram_keyboard(&request, None);
+        let rows = keyboard["inline_keyboard"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0]["text"], "Approve");
+        assert_eq!(rows[0][1]["text"], "Deny");
+        assert_eq!(rows[0][0]["callback_data"], "pc:do:0");
     }
 
     #[test]

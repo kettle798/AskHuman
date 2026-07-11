@@ -406,7 +406,7 @@ fn card_content(question_text: &str, options: &[String]) -> String {
 
 /// 选项标签：数字键帽 emoji（1️⃣2️⃣3️⃣…，彩色且渲染可靠，避免与模型输出里的纯文本 1./2. 混淆）；
 /// 第 10 个用 🔟；超过 10 个用纯序号（无对应键帽 emoji）。
-fn option_label(idx: usize) -> String {
+pub(crate) fn option_label(idx: usize) -> String {
     match idx {
         // 1️⃣–9️⃣：数字 + U+FE0F(emoji 变体) + U+20E3(组合键帽)。
         0..=8 => format!("{}\u{fe0f}\u{20e3}", idx + 1),
@@ -583,7 +583,7 @@ fn toggle_single(selected: &mut Vec<String>, option: &str) {
 }
 
 /// 每行字母按钮个数（字母短，可密排）。
-const KEYBOARD_ROW_WIDTH: usize = 4;
+pub(crate) const KEYBOARD_ROW_WIDTH: usize = 4;
 
 /// 单卡片 inline 键盘：选项行（按钮只放字母 A/B/C…，选中加 ✅，每行 4 个）+ 末行「提交」按钮。
 /// 选项全文列在卡片正文里；按钮放字母既规避超长选项显示不全，也让 callback_data 短小。

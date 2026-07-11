@@ -23,6 +23,7 @@ export default {
     inputPlaceholder: "Type your reply…",
     addImage: "Add image",
     recommended: "Recommended",
+    permissionReason: "Reason:",
     view: {
       copyMessage: "Copy message",
       viewSource: "View source",

@@ -23,6 +23,7 @@ export default {
     inputPlaceholder: "输入你的回复…",
     addImage: "添加图片",
     recommended: "推荐",
+    permissionReason: "理由：",
     view: {
       copyMessage: "复制 Message",
       viewSource: "查看源码",

@@ -289,22 +289,23 @@ ServerMsg::ConfirmFallback { reason }
   按 request/message id 路由并携带当前 form reason。
 - 钉钉：新建独立 `permission-confirm` 模板，复刻 Ask 模板的 radio/Input/Submit，再增加“选 deny 才显示
   Input”；保留普通 Ask 模板和 `/stage` confirm 模板/ID 不动。
-- Telegram：复用 Ask 的编号选项 toggle + 末行 Submit；选择 deny 后提示“回复本消息可填写拒绝原因”，
-  只接受带精确 `reply_to_message_id` 的文字作为该卡 reason draft；精确回复会自动选中 deny。
+- Telegram：短 choice 直接显示完整按钮文案；选项超过三项、单项或总文案过长时复用 Ask 的数字键帽降级；
+  所有 choice 按钮一键形成终态，不显示 Submit。卡片提示“如需说明拒绝原因，请先回复本消息，再点拒绝”，
+  只接受带精确 `reply_to_message_id` 的文字作为该卡 reason draft；精确回复会自动选中 deny，但本身不终结。
 - Slack：复用 Ask 的 `radio_buttons` + Submit，但不放始终可见的通用输入块；选择 deny 后更新卡片提示
   “在线程回复可填写拒绝原因”，只接受精确 `thread_ts` 的回复作为该卡 reason draft；精确回复会自动选中
   deny。
 
-Slack/Telegram 的 choice 切换与 reason draft 更新都只是卡片局部状态；只有 Submit callback 才抢答。连续精确
-回复按换行追加；若追加后超过 1000 字，拒绝整条新回复、保留旧草稿并提示限长，不做静默截断。按用户定案
-不增加“清除原因”控件。
-五端首次均无默认选择，空选择提交必须就地提示且继续等待。Claude 持久权限 choice 在五端都走相同的
-“选择 → Submit”，不使用一触即生效按钮。已输入的 reason 在请求结束前保留，临时切离 deny 只隐藏；切回
-deny 时恢复。最终提交任何批准 action 时由服务端丢弃 reason。
+Slack 的 choice 切换与 reason draft 更新都只是卡片局部状态，只有 Submit callback 才抢答；Telegram 的
+精确回复同样只更新 deny 草稿，但随后任一 choice 按钮都直接抢答。连续精确回复按换行追加；若追加后超过
+1000 字，拒绝整条新回复、保留旧草稿并提示限长，不做静默截断。按用户定案不增加“清除原因”控件。
+popup/飞书/钉钉/Slack 首次均无默认选择，空选择提交必须就地提示且继续等待；Telegram 无 Submit，choice
+按钮即决定。已输入的 reason 在请求结束前保留；最终提交任何批准 action 时由服务端丢弃 reason。
 
-所有渠道必须显示：Agent、workspace、工具名、权限模式、可读摘要、创建时间。远程 IM 的 workspace 显示
-项目名 + 将 home 前缀缩写为 `~` 的路径；本地弹窗显示完整绝对路径。Claude permission suggestion 另显示
-准确规则和目标作用域；控件 label 可用短标题规避平台选项文字限制，规则正文独立换行展示。终态卡回显最终
+协议 context 继续携带 Agent、workspace、工具名、权限模式和创建时间用于验证/路由，但经人工视觉验收，
+popup 与 IM 不再重复展示已可从头部/会话判断的元数据；主信息统一为“理由 → 工具名 → 调用正文”。Claude
+permission suggestion 另显示准确规则和目标作用域；控件 label 可用短标题规避平台选项文字限制，规则正文
+独立换行展示。终态卡回显最终
 选择与拒绝原因是否已发送，文案统一使用“已提交决定”，不保留可点击控件，也不回显其它落败端的 reason
 draft。
 
@@ -556,9 +557,9 @@ agents monitor [--json|--text]
 3. 飞书实现单选 toggle、deny 条件输入与 Submit；钉钉新增
    `docs/assets/dingtalk-permission-confirm-card-template.json`、独立默认 ID 与可选
    `permission_confirm_card_template_id` override，保留普通 Ask 与 `/stage` 模板/配置不动；
-4. Telegram/Slack 实现“单选 toggle + Submit”，精确 `reply_to_message_id` / `thread_ts` 回复自动选中 deny
-   并保存 reason draft；多条按换行追加，超 1000 字拒绝新回复且保留旧稿；切离 deny 时保留、批准分支
-   服务端丢弃，不提供清除控件，另覆盖收尾与并发路由；
+4. Slack 实现“单选 toggle + Submit”；Telegram 实现短文案直显/长文案数字降级的一键 choice。精确
+   `reply_to_message_id` / `thread_ts` 回复自动选中 deny 并保存 reason draft；多条按换行追加，超 1000 字
+   拒绝新回复且保留旧稿；批准分支服务端丢弃，不提供清除控件，另覆盖收尾与并发路由；
 5. 四个 channel adapter 实现 Confirm 的发送、Ready/Failed 上报、回调、首答投递、落败定格和过期定格；
 6. popup 10 秒 / 各 IM 60 秒首次投递 deadline 驱动 Starting→Failed；纯文本降级不算 Ready，迟到成功卡
    立即定格失效；24 小时 timer 与 Submit/确认关闭争抢同一终态；全通道失败返回 fallback；
@@ -647,8 +648,8 @@ agents monitor [--json|--text]
 4. 无真实危险操作的端到端验收：Claude/Codex 各触发 harmless permission request，覆盖本地/IM 的空选择、
    批准一次、拒绝原因、关闭警告、Daemon/网络故障回原生、超时回原生；Claude 另用临时安全规则验证
    suggestion 原样回放、准确作用域和清理；
-5. 四 IM 真机验收单选+Submit、条件输入/精确回复 reason draft、动态持久 choice、并发收尾、卡片不可重复
-   提交、按需投放与 `/here` 补推；
+5. 四 IM 真机验收决定交互（Telegram 一键 choice，其它渠道选择+Submit）、条件输入/精确回复 reason draft、
+   动态持久 choice、并发收尾、卡片不可重复提交、按需投放与 `/here` 补推；
 6. 更新 `docs/overview.md`、`docs/specs/cli-config.md`、其它引用旧 agents flags 的规格/计划、用户 wiki、
    `docs/PROGRESS.md`；发布说明明确 CLI breaking change；功能提交使用清晰的 Conventional Commit，
    例如 `feat(hooks): route agent permission requests to AskHuman`。
@@ -675,8 +676,8 @@ agents monitor [--json|--text]
 | 未知/非 allow suggestion | 不显示、不回放；不能靠伪造 action id 写权限 |
 | 合法 Claude suggestion 超过 8 条 | 仅前 8 条有 choice/action id，清楚显示遗漏数；批准一次/拒绝照常可提交 |
 | 任一端选择“拒绝”并提交 | Hook 输出 deny；可选原因只进 deny message；其它端全部定格“已提交拒绝决定” |
-| Slack/Telegram 精确回复卡片 | 只更新该卡 reason draft，不抢答；选择 deny 后 Submit 才发送 |
-| Slack/Telegram 回复时尚未选 deny | 自动选中 deny 并保存草稿，仍需 Submit 才终结 |
+| Slack/Telegram 精确回复卡片 | 只更新该卡 reason draft，不抢答；Slack 选 deny 后 Submit，Telegram 再点拒绝 |
+| Slack/Telegram 回复时尚未选 deny | 自动选中 deny 并保存草稿；Slack 仍需 Submit，Telegram 再点任一决定即终结 |
 | Slack/Telegram 连续回复 | 换行追加；新回复会使草稿超过 1000 字时整条拒绝并提示，旧草稿不变 |
 | 从 deny 切到批准再切回 | 原因草稿仍在；请求结束前不因临时切换丢失 |
 | 已有 reason 却提交批准 | reason 被服务端丢弃，不进入 allow 输出或 history |

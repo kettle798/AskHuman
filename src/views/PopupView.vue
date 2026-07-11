@@ -1987,6 +1987,10 @@ onBeforeUnmount(() => {
       <template v-if="isConfirm && confirmRequest">
         <section class="confirm-request">
           <h1 class="confirm-request-title">{{ confirmRequest.title }}</h1>
+          <p v-if="confirmRequest.detail.summary" class="confirm-reason">
+            <strong>{{ t("popup.permissionReason") }}</strong>
+            {{ confirmRequest.detail.summary }}
+          </p>
           <section class="confirm-tool">
             <header class="confirm-tool-header">{{ confirmToolName }}</header>
             <div
@@ -1995,9 +1999,6 @@ onBeforeUnmount(() => {
               v-html="confirmDetailHtml"
               @click="onContentClick"
             ></div>
-            <p v-if="confirmRequest.detail.summary" class="confirm-summary">
-              {{ confirmRequest.detail.summary }}
-            </p>
           </section>
           <div class="confirm-options" role="radiogroup" :aria-label="confirmRequest.title">
             <div
@@ -2549,18 +2550,16 @@ onBeforeUnmount(() => {
   line-height: 1.25;
   color: var(--text-primary);
 }
+.confirm-reason {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.5;
+}
 .confirm-detail {
   min-width: 0;
   padding: 13px 14px 14px;
   background: color-mix(in srgb, var(--surface) 68%, transparent);
-}
-.confirm-summary {
-  margin: 0;
-  padding: 10px 14px 11px;
-  border-top: 1px solid var(--border);
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.4;
 }
 .confirm-options {
   display: grid;

@@ -206,7 +206,7 @@ fn dingtalk_param_map(request: &crate::models::ConfirmRequest, lang: Lang) -> se
         .collect();
     let mut public = crate::dingtalk::card::build_card_param_map(
         &request.title,
-        &choice_cards::compact_tool_markdown(request, 12_000),
+        &choice_cards::compact_tool_markdown(request, 12_000, lang),
         &options,
         true,
         false,
@@ -365,7 +365,7 @@ pub fn start_feishu(
         let mut events = router.register();
         let mut selected = None;
         let mut comment = String::new();
-        let initial = choice_cards::feishu_card(&entry.request, selected, &comment);
+        let initial = choice_cards::feishu_card(&entry.request, selected, &comment, lang);
         let message_id =
             match tokio::time::timeout(DELIVERY_TIMEOUT, client.send_card(&initial)).await {
                 Ok(Ok(message_id)) if !message_id.is_empty() => message_id,
@@ -385,7 +385,7 @@ pub fn start_feishu(
         events.set_active(Some(&message_id), &target);
         if !entry.mark_ready(channel, message_id.clone()) {
             let final_card =
-                choice_cards::feishu_final_card(&entry.request, &final_status(&entry, lang));
+                choice_cards::feishu_final_card(&entry.request, &final_status(&entry, lang), lang);
             let _ = client.patch_card(&message_id, &final_card).await;
             let deadline = entry.deadline;
             drop(entry);
@@ -406,7 +406,7 @@ pub fn start_feishu(
                             {
                                 if let Some(draft) = draft { comment = draft; }
                                 selected = Some(index);
-                                let card = choice_cards::feishu_card(&entry.request, selected, &comment);
+                                let card = choice_cards::feishu_card(&entry.request, selected, &comment, lang);
                                 let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
                             }
                             Some(CardAction::Submit { actor, message_id: mid, comment: submitted })
@@ -421,12 +421,12 @@ pub fn start_feishu(
                                 }
                                 match entry.coordinator.submit_wire(index, Some(comment.clone()), channel) {
                                     Ok(_) => {
-                                        let final_card = choice_cards::feishu_final_card(&entry.request, &final_status(&entry, lang));
+                                        let final_card = choice_cards::feishu_final_card(&entry.request, &final_status(&entry, lang), lang);
                                         let _ = ack.send(Some(crate::feishu::card::callback_update_card(final_card)));
                                         break;
                                     }
                                     Err(_) => {
-                                        let card = choice_cards::feishu_card(&entry.request, selected, &comment);
+                                        let card = choice_cards::feishu_card(&entry.request, selected, &comment, lang);
                                         let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
                                     }
                                 }
@@ -443,7 +443,7 @@ pub fn start_feishu(
             fail(&entry, channel, "Feishu router disconnected");
         }
         let final_card =
-            choice_cards::feishu_final_card(&entry.request, &final_status(&entry, lang));
+            choice_cards::feishu_final_card(&entry.request, &final_status(&entry, lang), lang);
         let _ = client.patch_card(&message_id, &final_card).await;
         let deadline = entry.deadline;
         drop(entry);
@@ -613,7 +613,7 @@ pub fn start_telegram(
         let mut selected = None;
         let mut comment = String::new();
         let mut events = router.register();
-        let initial = choice_cards::telegram_html(&entry.request, selected, &comment, None);
+        let initial = choice_cards::telegram_html(&entry.request, selected, &comment, None, lang);
         let keyboard = choice_cards::telegram_keyboard(&entry.request, selected);
         let message_id = match tokio::time::timeout(
             DELIVERY_TIMEOUT,
@@ -642,6 +642,7 @@ pub fn start_telegram(
                 None,
                 &comment,
                 Some(&final_status(&entry, lang)),
+                lang,
             );
             let _ = client
                 .edit_message_text(message_id, &html, Some("HTML"), None)
@@ -661,18 +662,8 @@ pub fn start_telegram(
                         let callback_id = callback.get("id").and_then(|value| value.as_str()).unwrap_or("");
                         let data = callback.get("data").and_then(|value| value.as_str()).unwrap_or("");
                         match choice_cards::parse_telegram_callback(data) {
-                            Some(Some(index)) if index < entry.request.choices.len() => {
+                            Some(choice_cards::TelegramAction::Decide(index)) if index < entry.request.choices.len() => {
                                 selected = Some(index);
-                                let keyboard = choice_cards::telegram_keyboard(&entry.request, selected);
-                                let html = choice_cards::telegram_html(&entry.request, selected, &comment, None);
-                                let _ = client.edit_message_text(message_id, &html, Some("HTML"), Some(keyboard)).await;
-                                client.answer_callback_query(callback_id).await;
-                            }
-                            Some(None) => {
-                                let Some(index) = selected else {
-                                    client.answer_callback_query_alert(callback_id, if lang == Lang::Zh { "请先选择一个决定" } else { "Select a decision first" }).await;
-                                    continue;
-                                };
                                 client.answer_callback_query(callback_id).await;
                                 if entry.coordinator.submit_wire(index, Some(comment.clone()), channel).is_ok() { break; }
                             }
@@ -689,7 +680,7 @@ pub fn start_telegram(
                                 comment.push_str(text);
                                 selected = Some(entry.request.dismiss_index());
                                 let keyboard = choice_cards::telegram_keyboard(&entry.request, selected);
-                                let html = choice_cards::telegram_html(&entry.request, selected, &comment, None);
+                                let html = choice_cards::telegram_html(&entry.request, selected, &comment, None, lang);
                                 let _ = client.edit_message_text(message_id, &html, Some("HTML"), Some(keyboard)).await;
                             } else if !text.is_empty() {
                                 let warning = if lang == Lang::Zh { "拒绝原因最多 1000 字；本条回复未保存。" } else { "The denial reason is limited to 1000 characters; this reply was not saved." };
@@ -709,6 +700,7 @@ pub fn start_telegram(
             selected,
             &comment,
             Some(&final_status(&entry, lang)),
+            lang,
         );
         let _ = client
             .edit_message_text(message_id, &html, Some("HTML"), None)
@@ -792,9 +784,10 @@ mod tests {
             "Tell the Agent what it should do"
         );
         let markdown = payload["markdown"].as_str().unwrap();
-        assert!(markdown.starts_with("**Bash**"));
-        assert!(markdown.contains("`git status`"));
-        assert!(markdown.ends_with("*Run command*"));
+        let reason = markdown.find("**Reason:** Run command").unwrap();
+        let tool = markdown.find("**Bash**").unwrap();
+        let body = markdown.find("`git status`").unwrap();
+        assert!(reason < tool && tool < body);
         assert!(!markdown.contains("Codex"));
         assert!(!markdown.contains("**Agent:**"));
         assert!(payload.get("single").is_none());
