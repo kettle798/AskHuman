@@ -4,7 +4,7 @@ use crate::app::coordinator::Coordinator;
 use crate::app::AppState;
 use crate::config::{AppConfig, ThemeMode, WindowEffect};
 use crate::integrations::cursor_hook;
-use crate::models::{AskRequest, ChannelAction, ChannelResult, QuestionAnswer};
+use crate::models::{ChannelAction, ChannelResult, InteractionRequest, QuestionAnswer};
 use crate::telegram::TelegramClient;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -14,8 +14,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PopupInit {
-    /// 本次提问内容。方案6 预热弹窗在**未领用**（待命）时为 `None`（前端等 `popup-show` 事件再 pull）。
-    request: Option<AskRequest>,
+    /// Current interaction. A prewarmed helper returns `None` until it is assigned.
+    interaction: Option<InteractionRequest>,
     theme: String,
     always_on_top: bool,
     /// 标题来源名：「Question from {source_name}」。可经环境变量定制。
@@ -57,11 +57,11 @@ pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
     // en/zh）；其余路径用本进程 config 的原始值（auto/en/zh）。
     let default_lang = state.config.general.language.clone();
     #[cfg(unix)]
-    let (request, source, project, agent_kind, agent_pid, language, warm, created_at_ms) =
+    let (interaction, source, project, agent_kind, agent_pid, language, warm, created_at_ms) =
         if let Some(w) = app.try_state::<crate::app::WarmPopup>() {
             match w.show.lock().ok().and_then(|g| g.clone()) {
                 Some(s) => (
-                    Some(s.request),
+                    Some(s.interaction),
                     s.source,
                     s.project,
                     s.agent_kind,
@@ -83,7 +83,7 @@ pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
             }
         } else {
             (
-                Some(state.request.clone()),
+                Some(state.interaction.clone()),
                 state.source.clone(),
                 state.project.clone(),
                 state.agent_kind.clone(),
@@ -94,8 +94,8 @@ pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
             )
         };
     #[cfg(not(unix))]
-    let (request, source, project, agent_kind, agent_pid, language, warm, created_at_ms) = (
-        Some(state.request.clone()),
+    let (interaction, source, project, agent_kind, agent_pid, language, warm, created_at_ms) = (
+        Some(state.interaction.clone()),
         state.source.clone(),
         state.project.clone(),
         state.agent_kind.clone(),
@@ -117,7 +117,7 @@ pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
 
     let project_name = crate::project::display_name(&project);
     PopupInit {
-        request,
+        interaction,
         theme: theme_str(cfg.general.theme),
         always_on_top: cfg.general.always_on_top,
         // GUI Helper 模式下来源名由 Daemon 上送（A11）；单进程 / 设置回退取本进程环境。
@@ -232,6 +232,28 @@ pub fn submit_popup(app: AppHandle, submission: PopupSubmission) {
     if let Some(c) = app.try_state::<Arc<Coordinator>>() {
         c.submit(result);
     }
+}
+
+#[tauri::command]
+pub fn submit_confirm_action(
+    app: AppHandle,
+    choice_index: usize,
+    comment: Option<String>,
+) -> Result<(), String> {
+    let bridge = app
+        .try_state::<crate::app::GuiBridge>()
+        .ok_or_else(|| "confirmation popup requires a daemon bridge".to_string())?;
+    bridge.send_confirm_answer(choice_index, comment);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn confirm_popup_ready(app: AppHandle) -> Result<(), String> {
+    let bridge = app
+        .try_state::<crate::app::GuiBridge>()
+        .ok_or_else(|| "confirmation popup requires a daemon bridge".to_string())?;
+    bridge.send_confirm_ready();
+    Ok(())
 }
 
 #[tauri::command]

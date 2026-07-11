@@ -7,6 +7,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   popupInit,
   submitPopup,
+  submitConfirmAction,
+  confirmPopupReady,
   cancelPopup,
   openSettings,
   openHistory,
@@ -38,6 +40,7 @@ import { applyTheme, fileToDataUrl } from "../lib/theme";
 import { mark as perfMarkFe, enable as perfEnableFe } from "../lib/perf";
 import type {
   AskRequest,
+  ConfirmRequest,
   FileAttachment,
   ImageAttachment,
   PopupInit,
@@ -56,6 +59,11 @@ const codeCopyLabels = computed(() => ({
 }));
 
 const request = ref<AskRequest | null>(null);
+const confirmRequest = ref<ConfirmRequest | null>(null);
+const isConfirm = computed(() => confirmRequest.value !== null);
+const confirmChoiceIndex = ref<number | null>(null);
+const confirmComment = ref("");
+const showConfirmCloseWarning = ref(false);
 const loadError = ref<string | null>(null);
 
 // 视图态：false=Markdown 预览（默认），true=源码（原始文本）。作用于整篇（message + 所有问题）。
@@ -1068,6 +1076,68 @@ async function submit() {
   }
 }
 
+const selectedConfirmChoice = computed(() =>
+  confirmChoiceIndex.value === null
+    ? null
+    : confirmRequest.value?.choices[confirmChoiceIndex.value] ?? null
+);
+const confirmInput = computed(() => confirmRequest.value?.presentation.input ?? null);
+const showConfirmInput = computed(
+  () =>
+    !!confirmInput.value &&
+    selectedConfirmChoice.value?.id === confirmInput.value.visibleWhenActionId
+);
+const confirmCanSubmit = computed(
+  () => confirmChoiceIndex.value !== null && !submitting.value
+);
+const confirmDetailHtml = computed(() =>
+  confirmRequest.value?.detail.bodyMd
+    ? renderMarkdown(confirmRequest.value.detail.bodyMd, codeCopyLabels.value)
+    : ""
+);
+
+function confirmFieldValue(field: ConfirmRequest["context"][number]): string {
+  if (field.kind !== "timestamp") return field.value;
+  const numeric = Number(field.value);
+  const date = new Date(Number.isFinite(numeric) ? numeric : field.value);
+  return Number.isNaN(date.getTime()) ? field.value : date.toLocaleString();
+}
+
+function selectConfirmChoice(index: number) {
+  if (!submitting.value) confirmChoiceIndex.value = index;
+}
+
+async function submitConfirm() {
+  if (!confirmCanSubmit.value || confirmChoiceIndex.value === null) return;
+  submitting.value = true;
+  const comment = showConfirmInput.value
+    ? confirmComment.value.slice(0, confirmInput.value?.maxChars ?? 1000)
+    : null;
+  try {
+    await submitConfirmAction(confirmChoiceIndex.value, comment || null);
+  } catch {
+    submitting.value = false;
+  }
+}
+
+function requestConfirmClose() {
+  if (!submitting.value) showConfirmCloseWarning.value = true;
+}
+
+function dismissConfirmCloseWarning() {
+  showConfirmCloseWarning.value = false;
+}
+
+async function confirmCloseAndDeny() {
+  const req = confirmRequest.value;
+  if (!req || submitting.value) return;
+  const index = req.choices.findIndex((choice) => choice.id === req.dismissActionId);
+  if (index < 0) return;
+  confirmChoiceIndex.value = index;
+  showConfirmCloseWarning.value = false;
+  await submitConfirm();
+}
+
 // 取消入口：有回答时二次确认，否则直接取消。
 function requestCancel() {
   if (submitting.value) return;
@@ -1330,6 +1400,33 @@ function onWindowBlur() {
 function onKeydown(e: KeyboardEvent) {
   const mod = e.metaKey || e.ctrlKey;
   cmdHeld.value = onlyCmdHeld(e);
+  if (isConfirm.value) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      if (showConfirmCloseWarning.value) dismissConfirmCloseWarning();
+      else requestConfirmClose();
+      return;
+    }
+    if (mod && e.key === "Enter") {
+      e.preventDefault();
+      void submitConfirm();
+      return;
+    }
+    if (mod && (e.key === "w" || e.key === "W")) {
+      e.preventDefault();
+      if (Date.now() >= appearGuardUntil) requestConfirmClose();
+      return;
+    }
+    if (mod && e.key >= "1" && e.key <= "9") {
+      const index = Number(e.key) - 1;
+      if (index < (confirmRequest.value?.choices.length ?? 0)) {
+        e.preventDefault();
+        selectConfirmChoice(index);
+      }
+      return;
+    }
+    return;
+  }
   // 录音中按 Esc：结束本次语音输入（不关闭弹窗）。
   if (e.key === "Escape" && listening.value) {
     e.preventDefault();
@@ -1399,8 +1496,8 @@ let adopting = false;
 // 把（含 request 的）init 渲染上屏：套主题/语言/来源 → 设 request → 双 rAF 打点 → 首帧后再做非关键初始化。
 // 预热弹窗（init.warm）窗口起始隐藏，绘制完成后调 popup_show_window 让后端延后 show（杜绝空白闪现）。
 function renderInit(init: PopupInit) {
-  const req = init.request;
-  if (!req) return;
+  const interaction = init.interaction;
+  if (!interaction) return;
   applyTheme(init.theme);
   theme.value = init.theme;
   // 精确语言来自 popup_init（零钥匙串）；main.ts 只做 auto 兜底，故此处校正。
@@ -1418,8 +1515,19 @@ function renderInit(init: PopupInit) {
   speechLang.value = init.speechLanguage || "auto";
   speechShortcut.value = init.speechShortcut || "cmd+d";
   verticalEnabled.value = init.verticalQuestions ?? false;
+  const req = interaction.type === "ask" ? interaction.request : null;
   request.value = req;
-  const n = req.questions.length;
+  confirmRequest.value = interaction.type === "confirm" ? interaction.request : null;
+  confirmChoiceIndex.value =
+    interaction.type === "confirm" && interaction.request.presentation.defaultActionId
+      ? interaction.request.choices.findIndex(
+          (choice) => choice.id === interaction.request.presentation.defaultActionId
+        )
+      : null;
+  if (confirmChoiceIndex.value === -1) confirmChoiceIndex.value = null;
+  confirmComment.value = "";
+  showConfirmCloseWarning.value = false;
+  const n = req?.questions.length ?? 0;
   chosenByQ.value = Array.from({ length: n }, () => []);
   inputByQ.value = Array.from({ length: n }, () => "");
   imagesByQ.value = Array.from({ length: n }, () => []);
@@ -1453,8 +1561,9 @@ function renderInit(init: PopupInit) {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         perfMarkFe("fe.painted");
+        if (isConfirm.value) confirmPopupReady().catch(() => {});
         // harness 模式：内容已上屏即自动取消，免人工点按。
-        if (init.perfAutodismiss) {
+        if (init.perfAutodismiss && !isConfirm.value) {
           cancelPopup().catch(() => {});
         }
       });
@@ -1480,11 +1589,11 @@ function renderInit(init: PopupInit) {
 
 // 预热弹窗领用：重新 pull popup_init，若已带 request 则渲染（一次性）。
 async function adopt() {
-  if (request.value || adopting) return;
+  if (request.value || confirmRequest.value || adopting) return;
   adopting = true;
   try {
     const init = await popupInit();
-    if (init.request) {
+    if (init.interaction) {
       // 热路径领用：丢弃预热阶段缓存的标记（fe.bootstrap/fe.mounted/待命 popup_init 不属本次请求），
       // 只上报领用后的标记（如 fe.painted），避免污染时间线（负的 page boot）。
       if (init.perf) perfEnableFe(true);
@@ -1518,7 +1627,7 @@ onMounted(async () => {
     // 后端在 helper 进程收到 ASKHUMAN_PERF_ID 时置 perf=true：开启前端埋点并冲刷此前缓存的标记。
     if (init.perf) perfEnableFe();
     perfMarkFe("fe.popup_init_done");
-    if (init.request) {
+    if (init.interaction) {
       // 冷路径 / 已领用：直接渲染。
       renderInit(init);
     } else {
@@ -1610,7 +1719,8 @@ async function initAfterPaint(init: PopupInit) {
   });
   // 原生关闭按钮：后端阻止关闭并转发此事件 → 与 ⌘W 一致走二次确认。
   unlistenCloseReq = await listen("popup-close-requested", () => {
-    requestCancel();
+    if (isConfirm.value) requestConfirmClose();
+    else requestCancel();
   });
   // 托盘「待答」子菜单点击本弹窗：后端已聚焦窗口，这里播放边框闪烁。
   unlistenFlash = await listen("popup-flash", () => {
@@ -1683,7 +1793,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div v-if="!request" class="popup popup-status">
+  <div v-if="!request && !confirmRequest" class="popup popup-status">
     <p v-if="loadError" class="status-error">
       {{ t("popup.loadError", { msg: loadError }) }}
     </p>
@@ -1876,10 +1986,64 @@ onBeforeUnmount(() => {
       class="content"
       @scroll="onScroll"
     >
+      <template v-if="isConfirm && confirmRequest">
+        <section class="confirm-request">
+          <h1 class="confirm-request-title">{{ confirmRequest.title }}</h1>
+          <dl class="confirm-context">
+            <div v-for="field in confirmRequest.context" :key="field.id" class="confirm-context-row">
+              <dt>{{ field.label }}</dt>
+              <dd :class="{ 'confirm-path': field.kind === 'path' }" :title="field.value">
+                {{ confirmFieldValue(field) }}
+              </dd>
+            </div>
+          </dl>
+          <div class="confirm-summary">{{ confirmRequest.detail.summary }}</div>
+          <div
+            v-if="confirmRequest.detail.bodyMd"
+            class="markdown-body confirm-detail"
+            v-html="confirmDetailHtml"
+            @click="onContentClick"
+          ></div>
+          <div class="confirm-options" role="radiogroup" :aria-label="confirmRequest.title">
+            <button
+              v-for="(choice, index) in confirmRequest.choices"
+              :key="choice.id"
+              type="button"
+              class="confirm-option"
+              :class="[
+                `role-${choice.role}`,
+                { selected: confirmChoiceIndex === index },
+              ]"
+              role="radio"
+              :aria-checked="confirmChoiceIndex === index"
+              @click="selectConfirmChoice(index)"
+            >
+              <span class="confirm-radio" aria-hidden="true"></span>
+              <span class="confirm-option-copy">
+                <strong>{{ choice.label }}</strong>
+                <span v-if="choice.description">{{ choice.description }}</span>
+              </span>
+              <kbd v-if="index < 9" class="opt-sc">⌘{{ index + 1 }}</kbd>
+            </button>
+          </div>
+          <label v-if="showConfirmInput && confirmInput" class="confirm-input-block">
+            <span>{{ confirmInput.label }}</span>
+            <textarea
+              v-model="confirmComment"
+              class="textarea"
+              :maxlength="confirmInput.maxChars"
+              :placeholder="confirmInput.placeholder"
+              rows="4"
+            ></textarea>
+            <small>{{ confirmComment.length }} / {{ confirmInput.maxChars }}</small>
+          </label>
+        </section>
+      </template>
+      <template v-else>
       <!-- 共享 Message 区（描述 + 附件），仅在有内容时展示，顶部常驻 -->
       <template v-if="showDescription">
         <div
-          v-if="messageText && request.isMarkdown && !viewSource"
+          v-if="messageText && request?.isMarkdown && !viewSource"
           class="markdown-body"
           v-html="messageHtml"
           @click="onContentClick"
@@ -1975,7 +2139,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div
-          v-if="request.isMarkdown && !viewSource && q.message"
+          v-if="request?.isMarkdown && !viewSource && q.message"
           class="markdown-body"
           v-html="questionHtml(q)"
           @click="onContentClick"
@@ -2119,7 +2283,7 @@ onBeforeUnmount(() => {
         <Transition :name="transitionName" mode="out-in" @after-enter="onQuestionEntered">
           <div class="question-pane" :key="current">
             <div
-              v-if="request.isMarkdown && !viewSource && currentQuestion?.message"
+              v-if="request?.isMarkdown && !viewSource && currentQuestion?.message"
               class="markdown-body"
               v-html="renderedHtml"
               @click="onContentClick"
@@ -2224,6 +2388,7 @@ onBeforeUnmount(() => {
           </div>
         </Transition>
       </template>
+      </template>
     </div>
 
     <input
@@ -2236,7 +2401,7 @@ onBeforeUnmount(() => {
     />
 
     <!-- 多问题底部：取消(左) + 上一个/下一个/提交(右) -->
-    <div v-if="isMulti" class="footer" data-tauri-drag-region>
+    <div v-if="!isConfirm && isMulti" class="footer" data-tauri-drag-region>
       <button class="btn" type="button" :disabled="submitting" @click="requestCancel">
         {{ t("common.cancel") }} <kbd class="sc">⌘W</kbd>
       </button>
@@ -2273,7 +2438,7 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- 单问题底部：取消(左) + 发送(右) -->
-    <div v-else class="footer" data-tauri-drag-region>
+    <div v-else-if="!isConfirm" class="footer" data-tauri-drag-region>
       <button class="btn" type="button" :disabled="submitting" @click="requestCancel">
         {{ t("common.cancel") }} <kbd class="sc">⌘W</kbd>
       </button>
@@ -2288,8 +2453,24 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
+    <div v-else class="footer" data-tauri-drag-region>
+      <button class="btn" type="button" :disabled="submitting" @click="requestConfirmClose">
+        {{ t("common.cancel") }} <kbd class="sc">⌘W</kbd>
+      </button>
+      <span class="spacer"></span>
+      <button
+        class="btn btn-primary"
+        type="button"
+        :disabled="!confirmCanSubmit"
+        @click="submitConfirm"
+      >
+        {{ confirmRequest?.presentation.submitLabel ?? t("common.submit") }}
+        <kbd class="sc">⌘↵</kbd>
+      </button>
+    </div>
+
     <!-- 取消二次确认 -->
-    <div v-if="showCancelConfirm" class="confirm-overlay" @click.self="dismissCancelConfirm">
+    <div v-if="!isConfirm && showCancelConfirm" class="confirm-overlay" @click.self="dismissCancelConfirm">
       <div class="confirm-box">
         <p class="confirm-title">{{ t("popup.confirmCancel.title") }}</p>
         <p class="confirm-desc">{{ t("popup.confirmCancel.desc") }}</p>
@@ -2303,6 +2484,31 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+
+    <div
+      v-if="isConfirm && showConfirmCloseWarning"
+      class="confirm-overlay"
+      @click.self="dismissConfirmCloseWarning"
+    >
+      <div class="confirm-box">
+        <p class="confirm-title">{{ t("popup.confirmClose.title") }}</p>
+        <p class="confirm-desc">
+          {{
+            confirmComment.trim()
+              ? t("popup.confirmClose.descWithReason")
+              : t("popup.confirmClose.desc")
+          }}
+        </p>
+        <div class="confirm-actions">
+          <button class="btn" type="button" @click="dismissConfirmCloseWarning">
+            {{ t("popup.confirmClose.keep") }}
+          </button>
+          <button class="btn btn-danger" type="button" @click="confirmCloseAndDeny">
+            {{ t("popup.confirmClose.deny") }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -2312,6 +2518,123 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.confirm-request {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 820px;
+  margin: 0 auto;
+}
+.confirm-request-title {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.3;
+  color: var(--text-primary);
+}
+.confirm-context {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  background: color-mix(in srgb, var(--surface) 74%, transparent);
+}
+.confirm-context-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.28fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+}
+.confirm-context dt {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.confirm-context dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.confirm-context .confirm-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.confirm-summary {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.confirm-detail {
+  padding: 12px 14px;
+  border-left: 3px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 65%, transparent);
+}
+.confirm-options {
+  display: grid;
+  gap: 9px;
+}
+.confirm-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 13px;
+  text-align: left;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  cursor: pointer;
+}
+.confirm-option:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.confirm-option.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.confirm-option.role-destructive.selected {
+  border-color: #ff453a;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #ff453a 18%, transparent);
+}
+.confirm-radio {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  border: 1.5px solid var(--text-secondary);
+  border-radius: 50%;
+}
+.confirm-option.selected .confirm-radio {
+  border: 4px solid var(--accent);
+}
+.confirm-option.role-destructive.selected .confirm-radio {
+  border-color: #ff453a;
+}
+.confirm-option-copy {
+  display: grid;
+  flex: 1;
+  gap: 4px;
+  min-width: 0;
+}
+.confirm-option-copy span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.confirm-input-block {
+  display: grid;
+  gap: 7px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.confirm-input-block small {
+  justify-self: end;
+  color: var(--text-secondary);
 }
 
 /* 托盘「待答」子菜单点击本弹窗 → 边框 accent 蓝脉冲 2 次（约 0.6s）。仅视觉，不拦截交互。 */

@@ -13,6 +13,59 @@ export interface AskRequest {
   outputFormat: OutputFormat;
 }
 
+export type ConfirmFieldKind = "text" | "path" | "timestamp";
+export type ConfirmActionRole = "primary" | "default" | "destructive";
+
+export interface ConfirmField {
+  id: string;
+  label: string;
+  value: string;
+  kind: ConfirmFieldKind;
+}
+
+export interface ConfirmDetail {
+  summary: string;
+  bodyMd: string;
+}
+
+export interface ConfirmChoice {
+  id: string;
+  label: string;
+  description: string;
+  role: ConfirmActionRole;
+}
+
+export interface ConfirmInput {
+  id: string;
+  visibleWhenActionId: string;
+  label: string;
+  placeholder: string;
+  maxChars: number;
+}
+
+export interface ConfirmPresentation {
+  type: "singleSelectSubmit";
+  input?: ConfirmInput | null;
+  submitLabel: string;
+  defaultActionId?: string | null;
+}
+
+export interface ConfirmRequest {
+  id: string;
+  title: string;
+  context: ConfirmField[];
+  detail: ConfirmDetail;
+  choices: ConfirmChoice[];
+  presentation: ConfirmPresentation;
+  dismissActionId: string;
+  createdAtMs: number;
+  expiresAtMs: number;
+}
+
+export type InteractionRequest =
+  | { type: "ask"; request: AskRequest }
+  | { type: "confirm"; request: ConfirmRequest };
+
 export interface MessagePrompt {
   text: string;
   files: FileAttachment[];
@@ -49,8 +102,8 @@ export type PopupAnimation = "none" | "document" | "alert";
 export type WindowEffect = "glass" | "blur";
 
 export interface PopupInit {
-  /** 本次提问内容。方案6 预热弹窗未领用（待命）时为 null，前端等 `popup-show` 事件再 pull。 */
-  request: AskRequest | null;
+  /** Current interaction. A prewarmed popup returns null until assigned. */
+  interaction: InteractionRequest | null;
   theme: ThemeMode;
   alwaysOnTop: boolean;
   sourceName: string;

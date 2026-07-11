@@ -12,12 +12,13 @@ pub use codec::{read_msg, write_msg};
 
 use crate::daemon::lifecycle::Fingerprint;
 use crate::models::{
-    AskRequest, ChannelAction, MessagePrompt, OutputFormat, Question, QuestionAnswer,
+    ChannelAction, ConfirmFallbackReason, ConfirmResult, ConfirmSpec, InteractionRequest,
+    MessagePrompt, OutputFormat, Question, QuestionAnswer,
 };
 use serde::{Deserialize, Serialize};
 
 /// IPC 协议版本：不兼容变更时 +1，握手不一致即触发换新。
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// CLI/GUI 连接时的握手信息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +131,27 @@ pub struct TaskRequest {
     pub perf_autodismiss: bool,
 }
 
+/// Hidden PermissionRequest hook → daemon confirmation task. The daemon owns request ids and
+/// deadlines, so this wire payload carries only the validated semantic spec and caller context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmTask {
+    pub spec: ConfirmSpec,
+    /// Caller source label used by popup/IM headers.
+    pub source: String,
+    /// Resolved UI language ("en" / "zh").
+    pub lang: String,
+    /// Workspace path/key shown to the human and used for agent association.
+    pub project: String,
+    /// Permission hooks are supported for claude/codex only.
+    pub agent_kind: String,
+    /// Native agent session id from the hook input.
+    pub agent_session_id: String,
+    /// Hook process pid; daemon may asynchronously resolve the owning agent process.
+    #[serde(default)]
+    pub caller_pid: u32,
+}
+
 /// 自动识别 userId/open_id 请求（设置进程 → Daemon，Q6）：用表单当前凭据，
 /// 等用户私聊机器人发送识别码后返回其 id。Daemon 若已有同 `app_key` 的活动长连接则**观察现有连接**
 /// （零冲突），否则自行临时开一条连接完成识别。
@@ -195,8 +217,8 @@ pub struct TrayAgentInfo {
 #[serde(rename_all = "camelCase")]
 pub struct ShowPayload {
     pub request_id: String,
-    /// 完整请求（含 Daemon 分配的 id），供弹窗渲染。
-    pub request: AskRequest,
+    /// Complete daemon-owned interaction, discriminated for popup rendering.
+    pub interaction: InteractionRequest,
     /// 调用方来源名（弹窗标题「Question from {source}」）。
     pub source: String,
     /// 界面语言（"en" / "zh"）。
@@ -239,6 +261,8 @@ pub enum ClientMsg {
     },
     /// CLI 提交一次提问任务（握手后发送）。
     Submit(TaskRequest),
+    /// Hidden PermissionRequest hook submits a structured confirmation.
+    SubmitConfirm(ConfirmTask),
     /// GUI Helper 握手：出示 Daemon 下发的一次性 token。
     GuiHello { token: String },
     /// 预热 GUI Helper 握手（方案6）：由 daemon 以 `--popup --warm` 拉起的进程在建好隐藏窗 + 挂载前端后
@@ -254,6 +278,16 @@ pub enum ClientMsg {
         #[serde(default)]
         answers: Vec<QuestionAnswer>,
     },
+    /// GUI Helper submits a structured confirmation choice. `choice_index` is mapped through the
+    /// daemon-owned request ledger; GUI-provided action ids are never accepted.
+    ConfirmAnswer {
+        request_id: String,
+        choice_index: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        comment: Option<String>,
+    },
+    /// GUI reports readiness only after the confirmation view has completed its first paint.
+    ConfirmReady { request_id: String },
     /// Agent 生命周期事件上报（`AskHuman __agent-hook <agent> <event>` → daemon，spec D20）。
     /// 即发即走、不等回包；daemon 据此更新注册表。
     AgentEvent {
@@ -367,6 +401,10 @@ pub enum ServerMsg {
     Accepted {
         request_id: String,
     },
+    /// Structured confirmation accepted by the daemon.
+    ConfirmAccepted {
+        request_id: String,
+    },
     /// 流式警告 / 诊断 → CLI 的 stderr（D→CLI）。
     Warn {
         text: String,
@@ -375,6 +413,14 @@ pub enum ServerMsg {
     Final {
         stdout: String,
         exit_code: i32,
+    },
+    /// A human decision won the structured confirmation race.
+    ConfirmFinal {
+        result: ConfirmResult,
+    },
+    /// No human decision was produced; caller must return to its native approval flow.
+    ConfirmFallback {
+        reason: ConfirmFallbackReason,
     },
     /// 自动识别成功，回带识别出的 userId/open_id（D→设置进程，Q6）。失败用 `Error`。
     Detected {
@@ -467,11 +513,85 @@ pub enum ServerMsg {
 mod tests {
     use super::*;
 
+    fn confirm_task() -> ConfirmTask {
+        ConfirmTask {
+            spec: crate::models::ConfirmSpec {
+                title: "Approve?".into(),
+                context: vec![],
+                detail: crate::models::ConfirmDetail {
+                    summary: "Run command".into(),
+                    body_md: String::new(),
+                },
+                choices: vec![
+                    crate::models::ConfirmChoice {
+                        id: "approve_once".into(),
+                        label: "Approve once".into(),
+                        description: String::new(),
+                        role: crate::confirm::ActionRole::Primary,
+                    },
+                    crate::models::ConfirmChoice {
+                        id: "deny".into(),
+                        label: "Deny".into(),
+                        description: String::new(),
+                        role: crate::confirm::ActionRole::Destructive,
+                    },
+                ],
+                presentation: crate::models::ConfirmPresentation::SingleSelectSubmit {
+                    input: None,
+                    submit_label: "Submit".into(),
+                    default_action_id: None,
+                },
+                dismiss_action_id: "deny".into(),
+            },
+            source: "Claude Code".into(),
+            lang: "en".into(),
+            project: "/tmp/project".into(),
+            agent_kind: "claude".into(),
+            agent_session_id: "session-1".into(),
+            caller_pid: 42,
+        }
+    }
+
     /// 旧 CLI 发的 `{"type":"stop"}`（无 force 字段）→ force 默认 false。
     #[test]
     fn stop_without_force_defaults_false() {
         let msg: ClientMsg = serde_json::from_str(r#"{"type":"stop"}"#).unwrap();
         assert!(matches!(msg, ClientMsg::Stop { force: false }));
+    }
+
+    #[test]
+    fn confirm_messages_roundtrip_without_action_ids_from_gui() {
+        let task = ClientMsg::SubmitConfirm(confirm_task());
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(json.contains(r#""type":"submitConfirm""#));
+        assert!(!json.contains("expiresAtMs"));
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(&json).unwrap(),
+            ClientMsg::SubmitConfirm(_)
+        ));
+
+        let answer = ClientMsg::ConfirmAnswer {
+            request_id: "r1".into(),
+            choice_index: 1,
+            comment: Some("unsafe".into()),
+        };
+        let json = serde_json::to_string(&answer).unwrap();
+        assert!(json.contains(r#""choice_index":1"#));
+        assert!(!json.contains("action_id"));
+
+        let final_msg = ServerMsg::ConfirmFinal {
+            result: ConfirmResult {
+                action_id: "deny".into(),
+                comment: Some("unsafe".into()),
+                source_channel_id: "popup".into(),
+            },
+        };
+        let json = serde_json::to_string(&final_msg).unwrap();
+        assert!(json.contains(r#""type":"confirmFinal""#));
+        assert!(matches!(
+            serde_json::from_str::<ServerMsg>(&json).unwrap(),
+            ServerMsg::ConfirmFinal { .. }
+        ));
     }
 
     /// 新 CLI 发的带 force 字段可正常解析；序列化形态含 force。

@@ -234,6 +234,419 @@ pub struct ChannelResult {
     pub source_channel_id: String,
 }
 
+// MARK: - Structured confirmations
+
+/// Stable semantic kind for a confirmation context field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConfirmFieldKind {
+    Text,
+    Path,
+    Timestamp,
+}
+
+/// A required, independently rendered piece of confirmation context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmField {
+    pub id: String,
+    pub label: String,
+    pub value: String,
+    pub kind: ConfirmFieldKind,
+}
+
+/// Human-readable confirmation detail. `summary` is always preserved while `body_md` may be
+/// budgeted by individual channel renderers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmDetail {
+    pub summary: String,
+    #[serde(default)]
+    pub body_md: String,
+}
+
+/// One stable action exposed by a structured confirmation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmChoice {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+    pub role: crate::confirm::ActionRole,
+}
+
+/// Optional input shown only while one action is selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmInput {
+    pub id: String,
+    pub visible_when_action_id: String,
+    pub label: String,
+    #[serde(default)]
+    pub placeholder: String,
+    pub max_chars: usize,
+}
+
+/// Presentation contract for the first structured confirmation surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ConfirmPresentation {
+    SingleSelectSubmit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<ConfirmInput>,
+        submit_label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_action_id: Option<String>,
+    },
+}
+
+impl ConfirmPresentation {
+    pub fn input(&self) -> Option<&ConfirmInput> {
+        match self {
+            Self::SingleSelectSubmit { input, .. } => input.as_ref(),
+        }
+    }
+
+    pub fn submit_label(&self) -> &str {
+        match self {
+            Self::SingleSelectSubmit { submit_label, .. } => submit_label,
+        }
+    }
+
+    pub fn default_action_id(&self) -> Option<&str> {
+        match self {
+            Self::SingleSelectSubmit {
+                default_action_id, ..
+            } => default_action_id.as_deref(),
+        }
+    }
+}
+
+/// Caller-supplied semantic confirmation. It deliberately contains no request id or deadline;
+/// those are assigned by the daemon after validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmSpec {
+    pub title: String,
+    #[serde(default)]
+    pub context: Vec<ConfirmField>,
+    pub detail: ConfirmDetail,
+    pub choices: Vec<ConfirmChoice>,
+    pub presentation: ConfirmPresentation,
+    pub dismiss_action_id: String,
+}
+
+/// Daemon-owned structured confirmation request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmRequest {
+    pub id: String,
+    pub title: String,
+    pub context: Vec<ConfirmField>,
+    pub detail: ConfirmDetail,
+    pub choices: Vec<ConfirmChoice>,
+    pub presentation: ConfirmPresentation,
+    pub dismiss_action_id: String,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+/// Shared envelope for surfaces that can render either a question or a structured confirmation.
+/// The two business protocols remain independent; this enum only unifies delivery and display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "request", rename_all = "camelCase")]
+pub enum InteractionRequest {
+    Ask(AskRequest),
+    Confirm(ConfirmRequest),
+}
+
+impl InteractionRequest {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Ask(request) => &request.id,
+            Self::Confirm(request) => &request.id,
+        }
+    }
+
+    pub fn ask(&self) -> Option<&AskRequest> {
+        match self {
+            Self::Ask(request) => Some(request),
+            Self::Confirm(_) => None,
+        }
+    }
+
+    pub fn confirm(&self) -> Option<&ConfirmRequest> {
+        match self {
+            Self::Ask(_) => None,
+            Self::Confirm(request) => Some(request),
+        }
+    }
+}
+
+/// A validated terminal choice. `action_id` is resolved from the daemon-owned choice ledger, not
+/// accepted from a channel callback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmResult {
+    pub action_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    pub source_channel_id: String,
+}
+
+/// Stable reasons for returning no human decision to a confirmation caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConfirmFallbackReason {
+    NoAvailableChannel,
+    Expired,
+    InvalidRequest,
+    Draining,
+    InternalError,
+}
+
+/// Channel delivery state for a structured confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmDeliveryState {
+    Starting,
+    Ready { message_id: String },
+    Failed { reason: String },
+    Terminal,
+}
+
+/// Shared visual choice form used by Ask and Confirm adapters. It contains presentation data only;
+/// business results still use the independent Ask/Confirm protocols.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceFormView {
+    pub options: Vec<ChoiceFormOption>,
+    pub single: bool,
+    pub submit_label: String,
+    pub default_index: Option<usize>,
+    pub input: Option<ChoiceFormInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceFormOption {
+    pub wire_index: usize,
+    pub label: String,
+    pub description: String,
+    pub role: crate::confirm::ActionRole,
+    pub recommended: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceFormInput {
+    pub id: String,
+    pub visibility: ChoiceFormInputVisibility,
+    pub label: String,
+    pub placeholder: String,
+    pub max_chars: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChoiceFormInputVisibility {
+    Always,
+    WhenIndex(usize),
+}
+
+impl ChoiceFormView {
+    pub fn from_ask(request: &AskRequest, submit_label: impl Into<String>) -> Vec<Self> {
+        let submit_label = submit_label.into();
+        request
+            .questions
+            .iter()
+            .enumerate()
+            .map(|(question_index, question)| Self {
+                options: question
+                    .predefined_options
+                    .iter()
+                    .enumerate()
+                    .map(|(wire_index, option)| ChoiceFormOption {
+                        wire_index,
+                        label: option.text.clone(),
+                        description: String::new(),
+                        role: crate::confirm::ActionRole::Default,
+                        recommended: option.recommended,
+                    })
+                    .collect(),
+                single: request.single,
+                submit_label: submit_label.clone(),
+                default_index: None,
+                input: (!request.select_only).then(|| ChoiceFormInput {
+                    id: format!("ask_input_{question_index}"),
+                    visibility: ChoiceFormInputVisibility::Always,
+                    label: String::new(),
+                    placeholder: String::new(),
+                    max_chars: usize::MAX,
+                }),
+            })
+            .collect()
+    }
+}
+
+impl ConfirmSpec {
+    /// Validate the stable contract before a daemon request id or deadline is allocated.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.title.trim().is_empty() {
+            return Err("confirm title must not be empty".to_string());
+        }
+        if self.detail.summary.trim().is_empty() {
+            return Err("confirm summary must not be empty".to_string());
+        }
+        if self.choices.len() < 2 {
+            return Err("confirm requires at least two choices".to_string());
+        }
+
+        let mut choice_ids = std::collections::HashSet::new();
+        for choice in &self.choices {
+            if choice.id.trim().is_empty() || choice.label.trim().is_empty() {
+                return Err("confirm choice id and label must not be empty".to_string());
+            }
+            if !choice_ids.insert(choice.id.as_str()) {
+                return Err(format!("duplicate confirm choice id: {}", choice.id));
+            }
+        }
+        if !choice_ids.contains(self.dismiss_action_id.as_str()) {
+            return Err("dismiss action must reference a confirm choice".to_string());
+        }
+        if let Some(default_id) = self.presentation.default_action_id() {
+            if !choice_ids.contains(default_id) {
+                return Err("default action must reference a confirm choice".to_string());
+            }
+        }
+        if let Some(input) = self.presentation.input() {
+            if input.id.trim().is_empty() || input.max_chars == 0 {
+                return Err("confirm input requires an id and positive max_chars".to_string());
+            }
+            if !choice_ids.contains(input.visible_when_action_id.as_str()) {
+                return Err("confirm input action must reference a confirm choice".to_string());
+            }
+        }
+
+        let mut field_ids = std::collections::HashSet::new();
+        for field in &self.context {
+            if field.id.trim().is_empty()
+                || field.label.trim().is_empty()
+                || field.value.trim().is_empty()
+            {
+                return Err("confirm context fields must be complete".to_string());
+            }
+            if !field_ids.insert(field.id.as_str()) {
+                return Err(format!("duplicate confirm context id: {}", field.id));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn into_request(
+        self,
+        id: String,
+        created_at_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<ConfirmRequest, String> {
+        self.validate()?;
+        if id.trim().is_empty() {
+            return Err("confirm request id must not be empty".to_string());
+        }
+        if expires_at_ms <= created_at_ms {
+            return Err("confirm expiry must be after creation".to_string());
+        }
+        Ok(ConfirmRequest {
+            id,
+            title: self.title,
+            context: self.context,
+            detail: self.detail,
+            choices: self.choices,
+            presentation: self.presentation,
+            dismiss_action_id: self.dismiss_action_id,
+            created_at_ms,
+            expires_at_ms,
+        })
+    }
+}
+
+impl ConfirmRequest {
+    pub fn choice_form_view(&self) -> ChoiceFormView {
+        let default_index = self
+            .presentation
+            .default_action_id()
+            .and_then(|id| self.choices.iter().position(|c| c.id == id));
+        let input = self.presentation.input().and_then(|input| {
+            self.choices
+                .iter()
+                .position(|c| c.id == input.visible_when_action_id)
+                .map(|visible_when_index| ChoiceFormInput {
+                    id: input.id.clone(),
+                    visibility: ChoiceFormInputVisibility::WhenIndex(visible_when_index),
+                    label: input.label.clone(),
+                    placeholder: input.placeholder.clone(),
+                    max_chars: input.max_chars,
+                })
+        });
+        ChoiceFormView {
+            options: self
+                .choices
+                .iter()
+                .enumerate()
+                .map(|(wire_index, choice)| ChoiceFormOption {
+                    wire_index,
+                    label: choice.label.clone(),
+                    description: choice.description.clone(),
+                    role: choice.role,
+                    recommended: false,
+                })
+                .collect(),
+            single: true,
+            submit_label: self.presentation.submit_label().to_string(),
+            default_index,
+            input,
+        }
+    }
+
+    /// Resolve a channel wire index into a stable action id and enforce conditional input rules.
+    pub fn resolve_submission(
+        &self,
+        choice_index: usize,
+        comment: Option<String>,
+        source_channel_id: impl Into<String>,
+    ) -> Result<ConfirmResult, String> {
+        let choice = self
+            .choices
+            .get(choice_index)
+            .ok_or_else(|| "confirm choice index out of range".to_string())?;
+        let comment = match self.presentation.input() {
+            Some(input) if input.visible_when_action_id == choice.id => {
+                let value = comment.unwrap_or_default().trim().to_string();
+                if value.chars().count() > input.max_chars {
+                    return Err(format!(
+                        "confirm input exceeds {} characters",
+                        input.max_chars
+                    ));
+                }
+                (!value.is_empty()).then_some(value)
+            }
+            _ => None,
+        };
+        let source_channel_id = source_channel_id.into();
+        if source_channel_id.trim().is_empty() {
+            return Err("confirm result requires a source channel".to_string());
+        }
+        Ok(ConfirmResult {
+            action_id: choice.id.clone(),
+            comment,
+            source_channel_id,
+        })
+    }
+
+    pub fn dismiss_index(&self) -> usize {
+        self.choices
+            .iter()
+            .position(|choice| choice.id == self.dismiss_action_id)
+            .expect("validated confirm request must contain dismiss action")
+    }
+}
+
 impl ChannelResult {
     pub fn cancel(source_channel_id: impl Into<String>) -> Self {
         Self {
@@ -302,5 +715,143 @@ mod tests {
             q.predefined_options,
             vec![OptionItem::new("A", false), OptionItem::new("B", true)]
         );
+    }
+
+    fn confirm_spec() -> ConfirmSpec {
+        ConfirmSpec {
+            title: "Permission request".into(),
+            context: vec![ConfirmField {
+                id: "agent".into(),
+                label: "Agent".into(),
+                value: "Claude Code".into(),
+                kind: ConfirmFieldKind::Text,
+            }],
+            detail: ConfirmDetail {
+                summary: "Run a command".into(),
+                body_md: "```sh\ngit status\n```".into(),
+            },
+            choices: vec![
+                ConfirmChoice {
+                    id: "approve_once".into(),
+                    label: "Approve once".into(),
+                    description: String::new(),
+                    role: crate::confirm::ActionRole::Primary,
+                },
+                ConfirmChoice {
+                    id: "deny".into(),
+                    label: "Deny".into(),
+                    description: String::new(),
+                    role: crate::confirm::ActionRole::Destructive,
+                },
+            ],
+            presentation: ConfirmPresentation::SingleSelectSubmit {
+                input: Some(ConfirmInput {
+                    id: "reason".into(),
+                    visible_when_action_id: "deny".into(),
+                    label: "Reason".into(),
+                    placeholder: String::new(),
+                    max_chars: 1000,
+                }),
+                submit_label: "Submit".into(),
+                default_action_id: None,
+            },
+            dismiss_action_id: "deny".into(),
+        }
+    }
+
+    #[test]
+    fn confirm_spec_validates_stable_ids() {
+        assert!(confirm_spec().validate().is_ok());
+
+        let mut duplicate = confirm_spec();
+        duplicate.choices[1].id = "approve_once".into();
+        assert!(duplicate.validate().unwrap_err().contains("duplicate"));
+
+        let mut bad_input = confirm_spec();
+        match &mut bad_input.presentation {
+            ConfirmPresentation::SingleSelectSubmit { input, .. } => {
+                input.as_mut().unwrap().visible_when_action_id = "missing".into();
+            }
+        }
+        assert!(bad_input.validate().unwrap_err().contains("input action"));
+    }
+
+    #[test]
+    fn daemon_owned_confirm_fields_are_added_after_validation() {
+        let request = confirm_spec()
+            .into_request("req-1".into(), 1_000, 2_000)
+            .unwrap();
+        assert_eq!(request.id, "req-1");
+        assert_eq!(request.created_at_ms, 1_000);
+        assert_eq!(request.expires_at_ms, 2_000);
+        assert_eq!(request.dismiss_index(), 1);
+        assert_eq!(request.choice_form_view().default_index, None);
+        assert_eq!(
+            request.choice_form_view().input.unwrap().visibility,
+            ChoiceFormInputVisibility::WhenIndex(1)
+        );
+    }
+
+    #[test]
+    fn ask_adapts_to_choice_form_without_changing_public_models() {
+        let mut request = AskRequest::new(
+            MessagePrompt::default(),
+            vec![Question {
+                message: "Pick one".into(),
+                predefined_options: vec![OptionItem::new("A", true), OptionItem::new("B", false)],
+            }],
+            false,
+        );
+        request.single = true;
+        let forms = ChoiceFormView::from_ask(&request, "Submit");
+        assert_eq!(forms.len(), 1);
+        assert!(forms[0].single);
+        assert!(forms[0].options[0].recommended);
+        assert_eq!(
+            forms[0].input.as_ref().unwrap().visibility,
+            ChoiceFormInputVisibility::Always
+        );
+        assert_eq!(forms[0].options[1].wire_index, 1);
+    }
+
+    #[test]
+    fn confirm_submission_maps_wire_index_and_limits_comment() {
+        let request = confirm_spec()
+            .into_request("req-1".into(), 1_000, 2_000)
+            .unwrap();
+
+        let approve = request
+            .resolve_submission(0, Some("must be discarded".into()), "popup")
+            .unwrap();
+        assert_eq!(approve.action_id, "approve_once");
+        assert_eq!(approve.comment, None);
+
+        let deny = request
+            .resolve_submission(1, Some("  unsafe  ".into()), "feishu")
+            .unwrap();
+        assert_eq!(deny.action_id, "deny");
+        assert_eq!(deny.comment.as_deref(), Some("unsafe"));
+
+        assert!(request
+            .resolve_submission(2, None, "popup")
+            .unwrap_err()
+            .contains("out of range"));
+        assert!(request
+            .resolve_submission(1, Some("x".repeat(1001)), "popup")
+            .unwrap_err()
+            .contains("exceeds"));
+    }
+
+    #[test]
+    fn confirm_wire_roundtrip_uses_camel_case() {
+        let request = confirm_spec()
+            .into_request("req-1".into(), 1_000, 2_000)
+            .unwrap();
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""createdAtMs":1000"#));
+        assert!(json.contains(r#""visibleWhenActionId":"deny""#));
+        assert!(json.contains(r#""type":"singleSelectSubmit""#));
+        let back: ConfirmRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, request);
     }
 }

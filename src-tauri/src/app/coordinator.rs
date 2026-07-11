@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::terminal_gate::FirstTerminalGate;
+
 /// 收尾窗口上限：超过即强制退出，保证进程不会因某端收尾卡住而挂起。
 /// 事件驱动为主（落败端收尾完成即提前退出），此上限仅为兜底；取值偏宽以容忍
 /// 跨网络编辑卡片（如代理下访问 Telegram）较慢的情况。
@@ -32,6 +34,7 @@ pub enum Exiter {
 
 pub struct Coordinator {
     inner: Mutex<Inner>,
+    terminal: FirstTerminalGate<()>,
     /// 结果渲染 / 收尾文案使用的界面语言（Daemon 模式为调用方上送的 lang；单进程为 `Lang::current()`）。
     lang: Lang,
     /// 当前项目 key（用于回复历史归类；可空）。
@@ -56,7 +59,6 @@ pub struct Coordinator {
 }
 
 struct Inner {
-    finished: bool,
     exiter: Exiter,
     request: AskRequest,
     channels: Vec<Arc<dyn Channel>>,
@@ -136,12 +138,12 @@ impl Coordinator {
     ) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(Inner {
-                finished: false,
                 exiter,
                 request,
                 channels: Vec::new(),
                 headless,
             }),
+            terminal: FirstTerminalGate::new(),
             lang,
             project,
             source,
@@ -185,12 +187,11 @@ impl Coordinator {
 
     /// 投递终态结果：仅首个生效；随后取消其余 Channel 并启动收尾窗口，到时输出并退出。
     pub fn submit(self: &Arc<Self>, result: ChannelResult) {
+        if !self.terminal.try_set(()) {
+            return;
+        }
         let (exiter, pending_count) = {
-            let mut inner = self.inner.lock().unwrap();
-            if inner.finished {
-                return;
-            }
-            inner.finished = true;
+            let inner = self.inner.lock().unwrap();
             // 进入收尾：此后 GUI 拦下关窗退出，独占由协调器主动 `app.exit`。
             self.finalizing.store(true, Ordering::SeqCst);
             let source = result.source_channel_id.clone();
@@ -266,11 +267,10 @@ impl Coordinator {
     /// Unlike `submit`, this does not render or deliver a result (no one is waiting). No-op if a
     /// result was already submitted. `source` is the localized cancel source ("Caller"; empty = generic).
     pub fn cancel_request(&self, source: String) {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.finished {
+        if !self.terminal.try_set(()) {
             return;
         }
-        inner.finished = true;
+        let inner = self.inner.lock().unwrap();
         let reason = Interruption::Cancelled(source);
         match &inner.headless {
             Some((preempt, _)) => preempt.interrupt(reason),

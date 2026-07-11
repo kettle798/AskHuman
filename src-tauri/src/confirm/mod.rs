@@ -8,11 +8,13 @@
 pub mod transport;
 
 use crate::i18n::{self, Lang};
+use serde::{Deserialize, Serialize};
 
 // ─── Generic model ──────────────────────────────────────────────────────────
 
 /// Visual emphasis role for a confirm action button.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ActionRole {
     /// Blue / primary emphasis — the positive or default-recommended action.
     Primary,

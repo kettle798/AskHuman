@@ -60,6 +60,13 @@ export default {
       keep: "继续作答",
       confirm: "确定取消",
     },
+    confirmClose: {
+      title: "关闭并拒绝这次权限请求？",
+      desc: "关闭代表明确拒绝，Agent 将收到 deny 决定。",
+      descWithReason: "关闭代表明确拒绝，当前填写的原因会随 deny 决定一并发送。",
+      keep: "返回权限请求",
+      deny: "关闭并拒绝",
+    },
     speech: {
       start: "语音输入",
       stop: "停止语音输入",

@@ -56,6 +56,13 @@ export const popupShowWindow = () => invoke<void>("popup_show_window");
 export const submitPopup = (submission: PopupSubmission) =>
   invoke<void>("submit_popup", { submission });
 
+export const submitConfirmAction = (
+  choiceIndex: number,
+  comment?: string | null
+) => invoke<void>("submit_confirm_action", { choiceIndex, comment });
+
+export const confirmPopupReady = () => invoke<void>("confirm_popup_ready");
+
 export const cancelPopup = () => invoke<void>("cancel_popup");
 
 export const openPath = (path: string) => invoke<void>("open_path", { path });

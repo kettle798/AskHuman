@@ -63,6 +63,14 @@ export default {
       keep: "Keep answering",
       confirm: "Discard",
     },
+    confirmClose: {
+      title: "Close and deny this permission request?",
+      desc: "Closing is an explicit denial. The agent will receive a deny decision.",
+      descWithReason:
+        "Closing is an explicit denial. Your current reason will be sent with the deny decision.",
+      keep: "Return to request",
+      deny: "Close and deny",
+    },
     speech: {
       start: "Voice input",
       stop: "Stop voice input",

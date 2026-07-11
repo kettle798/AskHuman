@@ -3,12 +3,13 @@
 //! Phase 1 仅挂 popup adapter：提交时建 Coordinator（Ipc 退出）、注册弹窗 adapter、分配一次性 token；
 //! GUI Helper 连上后凭 token 找到该请求、收 `show`、回 `answer`。IM 渠道在 Phase 2 接入。
 
+use crate::app::confirm_coordinator::{ConfirmCoordinator, ConfirmOutcome};
 use crate::app::coordinator::Coordinator;
 use crate::app::RenderOutcome;
 use crate::channels::popup::GuiHelperPopupChannel;
 use crate::i18n::Lang;
-use crate::ipc::{PendingRequestInfo, ServerMsg, ShowPayload, TaskRequest};
-use crate::models::AskRequest;
+use crate::ipc::{ConfirmTask, PendingRequestInfo, ServerMsg, ShowPayload, TaskRequest};
+use crate::models::{AskRequest, ConfirmDeliveryState, ConfirmRequest, InteractionRequest};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,9 +54,142 @@ pub struct RequestEntry {
     pub final_tx: UnboundedSender<RenderOutcome>,
 }
 
+impl RequestEntry {
+    pub fn request(&self) -> &AskRequest {
+        self.show
+            .interaction
+            .ask()
+            .expect("ask entry must carry an ask interaction")
+    }
+}
+
+/// A structured confirmation entry. Popup/IM transport fields are added independently from Ask so
+/// the existing Ask output/history contract remains untouched while both live in one registry.
+pub struct ConfirmEntry {
+    pub request_id: String,
+    pub seq: u64,
+    pub token: String,
+    pub coordinator: Arc<ConfirmCoordinator>,
+    pub request: Arc<ConfirmRequest>,
+    pub show: ShowPayload,
+    pub source: String,
+    pub lang: String,
+    pub project: String,
+    pub agent_kind: String,
+    pub agent_session_id: String,
+    pub caller_pid: u32,
+    /// Monotonic authority for the fixed confirmation lifetime.
+    pub deadline: tokio::time::Instant,
+    pub delivery: Mutex<HashMap<String, ConfirmDeliveryState>>,
+    pub gui: GuiSlot,
+    pub gui_connected: AtomicBool,
+    pub cancel: Arc<Notify>,
+}
+
+#[derive(Clone)]
+pub enum InteractionEntry {
+    Ask(Arc<RequestEntry>),
+    Confirm(Arc<ConfirmEntry>),
+}
+
+impl InteractionEntry {
+    pub fn request_id(&self) -> &str {
+        match self {
+            Self::Ask(entry) => &entry.request_id,
+            Self::Confirm(entry) => &entry.request_id,
+        }
+    }
+
+    pub fn token(&self) -> &str {
+        match self {
+            Self::Ask(entry) => &entry.token,
+            Self::Confirm(entry) => &entry.token,
+        }
+    }
+
+    pub fn show(&self) -> &ShowPayload {
+        match self {
+            Self::Ask(entry) => &entry.show,
+            Self::Confirm(entry) => &entry.show,
+        }
+    }
+}
+
+impl ConfirmEntry {
+    pub fn start_delivery(&self, channel_id: impl Into<String>) {
+        self.delivery
+            .lock()
+            .unwrap()
+            .entry(channel_id.into())
+            .or_insert(ConfirmDeliveryState::Starting);
+    }
+
+    /// Mark a surface ready only while it is still Starting. A success arriving after timeout is
+    /// deliberately rejected so a late popup/card cannot revive a failed request.
+    pub fn mark_ready(&self, channel_id: &str, message_id: String) -> bool {
+        let mut delivery = self.delivery.lock().unwrap();
+        let Some(state) = delivery.get_mut(channel_id) else {
+            return false;
+        };
+        if !matches!(state, ConfirmDeliveryState::Starting) {
+            return false;
+        }
+        *state = ConfirmDeliveryState::Ready { message_id };
+        true
+    }
+
+    pub fn is_ready(&self, channel_id: &str) -> bool {
+        matches!(
+            self.delivery.lock().unwrap().get(channel_id),
+            Some(ConfirmDeliveryState::Ready { .. })
+        )
+    }
+
+    pub fn mark_starting_failed(&self, channel_id: &str, reason: impl Into<String>) -> bool {
+        let mut delivery = self.delivery.lock().unwrap();
+        let Some(state) = delivery.get_mut(channel_id) else {
+            return false;
+        };
+        if !matches!(state, ConfirmDeliveryState::Starting) {
+            return false;
+        }
+        *state = ConfirmDeliveryState::Failed {
+            reason: reason.into(),
+        };
+        delivery
+            .values()
+            .all(|state| matches!(state, ConfirmDeliveryState::Failed { .. }))
+    }
+
+    /// Mark a candidate failed and return whether no Starting/Ready candidates remain.
+    pub fn mark_failed(&self, channel_id: &str, reason: impl Into<String>) -> bool {
+        let mut delivery = self.delivery.lock().unwrap();
+        let Some(state) = delivery.get_mut(channel_id) else {
+            return false;
+        };
+        if matches!(state, ConfirmDeliveryState::Terminal) {
+            return false;
+        }
+        *state = ConfirmDeliveryState::Failed {
+            reason: reason.into(),
+        };
+        !delivery.is_empty()
+            && delivery
+                .values()
+                .all(|state| matches!(state, ConfirmDeliveryState::Failed { .. }))
+    }
+
+    pub fn mark_deliveries_terminal(&self) {
+        for state in self.delivery.lock().unwrap().values_mut() {
+            *state = ConfirmDeliveryState::Terminal;
+        }
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     by_id: HashMap<String, Arc<RequestEntry>>,
+    confirm_by_id: HashMap<String, Arc<ConfirmEntry>>,
     by_token: HashMap<String, String>,
 }
 
@@ -114,7 +248,7 @@ impl RequestRegistry {
 
         let show = ShowPayload {
             request_id: request_id.clone(),
-            request,
+            interaction: InteractionRequest::Ask(request),
             source: task.source,
             lang: task.lang,
             project: task.project,
@@ -147,11 +281,97 @@ impl RequestRegistry {
         (entry, final_rx)
     }
 
+    /// Build a validated structured confirmation with daemon-owned identity and 24h deadline.
+    pub fn create_confirm(
+        &self,
+        task: ConfirmTask,
+    ) -> Result<(Arc<ConfirmEntry>, UnboundedReceiver<ConfirmOutcome>), String> {
+        const REQUIRED_CONTEXT: [&str; 6] = [
+            "agent",
+            "project",
+            "workspace",
+            "tool",
+            "permission_mode",
+            "created_at",
+        ];
+        for required in REQUIRED_CONTEXT {
+            if !task.spec.context.iter().any(|field| field.id == required) {
+                return Err(format!(
+                    "permission confirmation missing context: {required}"
+                ));
+            }
+        }
+        if !matches!(task.agent_kind.as_str(), "claude" | "codex") {
+            return Err("confirm agent must be claude or codex".to_string());
+        }
+        if task.agent_session_id.trim().is_empty() {
+            return Err("confirm requires an agent session id".to_string());
+        }
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let token = uuid::Uuid::new_v4().to_string();
+        let created_at_ms = crate::perf::now_ms() as u64;
+        const TTL_SECS: u64 = 24 * 60 * 60;
+        let expires_at_ms = created_at_ms.saturating_add(TTL_SECS * 1000);
+        let request = Arc::new(task.spec.into_request(
+            request_id.clone(),
+            created_at_ms,
+            expires_at_ms,
+        )?);
+        let (final_tx, final_rx) = tokio::sync::mpsc::unbounded_channel();
+        let coordinator = ConfirmCoordinator::new(request.clone(), final_tx);
+        let show = ShowPayload {
+            request_id: request_id.clone(),
+            interaction: InteractionRequest::Confirm((*request).clone()),
+            source: task.source.clone(),
+            lang: task.lang.clone(),
+            project: task.project.clone(),
+            agent_kind: Some(task.agent_kind.clone()),
+            agent_pid: None,
+            perf_id: String::new(),
+            perf_autodismiss: false,
+            created_at_ms,
+        };
+        let entry = Arc::new(ConfirmEntry {
+            request_id: request_id.clone(),
+            seq: self.next_seq.fetch_add(1, Ordering::SeqCst),
+            token: token.clone(),
+            coordinator,
+            request,
+            show,
+            source: task.source,
+            lang: task.lang,
+            project: task.project,
+            agent_kind: task.agent_kind,
+            agent_session_id: task.agent_session_id,
+            caller_pid: task.caller_pid,
+            deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(TTL_SECS),
+            delivery: Mutex::new(HashMap::new()),
+            gui: Arc::new(Mutex::new(None)),
+            gui_connected: AtomicBool::new(false),
+            cancel: Arc::new(Notify::new()),
+        });
+        let mut inner = self.inner.lock().unwrap();
+        inner.confirm_by_id.insert(request_id, entry.clone());
+        inner.by_token.insert(token, entry.request_id.clone());
+        Ok((entry, final_rx))
+    }
+
     /// GUI Helper 凭 token 关联请求（token 一次性，关联后即注销）。
-    pub fn attach_gui(&self, token: &str) -> Option<Arc<RequestEntry>> {
+    pub fn attach_gui(&self, token: &str) -> Option<InteractionEntry> {
         let mut inner = self.inner.lock().unwrap();
         let request_id = inner.by_token.remove(token)?;
-        inner.by_id.get(&request_id).cloned()
+        inner
+            .by_id
+            .get(&request_id)
+            .cloned()
+            .map(InteractionEntry::Ask)
+            .or_else(|| {
+                inner
+                    .confirm_by_id
+                    .get(&request_id)
+                    .cloned()
+                    .map(InteractionEntry::Confirm)
+            })
     }
 
     /// 移除请求（结束 / 取消）。
@@ -162,9 +382,17 @@ impl RequestRegistry {
         }
     }
 
+    pub fn remove_confirm(&self, request_id: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(entry) = inner.confirm_by_id.remove(request_id) {
+            inner.by_token.remove(&entry.token);
+        }
+    }
+
     /// 活动请求数（供 status）。
     pub fn active_count(&self) -> usize {
-        self.inner.lock().unwrap().by_id.len()
+        let inner = self.inner.lock().unwrap();
+        inner.by_id.len() + inner.confirm_by_id.len()
     }
 
     /// 当前所有在途请求项的快照（供「补推在途」把已发问题补发到新激活的渠道）。
@@ -191,6 +419,11 @@ impl RequestRegistry {
                 }
             }
         }
+        for entry in inner.confirm_by_id.values() {
+            if entry.caller_pid != 0 && !pids.contains(&entry.caller_pid) {
+                pids.push(entry.caller_pid);
+            }
+        }
         pids
     }
 
@@ -207,32 +440,59 @@ impl RequestRegistry {
                 }
             }
         }
+        for entry in inner.confirm_by_id.values() {
+            if !entry.agent_session_id.is_empty() && !ids.contains(&entry.agent_session_id) {
+                ids.push(entry.agent_session_id.clone());
+            }
+        }
         ids
     }
 
     /// 在途请求摘要（按创建顺序，托盘「待答」子菜单用）：每条 `{id, 预览}`。
     pub fn pending_infos(&self) -> Vec<PendingRequestInfo> {
-        let mut entries: Vec<Arc<RequestEntry>> = {
+        let mut entries: Vec<(u64, PendingRequestInfo)> = {
             let inner = self.inner.lock().unwrap();
-            inner.by_id.values().cloned().collect()
+            inner
+                .by_id
+                .values()
+                .map(|entry| {
+                    (
+                        entry.seq,
+                        PendingRequestInfo {
+                            id: entry.request_id.clone(),
+                            preview: preview_of(entry.request()),
+                        },
+                    )
+                })
+                .chain(inner.confirm_by_id.values().map(|entry| {
+                    (
+                        entry.seq,
+                        PendingRequestInfo {
+                            id: entry.request_id.clone(),
+                            preview: truncate_chars(
+                                &entry.request.detail.summary,
+                                PREVIEW_MAX_CHARS,
+                            ),
+                        },
+                    )
+                }))
+                .collect()
         };
-        entries.sort_by_key(|e| e.seq);
-        entries
-            .iter()
-            .map(|e| PendingRequestInfo {
-                id: e.request_id.clone(),
-                preview: preview_of(&e.show.request),
-            })
-            .collect()
+        entries.sort_by_key(|(seq, _)| *seq);
+        entries.into_iter().map(|(_, info)| info).collect()
     }
 
     /// 聚焦某请求的弹窗：向其 GUI 连接下发 `FocusPopup`。返回是否成功投递（无弹窗连接则 false）。
     pub fn focus_popup(&self, request_id: &str) -> bool {
         let inner = self.inner.lock().unwrap();
-        let Some(entry) = inner.by_id.get(request_id) else {
+        let gui = if let Some(entry) = inner.by_id.get(request_id) {
+            &entry.gui
+        } else if let Some(entry) = inner.confirm_by_id.get(request_id) {
+            &entry.gui
+        } else {
             return false;
         };
-        let Ok(slot) = entry.gui.lock() else {
+        let Ok(slot) = gui.lock() else {
             return false;
         };
         match slot.as_ref() {
@@ -255,13 +515,24 @@ impl RequestRegistry {
             entry.coordinator.cancel_request(String::new());
             entry.cancel.notify_waiters();
         }
-        inner.by_id.len()
+        for entry in inner.confirm_by_id.values() {
+            entry.coordinator.cancel();
+            entry.cancel.notify_waiters();
+        }
+        inner.by_id.len() + inner.confirm_by_id.len()
     }
 
     /// 向所有已连上的活动 GUI Helper 广播一条消息（如 `ConfigChanged` 实时切主题/语言，A12）。
     pub fn broadcast_to_guis(&self, msg: ServerMsg) {
         let inner = self.inner.lock().unwrap();
         for entry in inner.by_id.values() {
+            if let Ok(slot) = entry.gui.lock() {
+                if let Some(tx) = slot.as_ref() {
+                    let _ = tx.send(msg.clone());
+                }
+            }
+        }
+        for entry in inner.confirm_by_id.values() {
             if let Ok(slot) = entry.gui.lock() {
                 if let Some(tx) = slot.as_ref() {
                     let _ = tx.send(msg.clone());
@@ -324,5 +595,109 @@ fn truncate_chars(s: &str, max: usize) -> String {
         format!("{head}…")
     } else {
         head
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::confirm::ActionRole;
+    use crate::models::{
+        ConfirmChoice, ConfirmDetail, ConfirmField, ConfirmFieldKind, ConfirmPresentation,
+        ConfirmSpec,
+    };
+
+    fn confirm_task() -> ConfirmTask {
+        let context = [
+            "agent",
+            "project",
+            "workspace",
+            "tool",
+            "permission_mode",
+            "created_at",
+        ]
+        .into_iter()
+        .map(|id| ConfirmField {
+            id: id.into(),
+            label: id.into(),
+            value: "value".into(),
+            kind: ConfirmFieldKind::Text,
+        })
+        .collect();
+        ConfirmTask {
+            spec: ConfirmSpec {
+                title: "Permission request".into(),
+                context,
+                detail: ConfirmDetail {
+                    summary: "Run command".into(),
+                    body_md: String::new(),
+                },
+                choices: vec![
+                    ConfirmChoice {
+                        id: "approve_once".into(),
+                        label: "Approve once".into(),
+                        description: String::new(),
+                        role: ActionRole::Primary,
+                    },
+                    ConfirmChoice {
+                        id: "deny".into(),
+                        label: "Deny".into(),
+                        description: String::new(),
+                        role: ActionRole::Destructive,
+                    },
+                ],
+                presentation: ConfirmPresentation::SingleSelectSubmit {
+                    input: None,
+                    submit_label: "Submit".into(),
+                    default_action_id: None,
+                },
+                dismiss_action_id: "deny".into(),
+            },
+            source: "Claude Code".into(),
+            lang: "en".into(),
+            project: "/tmp/project".into(),
+            agent_kind: "claude".into(),
+            agent_session_id: "session-1".into(),
+            caller_pid: 42,
+        }
+    }
+
+    #[test]
+    fn permission_context_is_required_before_daemon_identity_is_allocated() {
+        let registry = RequestRegistry::new();
+        let mut task = confirm_task();
+        task.spec.context.retain(|field| field.id != "tool");
+        let error = registry.create_confirm(task).err().unwrap();
+        assert!(error.contains("missing context: tool"));
+        assert_eq!(registry.active_count(), 0);
+    }
+
+    #[test]
+    fn confirm_registry_owns_identity_deadline_and_typed_gui_token() {
+        let registry = RequestRegistry::new();
+        let before = tokio::time::Instant::now();
+        let (entry, _rx) = registry.create_confirm(confirm_task()).unwrap();
+        assert_eq!(entry.request.id, entry.request_id);
+        assert_eq!(
+            entry.request.expires_at_ms - entry.request.created_at_ms,
+            86_400_000
+        );
+        assert!(entry.deadline >= before + std::time::Duration::from_secs(86_399));
+        assert_eq!(registry.in_flight_agent_pids(), vec![42]);
+        assert_eq!(registry.in_flight_agent_session_ids(), vec!["session-1"]);
+        assert!(matches!(
+            registry.attach_gui(&entry.token),
+            Some(InteractionEntry::Confirm(_))
+        ));
+    }
+
+    #[test]
+    fn late_ready_cannot_revive_a_failed_delivery() {
+        let registry = RequestRegistry::new();
+        let (entry, _rx) = registry.create_confirm(confirm_task()).unwrap();
+        entry.start_delivery("popup");
+        assert!(entry.mark_starting_failed("popup", "timeout"));
+        assert!(!entry.mark_ready("popup", String::new()));
+        assert!(!entry.is_ready("popup"));
     }
 }

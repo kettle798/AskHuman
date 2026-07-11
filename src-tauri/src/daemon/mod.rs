@@ -28,9 +28,10 @@ pub fn dispatch(args: &[String]) -> ! {
 mod unix_impl {
     use super::config_watch;
     use super::lifecycle::{self, DaemonMeta, LockGuard};
-    use super::request::{self, RequestEntry, RequestRegistry};
+    use super::request::{self, InteractionEntry, RequestEntry, RequestRegistry};
     use crate::agents::registry::AgentRegistry;
     use crate::agents::{AgentKind, LifecycleEvent};
+    use crate::app::confirm_coordinator::ConfirmOutcome;
     use crate::channels::dingding::DingTalkChannel;
     use crate::channels::feishu::FeishuChannel;
     use crate::channels::slack::SlackChannel;
@@ -42,10 +43,10 @@ mod unix_impl {
     use crate::feishu::router::FsRouter;
     use crate::i18n::Lang;
     use crate::ipc::{
-        self, transport, ClientMsg, DetectRequest, HelloAck, HelloStatus, ServerMsg, StatusInfo,
-        TaskRequest,
+        self, transport, ClientMsg, ConfirmTask, DetectRequest, HelloAck, HelloStatus, ServerMsg,
+        StatusInfo, TaskRequest,
     };
-    use crate::models::{ChannelAction, ChannelResult};
+    use crate::models::{ChannelAction, ChannelResult, ConfirmFallbackReason};
     use crate::slack::router::SlRouter;
     use crate::telegram::router::TgRouter;
     use std::collections::HashMap;
@@ -380,7 +381,7 @@ mod unix_impl {
     /// 热池中一个待命热实例的句柄：`assign` 用于把领用的请求 entry 交给其 holder 任务（`handle_gui_warm`）；
     /// `gui_tx` 仅用于身份比对（热进程自然死亡时判定池中是否仍是本槽）。
     struct WarmSlot {
-        assign: tokio::sync::oneshot::Sender<Arc<request::RequestEntry>>,
+        assign: tokio::sync::oneshot::Sender<InteractionEntry>,
         gui_tx: tokio::sync::mpsc::UnboundedSender<ServerMsg>,
     }
 
@@ -805,6 +806,7 @@ mod unix_impl {
     /// 控制阶段的产物：收到接管型消息（提交 / GUI 握手）或连接关闭。
     enum Control {
         Submit(TaskRequest),
+        SubmitConfirm(ConfirmTask),
         Gui(String),
         /// 方案6 预热弹窗握手：接管连接，入热池待命、等领用。
         GuiWarm,
@@ -832,6 +834,7 @@ mod unix_impl {
 
         match control_loop(&mut reader, &mut w, &state).await {
             Control::Submit(task) => handle_submit(task, reader, w, &state).await,
+            Control::SubmitConfirm(task) => handle_submit_confirm(task, reader, w, &state).await,
             Control::Gui(token) => handle_gui(token, reader, w, &state).await,
             Control::GuiWarm => handle_gui_warm(reader, w, &state).await,
             Control::AgentsSub => handle_agents_sub(reader, w, &state).await,
@@ -948,6 +951,7 @@ mod unix_impl {
                     return Control::Closed;
                 }
                 ClientMsg::Submit(task) => return Control::Submit(task),
+                ClientMsg::SubmitConfirm(task) => return Control::SubmitConfirm(task),
                 ClientMsg::GuiHello { token } => return Control::Gui(token),
                 // 方案6 预热弹窗握手（无 token）：接管连接入热池待命。
                 ClientMsg::GuiWarmReady => return Control::GuiWarm,
@@ -1122,7 +1126,9 @@ mod unix_impl {
                     }
                 }
                 // Answer 只应在 GUI 接管阶段出现；控制阶段收到即忽略。
-                ClientMsg::Answer { .. } => {}
+                ClientMsg::Answer { .. }
+                | ClientMsg::ConfirmAnswer { .. }
+                | ClientMsg::ConfirmReady { .. } => {}
             }
         }
     }
@@ -1147,6 +1153,122 @@ mod unix_impl {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         });
+    }
+
+    /// Accept a structured confirmation task and return only a validated terminal decision.
+    /// Surface attachment is layered on top of this lifecycle; until one becomes ready, callers
+    /// receive an explicit fallback and continue with the agent's native approval UI.
+    async fn handle_submit_confirm(
+        task: ConfirmTask,
+        mut reader: Reader,
+        mut w: OwnedWriteHalf,
+        state: &Arc<ServerState>,
+    ) {
+        if state.draining.load(Ordering::SeqCst) {
+            let _ = ipc::write_msg(
+                &mut w,
+                &ServerMsg::ConfirmFallback {
+                    reason: ConfirmFallbackReason::Draining,
+                },
+            )
+            .await;
+            return;
+        }
+
+        let (entry, mut final_rx) = match state.registry.create_confirm(task) {
+            Ok(created) => created,
+            Err(error) => {
+                log(&format!("invalid confirmation request: {error}"));
+                let _ = ipc::write_msg(
+                    &mut w,
+                    &ServerMsg::ConfirmFallback {
+                        reason: ConfirmFallbackReason::InvalidRequest,
+                    },
+                )
+                .await;
+                return;
+            }
+        };
+        let request_id = entry.request_id.clone();
+        if ipc::write_msg(
+            &mut w,
+            &ServerMsg::ConfirmAccepted {
+                request_id: request_id.clone(),
+            },
+        )
+        .await
+        .is_err()
+        {
+            entry.coordinator.cancel();
+            entry.cancel.notify_waiters();
+            state.registry.remove_confirm(&request_id);
+            return;
+        }
+        broadcast_tray_state(state);
+
+        let popup_enabled = state
+            .config
+            .lock()
+            .map(|config| config.channels.popup.enabled)
+            .unwrap_or(false)
+            && has_display();
+        if popup_enabled {
+            entry.start_delivery("popup");
+            if dispatch_interaction_popup(
+                InteractionEntry::Confirm(entry.clone()),
+                state,
+                "",
+                false,
+            ) {
+                spawn_confirm_popup_watchdog(entry.clone());
+            } else if entry.mark_failed("popup", "failed to spawn popup helper") {
+                entry
+                    .coordinator
+                    .fallback(ConfirmFallbackReason::NoAvailableChannel);
+            }
+        } else {
+            entry
+                .coordinator
+                .fallback(ConfirmFallbackReason::NoAvailableChannel);
+        }
+
+        let outcome = tokio::select! {
+            outcome = final_rx.recv() => outcome,
+            _ = tokio::time::sleep_until(entry.deadline) => {
+                entry.coordinator.fallback(ConfirmFallbackReason::Expired);
+                final_rx.recv().await
+            }
+            _ = wait_cli_eof(&mut reader) => {
+                entry.coordinator.cancel();
+                entry.cancel.notify_waiters();
+                state.registry.remove_confirm(&request_id);
+                broadcast_tray_state(state);
+                return;
+            }
+        };
+
+        match outcome {
+            Some(ConfirmOutcome::Final(result)) => {
+                let _ = ipc::write_msg(&mut w, &ServerMsg::ConfirmFinal { result }).await;
+            }
+            Some(ConfirmOutcome::Fallback(reason)) => {
+                let _ = ipc::write_msg(&mut w, &ServerMsg::ConfirmFallback { reason }).await;
+            }
+            None => {
+                let _ = ipc::write_msg(
+                    &mut w,
+                    &ServerMsg::ConfirmFallback {
+                        reason: ConfirmFallbackReason::InternalError,
+                    },
+                )
+                .await;
+            }
+        }
+        entry.mark_deliveries_terminal();
+        entry.cancel.notify_waiters();
+        state.registry.remove_confirm(&request_id);
+        broadcast_tray_state(state);
+        log(&format!("confirmation request {request_id} done"));
     }
 
     /// CLI 提交一次任务：建请求、spawn GUI Helper、流式回结果；CLI 断开则取消。
@@ -1214,7 +1336,7 @@ mod unix_impl {
             &request_id,
             &entry.show.source,
             &entry.show.project,
-            &entry.show.request,
+            entry.request(),
         );
 
         if ipc::write_msg(
@@ -1398,7 +1520,12 @@ mod unix_impl {
                 }
             }
         });
-        serve_gui(entry, reader, gui_tx, writer, state).await;
+        match entry {
+            InteractionEntry::Ask(entry) => serve_gui(entry, reader, gui_tx, writer, state).await,
+            InteractionEntry::Confirm(entry) => {
+                serve_confirm_gui(entry, reader, gui_tx, writer, state).await
+            }
+        }
     }
 
     /// 冷/热弹窗共用的「服务」尾段：登记 `entry.gui` 写端、下发 show、补发 AgentResolved/UpdateState，
@@ -1477,6 +1604,92 @@ mod unix_impl {
         let _ = writer.await;
     }
 
+    /// Structured confirmation popup service. A helper disconnect is a channel failure, never a
+    /// synthetic denial. Readiness is accepted only after the frontend reports its first paint.
+    async fn serve_confirm_gui(
+        entry: Arc<request::ConfirmEntry>,
+        mut reader: Reader,
+        gui_tx: tokio::sync::mpsc::UnboundedSender<ServerMsg>,
+        writer: tokio::task::JoinHandle<()>,
+        state: &Arc<ServerState>,
+    ) {
+        entry.gui_connected.store(true, Ordering::SeqCst);
+        if let Ok(mut slot) = entry.gui.lock() {
+            *slot = Some(gui_tx.clone());
+        }
+        let _ = gui_tx.send(ServerMsg::Show(entry.show.clone()));
+
+        {
+            let update = state.update.lock().unwrap();
+            if update.available || update.pending {
+                let _ = gui_tx.send(ServerMsg::UpdateState {
+                    available: update.available,
+                    latest_version: update.latest_version.clone(),
+                    pending: update.pending,
+                });
+            }
+        }
+
+        let mut failed = false;
+        loop {
+            tokio::select! {
+                msg = ipc::read_msg::<_, ClientMsg>(&mut reader) => {
+                    match msg {
+                        Ok(Some(ClientMsg::ConfirmReady { request_id }))
+                            if request_id == entry.request_id =>
+                        {
+                            if !entry.mark_ready("popup", String::new()) {
+                                failed = true;
+                                break;
+                            }
+                        }
+                        Ok(Some(ClientMsg::ConfirmAnswer {
+                            request_id,
+                            choice_index,
+                            comment,
+                        })) if request_id == entry.request_id => {
+                            if !entry.is_ready("popup") {
+                                log(&format!(
+                                    "confirmation answer arrived before popup ready for {}",
+                                    entry.request_id
+                                ));
+                                continue;
+                            }
+                            match entry.coordinator.submit_wire(
+                                choice_index,
+                                comment,
+                                "popup",
+                            ) {
+                                Ok(_) => break,
+                                Err(error) => log(&format!(
+                                    "invalid popup confirmation answer for {}: {error}",
+                                    entry.request_id
+                                )),
+                            }
+                        }
+                        Ok(Some(_)) => {}
+                        Ok(None) | Err(_) => {
+                            failed = true;
+                            break;
+                        }
+                    }
+                }
+                _ = entry.cancel.notified() => break,
+            }
+        }
+
+        if let Ok(mut slot) = entry.gui.lock() {
+            *slot = None;
+        }
+        if failed && entry.mark_failed("popup", "popup helper disconnected") {
+            entry
+                .coordinator
+                .fallback(ConfirmFallbackReason::NoAvailableChannel);
+        }
+        drop(gui_tx);
+        let _ = writer.await;
+    }
+
     /// 方案6 预热弹窗连接（`--popup --warm` 拉起的进程 → `GuiWarmReady`）：建专用写端、入热池待命，
     /// 等二选一——① `dispatch_popup` 领用并经 `assign` 交来请求 entry → 进入 `serve_gui`；
     /// ② 连接 EOF/holder 死亡 → 清池 + 触发补热。**非保活**（不计入 `active`，同托盘订阅）。
@@ -1496,7 +1709,7 @@ mod unix_impl {
 
         // 入池（恒 ≤1）：池已占说明已有热实例 → 本连接多余，直接关闭退出。
         // 注意：MutexGuard 非 Send，绝不能跨 await 持有 → 用紧作用域块只算出 `occupied` 布尔，再在块外 await。
-        let (assign_tx, assign_rx) = tokio::sync::oneshot::channel::<Arc<request::RequestEntry>>();
+        let (assign_tx, assign_rx) = tokio::sync::oneshot::channel::<InteractionEntry>();
         let occupied = {
             let mut pool = state.warm_pool.lock().unwrap();
             if pool.is_some() {
@@ -1527,9 +1740,14 @@ mod unix_impl {
 
         match assigned {
             // 被领用：与冷路径同尾段（下发 show + 读应答）。
-            Some(entry) => {
-                serve_gui(entry, reader, gui_tx, writer, state).await;
-            }
+            Some(entry) => match entry {
+                InteractionEntry::Ask(entry) => {
+                    serve_gui(entry, reader, gui_tx, writer, state).await
+                }
+                InteractionEntry::Confirm(entry) => {
+                    serve_confirm_gui(entry, reader, gui_tx, writer, state).await
+                }
+            },
             // 热进程死亡 / 被回收：若池中仍是本槽则清空。
             None => {
                 {
@@ -1869,6 +2087,18 @@ mod unix_impl {
         });
     }
 
+    fn spawn_confirm_popup_watchdog(entry: Arc<request::ConfirmEntry>) {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(request::GUI_CONNECT_TIMEOUT_SECS)).await;
+            if entry.mark_starting_failed("popup", "popup did not become ready in time") {
+                entry
+                    .coordinator
+                    .fallback(ConfirmFallbackReason::NoAvailableChannel);
+                entry.cancel.notify_waiters();
+            }
+        });
+    }
+
     /// 取得（必要时惰性建连）钉钉 Router；连接已死则重连。失败返回 None。
     async fn ensure_dd_router(
         state: &Arc<ServerState>,
@@ -2065,7 +2295,7 @@ mod unix_impl {
             return false;
         }
         let config = AppConfig::load();
-        let request = entry.show.request.clone();
+        let request = entry.request().clone();
         let sink = entry.coordinator.clone();
         let mut attached = false;
 
@@ -5906,7 +6136,7 @@ mod unix_impl {
             }
             if let Some(ch) = build_im_channel(channel_id, config, state).await {
                 entry.coordinator.register(ch.clone());
-                ch.start(&entry.show.request, entry.coordinator.clone());
+                ch.start(entry.request(), entry.coordinator.clone());
                 n += 1;
             }
         }
@@ -6995,6 +7225,20 @@ mod unix_impl {
         perf_id: &str,
         perf_autodismiss: bool,
     ) -> bool {
+        dispatch_interaction_popup(
+            InteractionEntry::Ask(entry.clone()),
+            state,
+            perf_id,
+            perf_autodismiss,
+        )
+    }
+
+    fn dispatch_interaction_popup(
+        entry: InteractionEntry,
+        state: &Arc<ServerState>,
+        perf_id: &str,
+        perf_autodismiss: bool,
+    ) -> bool {
         // 取出热池槽（恒 ≤1）。
         let slot = state.warm_pool.lock().unwrap().take();
         if let Some(slot) = slot {
@@ -7012,7 +7256,7 @@ mod unix_impl {
             }
         }
         // 冷路径（兜底，完整保留）。
-        match spawn_gui_helper(&entry.token, perf_id, perf_autodismiss) {
+        match spawn_gui_helper(entry.token(), perf_id, perf_autodismiss) {
             Ok(()) => {
                 crate::perf::mark(perf_id, "dmn.spawned");
                 true

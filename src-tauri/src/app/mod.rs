@@ -1,8 +1,10 @@
 //! Tauri 运行时：创建窗口、并行启动 Channel、汇集结果并退出。
 
+pub mod confirm_coordinator;
 pub mod coordinator;
 #[cfg(unix)]
 pub mod gui_host;
+pub mod terminal_gate;
 #[cfg(unix)]
 pub mod tray_menu;
 
@@ -17,7 +19,7 @@ use crate::config::{AppConfig, ThemeMode, WindowEffect};
 use crate::dingtalk::client::DingTalkClient;
 use crate::feishu::client::FeishuClient;
 use crate::i18n::{self, Lang};
-use crate::models::{AskRequest, ChannelAction, ChannelResult, QuestionAnswer};
+use crate::models::{AskRequest, ChannelAction, ChannelResult, InteractionRequest, QuestionAnswer};
 use crate::slack::client::SlackClient;
 use crate::telegram::TelegramClient;
 use coordinator::Coordinator;
@@ -29,7 +31,7 @@ use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 /// 运行时只读状态：供 popup_init 拉取请求内容与主题。
 pub struct AppState {
-    pub request: AskRequest,
+    pub interaction: InteractionRequest,
     pub config: AppConfig,
     /// 来源名（弹窗标题「Question from {source}」）。Daemon 模式由调用方上送（A11）；
     /// 设置 / 非 Daemon 回退路径取本进程环境。
@@ -44,6 +46,14 @@ pub struct AppState {
     /// 提问创建时刻（epoch 毫秒）：弹窗相对时间的锚点。冷/单进程路径取弹窗构造时刻；GUI helper 取 `Show`
     /// 透传的创建时刻。非弹窗窗口（设置/历史/Agents/GuiHost）不使用，置 0。
     pub created_at_ms: u64,
+}
+
+impl AppState {
+    fn ask_request(&self) -> &AskRequest {
+        self.interaction
+            .ask()
+            .expect("non-daemon popup state must carry an ask request")
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -101,20 +111,11 @@ impl GuiBridge {
         }
     }
 
-    fn terminal(&self, action: ChannelAction, answers: Vec<QuestionAnswer>) {
+    fn terminal(&self, message: crate::ipc::ClientMsg) {
         if self.done.swap(true, Ordering::SeqCst) {
             return;
         }
-        let request_id = self
-            .request_id
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default();
-        let _ = self.tx.send(crate::ipc::ClientMsg::Answer {
-            request_id,
-            action,
-            answers,
-        });
+        let _ = self.tx.send(message);
         // 即时关窗，视觉上与单进程一致（进程随后由 Daemon 关闭连接 / 安全网驱动退出）。
         if let Some(w) = self.app.get_webview_window("popup") {
             let _ = w.close();
@@ -130,12 +131,43 @@ impl GuiBridge {
 
     /// 提交作答。
     pub fn send_answer(&self, answers: Vec<QuestionAnswer>) {
-        self.terminal(ChannelAction::Send, answers);
+        self.terminal(crate::ipc::ClientMsg::Answer {
+            request_id: self.request_id(),
+            action: ChannelAction::Send,
+            answers,
+        });
     }
 
     /// 取消（关窗 / Cmd+Q）。
     pub fn send_cancel(&self) {
-        self.terminal(ChannelAction::Cancel, Vec::new());
+        self.terminal(crate::ipc::ClientMsg::Answer {
+            request_id: self.request_id(),
+            action: ChannelAction::Cancel,
+            answers: Vec::new(),
+        });
+    }
+
+    pub fn send_confirm_answer(&self, choice_index: usize, comment: Option<String>) {
+        self.terminal(crate::ipc::ClientMsg::ConfirmAnswer {
+            request_id: self.request_id(),
+            choice_index,
+            comment,
+        });
+    }
+
+    pub fn send_confirm_ready(&self) {
+        if !self.done.load(Ordering::SeqCst) {
+            let _ = self.tx.send(crate::ipc::ClientMsg::ConfirmReady {
+                request_id: self.request_id(),
+            });
+        }
+    }
+
+    fn request_id(&self) -> String {
+        self.request_id
+            .lock()
+            .map(|id| id.clone())
+            .unwrap_or_default()
     }
 
     /// 是否已进入收尾（已提交/取消）：关窗事件据此放行，避免拦截导致无法真正关窗。
@@ -182,7 +214,11 @@ pub(crate) fn finalize_popup_show(app: &tauri::AppHandle) {
             w.show
                 .lock()
                 .ok()
-                .and_then(|g| g.as_ref().map(|s| s.request.questions.len()))
+                .and_then(|g| {
+                    g.as_ref()
+                        .and_then(|s| s.interaction.ask())
+                        .map(|request| request.questions.len())
+                })
                 .unwrap_or(0)
         } else {
             0
@@ -302,7 +338,7 @@ fn active_messaging_channels(config: &AppConfig) -> Vec<Arc<dyn Channel>> {
 fn run_gui_ask(request: AskRequest, config: AppConfig, messaging_active: bool) -> ! {
     let lang = Lang::resolve(&config.general.language);
     let state = AppState {
-        request: request.clone(),
+        interaction: InteractionRequest::Ask(request.clone()),
         config: config.clone(),
         source: crate::models::source_name(),
         project: crate::project::detect(),
@@ -529,7 +565,11 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
 pub fn run_settings(config: AppConfig) -> ! {
     let lang = Lang::resolve(&config.general.language);
     let state = AppState {
-        request: AskRequest::new(crate::models::MessagePrompt::default(), Vec::new(), false),
+        interaction: InteractionRequest::Ask(AskRequest::new(
+            crate::models::MessagePrompt::default(),
+            Vec::new(),
+            false,
+        )),
         config,
         source: crate::models::source_name(),
         project: crate::project::detect(),
@@ -553,7 +593,11 @@ pub fn run_settings(config: AppConfig) -> ! {
 pub fn run_history(project: String, all: bool, config: AppConfig) -> ! {
     let lang = Lang::resolve(&config.general.language);
     let state = AppState {
-        request: AskRequest::new(crate::models::MessagePrompt::default(), Vec::new(), false),
+        interaction: InteractionRequest::Ask(AskRequest::new(
+            crate::models::MessagePrompt::default(),
+            Vec::new(),
+            false,
+        )),
         config,
         source: crate::models::source_name(),
         project,
@@ -578,7 +622,11 @@ pub fn run_history(project: String, all: bool, config: AppConfig) -> ! {
 pub fn run_agents(config: AppConfig) -> ! {
     let lang = Lang::resolve(&config.general.language);
     let state = AppState {
-        request: AskRequest::new(crate::models::MessagePrompt::default(), Vec::new(), false),
+        interaction: InteractionRequest::Ask(AskRequest::new(
+            crate::models::MessagePrompt::default(),
+            Vec::new(),
+            false,
+        )),
         config,
         source: crate::models::source_name(),
         project: crate::project::detect(),
@@ -608,7 +656,11 @@ pub fn run_gui_host(config: AppConfig) -> ! {
         std::process::exit(0);
     }
     let state = AppState {
-        request: AskRequest::new(crate::models::MessagePrompt::default(), Vec::new(), false),
+        interaction: InteractionRequest::Ask(AskRequest::new(
+            crate::models::MessagePrompt::default(),
+            Vec::new(),
+            false,
+        )),
         config,
         source: crate::models::source_name(),
         project: crate::project::detect(),
@@ -660,7 +712,11 @@ pub fn run_gui_helper(_endpoint: String, token: String, warm: bool) -> ! {
         });
         // 待命态：无请求；source/project/agent 等领用时由 `Show` 注入（见 setup 的 reader 循环）。
         let state = AppState {
-            request: AskRequest::new(crate::models::MessagePrompt::default(), Vec::new(), false),
+            interaction: InteractionRequest::Ask(AskRequest::new(
+                crate::models::MessagePrompt::default(),
+                Vec::new(),
+                false,
+            )),
             config: AppConfig::load_without_secrets(),
             source: String::new(),
             project: String::new(),
@@ -724,7 +780,7 @@ pub fn run_gui_helper(_endpoint: String, token: String, warm: bool) -> ! {
 
     let request_id = show.request_id.clone();
     let state = AppState {
-        request: show.request,
+        interaction: show.interaction,
         // The popup helper never connects to IM (the daemon does); it only needs general/theme/
         // popup-size config. Skip keychain via load_without_secrets().
         config: AppConfig::load_without_secrets(),
@@ -793,6 +849,8 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::popup_agent_resolved,
             crate::commands::popup_show_window,
             crate::commands::submit_popup,
+            crate::commands::submit_confirm_action,
+            crate::commands::confirm_popup_ready,
             crate::commands::cancel_popup,
             crate::commands::open_path,
             crate::commands::preview_attachments,
@@ -952,7 +1010,12 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                     // Dock 跳动 + 角标提问数（冷路径有请求；预热路径延后到 `popup_show_window` 领用时）。
                     #[cfg(target_os = "macos")]
                     if !warm {
-                        let count = app.state::<AppState>().request.questions.len();
+                        let count = app
+                            .state::<AppState>()
+                            .interaction
+                            .ask()
+                            .map(|request| request.questions.len())
+                            .unwrap_or(1);
                         crate::macos_dock_icon::announce_questions(count);
                     }
 
@@ -1141,7 +1204,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                         }
                         // —— 单进程模式（非 unix 回退）：协调器 + 弹窗 Channel + 并行消息渠道 ——
                         None => {
-                            let request = app.state::<AppState>().request.clone();
+                            let request = app.state::<AppState>().ask_request().clone();
                             let project = app.state::<AppState>().project.clone();
                             let source = app.state::<AppState>().source.clone();
                             let agent_kind = app.state::<AppState>().agent_kind.clone();
