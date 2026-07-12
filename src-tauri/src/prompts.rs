@@ -121,23 +121,53 @@ Adjust your plan if needed. If anything is unclear, ask the user as instructed."
     )
 }
 
-/// Model prompt after the human chooses to continue at Stop. It intentionally avoids product,
-/// server, and tool names because the installed questioning entry point may be renamed.
-pub fn stop_continue_prompt(instruction: Option<&str>) -> String {
+/// Model prompt after the human chooses to continue at Stop.
+///
+/// Branching follows each agent's native continuation semantics:
+/// - **Claude** (`decision: "block"` + `reason`): `reason` is a stop-rejection rationale, so user
+///   text is always structured-wrapped.
+/// - **Cursor** (`followup_message`) / **Codex** (`reason` used as a new user prompt): when the
+///   human provided follow-up text, pass it through unchanged.
+/// - **No instruction** (all agents): shared meta prompt that forces the agent to ask via its
+///   instructions-defined questioning tool (never empty — Cursor cannot inject a blank follow-up).
+///
+/// Intentionally avoids product, server, and tool names because the questioning entry point may be renamed.
+pub fn stop_continue_prompt(
+    kind: crate::agents::AgentKind,
+    instruction: Option<&str>,
+) -> String {
     match instruction.map(str::trim).filter(|text| !text.is_empty()) {
-        Some(message) => format!(
-            r#"[USER CONTINUATION] The user chose to continue the conversation and sent the message below.
+        Some(message) => match kind {
+            // Cursor/Codex consume the text as a user message / user prompt — no meta wrapper.
+            crate::agents::AgentKind::Cursor | crate::agents::AgentKind::Codex => {
+                message.to_string()
+            }
+            // Claude (and unsupported Grok fallback): reason = why stop was blocked.
+            crate::agents::AgentKind::Claude | crate::agents::AgentKind::Grok => {
+                stop_continue_wrapped_instruction(message)
+            }
+        },
+        None => stop_continue_meta().to_string(),
+    }
+}
+
+/// Claude-style structured wrap for a human follow-up that arrives as a Stop `reason`.
+fn stop_continue_wrapped_instruction(message: &str) -> String {
+    format!(
+        r#"[USER CONTINUATION] The user chose to continue the conversation and sent the message below.
 
 <user_message>
 {message}
 </user_message>
 
 Continue from this instruction. If anything is unclear, ask the user as instructed."#
-        ),
-        None => r#"[USER CONTINUATION] The user chose to continue the conversation.
+    )
+}
+
+/// Shared meta prompt when the human continues without typing a follow-up.
+fn stop_continue_meta() -> &'static str {
+    r#"[USER CONTINUATION] The user chose to continue the conversation.
 Before doing anything else, ask the user immediately using the questioning tool described in your instructions. Do not ask through ordinary output and do not end the turn instead."#
-            .to_string(),
-    }
 }
 
 #[cfg(test)]
@@ -156,8 +186,9 @@ mod tests {
     }
 
     #[test]
-    fn stop_continue_prompt_wraps_instruction_without_naming_tool() {
-        let prompt = stop_continue_prompt(Some("继续检查失败测试"));
+    fn stop_continue_prompt_claude_wraps_instruction_without_naming_tool() {
+        use crate::agents::AgentKind;
+        let prompt = stop_continue_prompt(AgentKind::Claude, Some("继续检查失败测试"));
         assert!(prompt.starts_with("[USER CONTINUATION]"));
         assert!(prompt.contains("<user_message>\n继续检查失败测试\n</user_message>"));
         assert!(!prompt.contains("AskHuman"));
@@ -165,12 +196,34 @@ mod tests {
     }
 
     #[test]
-    fn stop_continue_prompt_without_instruction_uses_instructions_tool() {
-        let prompt = stop_continue_prompt(None);
-        assert!(prompt.contains("questioning tool described in your instructions"));
-        assert!(prompt.contains("Do not ask through ordinary output"));
-        assert!(!prompt.contains("AskHuman"));
-        assert!(!prompt.contains("MCP"));
+    fn stop_continue_prompt_cursor_and_codex_pass_instruction_raw() {
+        use crate::agents::AgentKind;
+        let text = "继续检查失败测试";
+        assert_eq!(stop_continue_prompt(AgentKind::Cursor, Some(text)), text);
+        assert_eq!(stop_continue_prompt(AgentKind::Codex, Some(text)), text);
+        // Whitespace-only is treated as no instruction.
+        let meta = stop_continue_prompt(AgentKind::Cursor, Some("   "));
+        assert!(meta.contains("questioning tool described in your instructions"));
+    }
+
+    #[test]
+    fn stop_continue_prompt_without_instruction_uses_shared_meta_for_all_agents() {
+        use crate::agents::AgentKind;
+        for kind in AgentKind::ALL {
+            let prompt = stop_continue_prompt(kind, None);
+            assert!(
+                prompt.contains("questioning tool described in your instructions"),
+                "{kind:?}"
+            );
+            assert!(
+                prompt.contains("Do not ask through ordinary output"),
+                "{kind:?}"
+            );
+            assert!(!prompt.contains("AskHuman"), "{kind:?}");
+            assert!(!prompt.contains("MCP"), "{kind:?}");
+            // Same shared meta body for every agent.
+            assert_eq!(prompt, stop_continue_meta());
+        }
     }
 
     #[test]

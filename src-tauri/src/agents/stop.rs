@@ -93,7 +93,7 @@ fn run_inner(args: &[String]) -> Option<Value> {
     match decision {
         StopDecision::Continue(instruction) => Some(continuation_output(
             kind,
-            &crate::prompts::stop_continue_prompt(instruction.as_deref()),
+            &crate::prompts::stop_continue_prompt(kind, instruction.as_deref()),
         )),
         StopDecision::End => {
             if track {
