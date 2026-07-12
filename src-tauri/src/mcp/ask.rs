@@ -3,11 +3,17 @@
 //! `ImageContent` 一并返回。
 //!
 //! 关键点：
-//! - 子进程用 Tokio `Command::output()` 运行 —— stdin 被置空、stdout/stderr 被捕获，因此**不会**污染本
-//!   server 的 STDIO MCP 协议流；`kill_on_drop(true)` 保证 MCP 调用被取消时子进程随之终止，进而让
-//!   daemon 从 CLI socket EOF 取消在途请求。
+//! - 子进程用 Tokio `Command` 运行 —— stdin 被置空、stdout/stderr 被捕获，因此**不会**污染本
+//!   server 的 STDIO MCP 协议流；`kill_on_drop(true)` + 对 rmcp `CancellationToken` 的 `select!`
+//!   保证 MCP 调用被客户端取消时子进程随之终止，进而让 daemon 从 CLI socket EOF 取消在途请求。
 //! - 子进程的 JSON 含脚本专用的 `selected_indices`；反序列化进 [`AskResult`]（无该字段）即自动丢弃，
 //!   再重新序列化为 `structuredContent`，对 MCP 客户端不暴露该字段。
+//!
+//! ## 取消语义（为何必须 await token，而不能只靠 drop future）
+//!
+//! rmcp 收到 `notifications/cancelled` 时**只** `cancel()` 该 request 的 `CancellationToken`，
+//! **不会** abort / drop 已 spawn 的 tool handler。因此仅设 `kill_on_drop` 而不 `select!` token
+//! 时，`ask` 会继续 await 子进程，弹窗与 IM 卡成为孤儿。token 取消路径必须显式 `kill` 子进程。
 
 use base64::Engine;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -19,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 // `ask` 工具的入参（MCP 入参 schema 由 schemars 从本结构派生）。结构体级注释用 `//` 以免泄漏进对外
 // schema 的 description；字段级 `///` 才是给 agent 读的描述，须为英文。
@@ -130,6 +138,9 @@ structured content; any images the human attaches are returned as image content.
     async fn ask(
         &self,
         Parameters(params): Parameters<AskParams>,
+        // rmcp extracts the per-request token; cancelled when the client sends
+        // `notifications/cancelled` (timeout / user stop / host abort). Not human dismiss.
+        cancel: CancellationToken,
     ) -> Result<CallToolResult, McpError> {
         let has_questions = params
             .questions
@@ -153,13 +164,25 @@ structured content; any images the human attaches are returned as image content.
             McpError::internal_error(format!("cannot locate AskHuman executable: {e}"), None)
         })?;
 
-        // `output()` 置空 stdin、捕获 stdout/stderr，确保子进程不碰 MCP 的 STDIO 协议流。
+        // stdin 置空、stdout/stderr 捕获，确保子进程不碰 MCP 的 STDIO 协议流。
         // `ASKHUMAN_FROM_MCP=1`：告知子进程这是 MCP 发起，daemon 据此「只刷新、不新建」会话（防幽灵）。
         let mut command = tokio::process::Command::new(exe);
         command.args(&argv).env("ASKHUMAN_FROM_MCP", "1");
-        let output = capture_output(command).await.map_err(|e| {
-            McpError::internal_error(format!("failed to spawn AskHuman: {e}"), None)
-        })?;
+        let output = match capture_output(command, cancel).await {
+            Ok(o) => o,
+            Err(CaptureError::Cancelled) => {
+                // Caller abort — not a human cancel. Do not invent answers or action:"cancel".
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "AskHuman request was cancelled by the MCP client (not by the human).",
+                )]));
+            }
+            Err(CaptureError::Io(e)) => {
+                return Err(McpError::internal_error(
+                    format!("failed to spawn AskHuman: {e}"),
+                    None,
+                ));
+            }
+        };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let code = output.status.code().unwrap_or(3);
@@ -213,18 +236,59 @@ structured content; any images the human attaches are returned as image content.
     }
 }
 
-/// 捕获子进程输出，同时把 future 的取消传播为子进程终止。
+/// Errors from [`capture_output`].
+#[derive(Debug)]
+enum CaptureError {
+    /// MCP client cancelled the in-flight `tools/call` (`notifications/cancelled`).
+    Cancelled,
+    Io(std::io::Error),
+}
+
+/// 捕获子进程输出，并把 **rmcp request CancellationToken** 与 **future drop** 都传播为子进程终止。
 ///
-/// MCP transport 取消 `ask()` 时会 drop 此 future；Tokio 随即 drop child 并 kill。AskHuman CLI 的
-/// daemon 连接因此收到 EOF，daemon 现有 `wait_cli_eof` 路径会取消 popup 与所有 IM 渠道。
-async fn capture_output(mut command: tokio::process::Command) -> std::io::Result<Output> {
+/// - Token 取消（`notifications/cancelled`）：abort 持有 `Child` 的 task → `kill_on_drop` 杀进程 →
+///   CLI socket EOF → daemon `wait_cli_eof` 取消 popup / IM。rmcp **不会** drop handler，故必须
+///   在此 `select!` token（不能假设 future 被 drop）。
+/// - Future drop（测试 abort / 极端宿主杀任务）：同一 `kill_on_drop(true)` 兜底。
+///
+/// 子进程放进独立 task，是因为 `wait_with_output` 会 move `Child`，无法在 `select!` 另一臂再 `kill`。
+async fn capture_output(
+    mut command: tokio::process::Command,
+    cancel: CancellationToken,
+) -> Result<Output, CaptureError> {
     command
         .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
+        .stderr(Stdio::piped());
+    let child = command.spawn().map_err(CaptureError::Io)?;
+    // AbortOnDropHandle: if this future is dropped without resolving (handler abort), the
+    // child task is aborted → Child drop → kill_on_drop. Plain JoinHandle would detach.
+    // Wrapped in Option so the cancel arm can take/drop it without fighting select! moves.
+    let mut output_task = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        child.wait_with_output().await
+    })));
+
+    tokio::select! {
+        // Prefer cancel: if the client already abandoned the call, tear down even if the child
+        // is about to exit with an orphaned answer nobody will read.
+        biased;
+        _ = cancel.cancelled() => {
+            // Drop aborts the wait task → Child::drop → kill_on_drop → CLI socket EOF.
+            drop(output_task.take());
+            Err(CaptureError::Cancelled)
+        }
+        result = output_task.as_mut().unwrap() => {
+            // Task finished (or aborted externally); disarm so Drop does not abort again.
+            let _ = output_task.take();
+            match result {
+                Ok(Ok(output)) => Ok(output),
+                Ok(Err(e)) => Err(CaptureError::Io(e)),
+                Err(e) if e.is_cancelled() => Err(CaptureError::Cancelled),
+                Err(e) => Err(CaptureError::Io(std::io::Error::other(e.to_string()))),
+            }
+        }
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -338,18 +402,10 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn cancelled_output_future_kills_child() {
-        let dir = tempfile::tempdir().unwrap();
-        let pid_file = dir.path().join("pid");
-        let script = format!("echo $$ > '{}'; exec sleep 60", pid_file.display());
-        let mut command = tokio::process::Command::new("sh");
-        command.args(["-c", &script]);
-
-        let task = tokio::spawn(capture_output(command));
-        let pid = tokio::time::timeout(Duration::from_secs(2), async {
+    async fn wait_for_pid_file(pid_file: &std::path::Path) -> i32 {
+        tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                if let Ok(text) = std::fs::read_to_string(pid_file) {
                     if let Ok(pid) = text.trim().parse::<i32>() {
                         break pid;
                     }
@@ -358,11 +414,11 @@ mod tests {
             }
         })
         .await
-        .expect("child should publish its pid");
+        .expect("child should publish its pid")
+    }
 
-        task.abort();
-        let _ = task.await;
-
+    #[cfg(unix)]
+    async fn wait_until_dead(pid: i32) {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 // kill(pid, 0) == -1 with ESRCH means the child no longer exists.
@@ -374,7 +430,50 @@ mod tests {
             }
         })
         .await
-        .expect("dropping capture_output must kill the child");
+        .expect("child process must exit")
+    }
+
+    /// rmcp 真实取消路径：cancel token（对应 `notifications/cancelled`）→ 杀子进程。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_token_kills_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let script = format!("echo $$ > '{}'; exec sleep 60", pid_file.display());
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", &script]);
+
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(capture_output(command, cancel.clone()));
+        let pid = wait_for_pid_file(&pid_file).await;
+
+        cancel.cancel();
+        let result = task.await.expect("capture_output task");
+        assert!(
+            matches!(result, Err(CaptureError::Cancelled)),
+            "token cancel must yield CaptureError::Cancelled, got {result:?}"
+        );
+
+        wait_until_dead(pid).await;
+    }
+
+    /// 兜底：abort/drop future 时 kill_on_drop 仍杀子进程（宿主强杀任务等）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_output_future_kills_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let script = format!("echo $$ > '{}'; exec sleep 60", pid_file.display());
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", &script]);
+
+        let task = tokio::spawn(capture_output(command, CancellationToken::new()));
+        let pid = wait_for_pid_file(&pid_file).await;
+
+        task.abort();
+        let _ = task.await;
+
+        wait_until_dead(pid).await;
     }
 
     #[test]

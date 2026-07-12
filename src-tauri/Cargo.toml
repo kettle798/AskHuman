@@ -71,6 +71,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # server feature 已含 macros 与 transport-io；显式列出 transport-io 以防特性裁剪。
 rmcp = { version = "1", features = ["server", "transport-io"] }
 schemars = "1"
+# rmcp 每请求 CancellationToken：MCP client 取消 tools/call 时 ask 据此杀 CLI 子进程。
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 
 [dev-dependencies]
 tempfile = "3"

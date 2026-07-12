@@ -123,8 +123,9 @@ AskHuman/
                              `AskHuman … --output json`[带 `ASKHUMAN_FROM_MCP=1`] → 解析为 `AskResult`
                              [剔除脚本专用 `selected_indices`] → structuredContent + content[JSON 文本 +
                              图片转 ImageContent]）。薄壳：每次调用新 spawn 子进程，天然跨 daemon 重启重连；
-                             Tokio process `kill_on_drop` 把 MCP 取消传播到 CLI socket EOF，daemon 随之取消
-                             popup/IM，避免孤儿问题
+                             rmcp `CancellationToken`（`notifications/cancelled`）+ `kill_on_drop` 把 MCP
+                             取消传播到 CLI socket EOF，daemon 随之取消 popup/IM，避免孤儿问题
+                             （rmcp 只 cancel token、不 drop handler，故必须 select! token）
       hooks.rs               用户级 hooks：~/.askhuman/hooks/<event> 可执行脚本（首个事件 ask-received）
       watch.rs               `/watch` 实时关注纯逻辑（四渠道）：订阅持久化(state/watch.json) + 结构化帧/签名 +
                              共享文案构件 + 飞书卡片视图 + 渠道门控 + 本地时区绝对时刻（TG/Slack/钉钉
