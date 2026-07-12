@@ -2,6 +2,13 @@
 
 按具体任务 / 需求记录待办与当前进展。任务 / 需求完成后删除其 section（历史留在 git）。
 
+## 待办：Cursor 全局 Rules 迁移为用户级 always-on Skill
+
+调查与候选设计见 `docs/investigations/cursor-global-rule-user-skill.md`。无 workspace folder 的 Cursor IDE
+不创建项目 Rules 加载器，因此不会读取 `~/.cursor/rules/askhuman.mdc`。未来改为用户级
+`~/.cursor/skills/askhuman/SKILL.md`，旧安装显示“需更新”，迁移时先写新 Skill、再清理旧托管 MDC。
+Grok 默认会扫描 Cursor Skills，候选 frontmatter 已设计为对 Cursor 常驻、对 Grok 不可调用。
+
 ## 待办：Watch 卡片「重新关注」按钮 — 全渠道
 
 计划 `docs/plans/watch-rewatch.md`，需求 `docs/specs/watch-rewatch.md`。
