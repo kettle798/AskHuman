@@ -146,7 +146,7 @@ fn load_at(path: &Path, project: Option<&str>, all: bool) -> Vec<HistoryEntry> {
         let key = project.unwrap_or("");
         entries.retain(|e| e.project == key);
     }
-    entries.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp_ms));
     entries
 }
 
@@ -169,7 +169,7 @@ fn projects_at(path: &Path) -> Vec<ProjectInfo> {
             last_ms,
         })
         .collect();
-    out.sort_by(|a, b| b.last_ms.cmp(&a.last_ms));
+    out.sort_by_key(|p| std::cmp::Reverse(p.last_ms));
     out
 }
 

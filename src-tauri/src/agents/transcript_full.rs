@@ -278,23 +278,17 @@ fn grok_backfill_times(session_dir: Option<&Path>, events: &mut [TranscriptEvent
     let mut ti = 0usize;
     for ev in events.iter_mut() {
         match ev {
-            TranscriptEvent::UserText { at, .. } if at.is_none() => {
-                if ui < user_ts.len() {
-                    *at = Some(user_ts[ui]);
-                    ui += 1;
-                }
+            TranscriptEvent::UserText { at, .. } if at.is_none() && ui < user_ts.len() => {
+                *at = Some(user_ts[ui]);
+                ui += 1;
             }
-            TranscriptEvent::AssistantText { at, .. } if at.is_none() => {
-                if ai < asst_ts.len() {
-                    *at = Some(asst_ts[ai]);
-                    ai += 1;
-                }
+            TranscriptEvent::AssistantText { at, .. } if at.is_none() && ai < asst_ts.len() => {
+                *at = Some(asst_ts[ai]);
+                ai += 1;
             }
-            TranscriptEvent::ToolCall { at, .. } if at.is_none() => {
-                if ti < tool_ts.len() {
-                    *at = Some(tool_ts[ti]);
-                    ti += 1;
-                }
+            TranscriptEvent::ToolCall { at, .. } if at.is_none() && ti < tool_ts.len() => {
+                *at = Some(tool_ts[ti]);
+                ti += 1;
             }
             _ => {}
         }
