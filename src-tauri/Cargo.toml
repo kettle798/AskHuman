@@ -5,7 +5,9 @@ description = "HumanInLoop - Human-in-the-loop interaction tool (Rust + Tauri)"
 authors = ["Naituw"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.77.2"
+# 实际下限：代码已使用 1.82+ 才 stable 的 API（如 Option::is_none_or），
+# clippy 的 incompatible_msrv lint 以此声明为准。
+rust-version = "1.82"
 default-run = "AskHuman"
 
 [[bin]]
