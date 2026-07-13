@@ -1,5 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
-import { handleCodeCopyClick, renderMarkdown } from "./markdown";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { handleCodeCopyClick, markdownReady, renderMarkdown } from "./markdown";
+
+// The renderer is loaded lazily (R4 bundle split); tests exercise the real one.
+beforeAll(() => markdownReady);
 
 describe("renderMarkdown", () => {
   it("escapes raw HTML (html: false)", () => {
