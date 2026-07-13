@@ -401,8 +401,9 @@ mod tests {
     fn init_repo() -> tempfile::TempDir {
         let dir = tempdir().unwrap();
         let root = dir.path();
+        // --quiet / -q: keep `git init` / `git commit` chatter out of test output.
         assert!(Command::new("git")
-            .args(["init"])
+            .args(["init", "--quiet"])
             .current_dir(root)
             .status()
             .unwrap()
@@ -424,7 +425,7 @@ mod tests {
             .unwrap()
             .success());
         assert!(Command::new("git")
-            .args(["commit", "-m", "init"])
+            .args(["commit", "-q", "-m", "init"])
             .current_dir(root)
             .status()
             .unwrap()

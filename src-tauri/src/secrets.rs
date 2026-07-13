@@ -1,9 +1,10 @@
 //! OS keychain wrapper for channel secrets.
 //!
-//! The three channel secrets (DingTalk/Feishu AppSecret, Telegram bot token) are stored in the
-//! platform secret store — macOS login keychain / Windows Credential Manager / Linux Secret
-//! Service — instead of plaintext in `config.json`. Each secret is a generic password keyed by a
-//! fixed service + account.
+//! Channel secrets (DingTalk/Feishu AppSecret, Telegram bot token, Slack bot + app tokens; see
+//! the `ACCOUNT_*` constants below for the authoritative list) are stored in the platform secret
+//! store — macOS login keychain / Windows Credential Manager / Linux Secret Service — instead of
+//! plaintext in `config.json`. Each secret is a generic password keyed by a fixed service +
+//! account.
 //!
 //! All operations are best-effort. When the store is unreachable (e.g. a headless Linux box with
 //! no Secret Service), callers fall back to plaintext config (see `config.rs`). This module is a
