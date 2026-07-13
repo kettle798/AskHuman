@@ -128,6 +128,7 @@ const {
           type="button"
           :title="t('popup.addImage')"
           :aria-label="t('popup.addImage')"
+          @mousedown.prevent
           @click="pickFiles(current)"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">

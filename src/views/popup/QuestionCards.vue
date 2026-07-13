@@ -133,11 +133,13 @@ const {
             <path d="M12 18v3" />
           </svg>
         </button>
+        <!-- mousedown.prevent：保住 textarea 焦点。否则空输入框会因 blur 折叠、按钮随之消失，click 落空。 -->
         <button
           class="img-btn"
           type="button"
           :title="t('popup.addImage')"
           :aria-label="t('popup.addImage')"
+          @mousedown.prevent
           @click="pickFiles(qi)"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
