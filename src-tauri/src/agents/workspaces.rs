@@ -353,7 +353,8 @@ fn recover_cursor_path(encoded: &str, base: &Path, depth: usize, limit: usize) -
     // Every hyphen is a potential path separator; the whole key is the final candidate.
     let candidates = encoded
         .char_indices()
-        .filter_map(|(i, c)| (c == '-').then(|| (&encoded[..i], &encoded[i + 1..])))
+        .filter(|&(_, c)| c == '-')
+        .map(|(i, _)| (&encoded[..i], &encoded[i + 1..]))
         .chain(std::iter::once((encoded, "")));
     let mut out = Vec::new();
     for (name, remainder) in candidates {
