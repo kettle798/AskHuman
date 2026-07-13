@@ -196,6 +196,17 @@ function openSearch() {
   void nextTick(() => searchInputEl.value?.focus());
 }
 
+// Cmd+F（macOS）/ Ctrl+F 直接进入搜索（已在搜索态则重新聚焦输入框）。
+function onGlobalSearchHotkey(e: KeyboardEvent) {
+  if (!(isMac ? e.metaKey : e.ctrlKey) || e.key.toLowerCase() !== "f") return;
+  if (e.altKey || e.shiftKey) return;
+  e.preventDefault();
+  if (searchActive.value) searchInputEl.value?.focus();
+  else openSearch();
+}
+onMounted(() => window.addEventListener("keydown", onGlobalSearchHotkey));
+onBeforeUnmount(() => window.removeEventListener("keydown", onGlobalSearchHotkey));
+
 function closeSearch() {
   searchActive.value = false;
   searchQuery.value = "";
