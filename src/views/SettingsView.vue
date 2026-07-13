@@ -1680,16 +1680,30 @@ onBeforeUnmount(() => unlistenProgress?.());
         :title="t('settings.search.placeholder')"
         @click="openSearch"
       >
+        <!-- 用 circle/line 图元 + stroke 保证线宽均匀（手绘 path 会出现粗细不均） -->
         <svg viewBox="0 0 16 16" aria-hidden="true">
-          <path
-            d="M10.9 10.2a4.8 4.8 0 1 0-.7.7l3 3a.5.5 0 0 0 .7-.7l-3-3ZM3 6.8a3.8 3.8 0 1 1 7.6 0 3.8 3.8 0 0 1-7.6 0Z"
-            fill="currentColor"
+          <circle
+            cx="7"
+            cy="7"
+            r="4.25"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+          />
+          <line
+            x1="10.3"
+            y1="10.3"
+            x2="13.4"
+            y2="13.4"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
           />
         </svg>
       </button>
       </template>
       <!-- 搜索态：输入框占据 tabbar，↑↓ 选择、回车跳转、Esc 退出 -->
-      <div v-else class="tab-search">
+      <div v-else class="tab-search" :class="{ mac: isMac }">
         <input
           ref="searchInputEl"
           class="tab-search-input"
@@ -4227,8 +4241,13 @@ onBeforeUnmount(() => unlistenProgress?.());
   display: flex;
   align-items: center;
   gap: 6px;
-  width: min(420px, 100%);
+  flex: 1;
+  max-width: 420px;
   margin: 0 auto;
+}
+/* macOS：tabbar 兼作标题栏，左上角有红绿灯（约 78px 宽），搜索条从安全区起排避免重叠。 */
+.tab-search.mac {
+  margin-left: 84px;
 }
 .tab-search-input {
   flex: 1;
