@@ -173,7 +173,14 @@ AskHuman/
         mod.rs               CLI 到 Daemon 的连接与管理操作
         composer.rs          Interject 窗口的 daemon 连接
       daemon/
-        mod.rs               Daemon 主循环与消息分发
+        mod.rs               daemon 子命令入口（Unix 转 unix_impl）
+        unix_impl/
+          mod.rs             状态与类型、serve 主循环、连接分发与请求提交
+          watch.rs           watch 订阅持久化、tick 刷新与卡片回调
+          select.rs          跨渠道单选卡发送、路由与回调分发
+          inbound.rs         IM 入站命令层与共享命令处理
+          subs.rs            GUI/托盘/Agent 订阅广播与 Interject 连接
+          detect.rs          渠道自动识别流程
         lifecycle.rs         单实例、指纹与空闲生命周期
         spawn.rs             Daemon 脱离启动
         request.rs           请求登记、Coordinator 与 GUI token
