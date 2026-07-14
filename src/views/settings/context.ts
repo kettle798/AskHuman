@@ -153,7 +153,6 @@ export function createSettingsContext() {
   const search = useSettingsSearch({
     config: core.config,
     activeTab: core.activeTab,
-    glassSupported: general.glassSupported,
   });
 
   const ctx = {

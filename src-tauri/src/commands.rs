@@ -1016,18 +1016,22 @@ pub fn update_theme(app: AppHandle, theme: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 实时把主题应用到已打开窗口的**原生外观**（`set_theme`）。玻璃/毛玻璃材质跟随窗口
-/// NSAppearance，故仅切前端 CSS 还不够；配置实时变更（A12）也需调用此函数同步原生层。
+/// Apply native appearance to every WebView window and refresh Solid's native safety backing.
 pub(crate) fn apply_theme_to_windows(app: &AppHandle, theme: &str) {
     let t = match theme {
         "light" => Some(tauri::Theme::Light),
         "dark" => Some(tauri::Theme::Dark),
         _ => None,
     };
-    for label in ["settings", "popup"] {
-        if let Some(w) = app.get_webview_window(label) {
-            let _ = w.set_theme(t);
-        }
+    for (_label, window) in app.webview_windows() {
+        let _ = window.set_theme(t);
+    }
+    let config = AppConfig::load_without_secrets();
+    if matches!(config.general.window_effect, WindowEffect::Solid) {
+        crate::app::refresh_solid_window_backgrounds(
+            app,
+            crate::app::background_for_theme_name(theme),
+        );
     }
 }
 
@@ -1072,7 +1076,7 @@ pub fn popup_im_tip_dismiss() {
     crate::uistate::save(&s);
 }
 
-/// 实时切换弹窗背景效果（玻璃/模糊）到本进程**全部**已打开 WebView 窗口（含 history/agents 等）。
+/// 实时切换窗口材质（纯色/模糊/玻璃）到本进程**全部**已打开 WebView 窗口（含 history/agents 等）。
 /// 仅 macOS 真正切换材质。持久化由前端 `save_settings` 负责；此命令只负责即时生效。
 #[tauri::command]
 pub fn apply_window_effect(app: AppHandle, effect: WindowEffect) {

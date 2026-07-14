@@ -196,7 +196,8 @@ export default {
       prewarm: "Pre-warm popup",
       prewarmHint:
         "Keep one popup ready in the background so it appears faster. Uses a little memory.",
-      windowEffect: "Window effect",
+      windowEffect: "Window material",
+      effectSolid: "Solid",
       effectGlass: "Glass",
       effectBlur: "Blur",
       appearAnimation: "Appear animation",

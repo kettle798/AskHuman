@@ -2,7 +2,7 @@
 
 /* macOS 透明标题栏（毛玻璃统一外观）：tab 直接放进标题栏行，
    红绿灯在左侧、tab 居中互不遮挡；空白处经 data-tauri-drag-region 拖拽。 */
-.vibrancy .tabbar {
+.macos .tabbar {
   padding-top: 12px;
 }
 

@@ -401,7 +401,7 @@ onBeforeUnmount(() => unlistenUpdated?.());
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
 }
-.vibrancy .hist-header {
+.macos .hist-header {
   padding-top: 30px;
 }
 .hist-title {

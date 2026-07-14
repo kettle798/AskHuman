@@ -19,9 +19,14 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
-/* macOS 毛玻璃：窗口透明，正文叠一层主题色罩加深玻璃 */
-.vibrancy body {
+/* macOS translucent materials use a themed tint over the native effect. */
+.material-translucent body {
   background: var(--vibrancy-tint);
+}
+/* Solid covers the full WebView even if the native window backing cannot be updated. */
+.material-solid body,
+.material-solid #app {
+  background: var(--bg);
 }
 :focus-visible {
   outline: none;

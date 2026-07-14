@@ -236,7 +236,7 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 ## UI / 主题
 
 - 主题三态：`system`(prefers-color-scheme)/`light`/`dark`；前端切根类 + 后端设原生窗口主题。
-- macOS：`underWindowBackground` 毛玻璃 + `TitleBarStyle::Overlay` + 隐藏标题（整窗含标题栏皆玻璃），叠 0.2 色罩；Windows/Linux 退化为纯色不透明底。
+- macOS 窗口材质三态：Solid 为完整不透明主题底且不使用 Visual Effects；Blur 使用 Tauri `underWindowBackground`；Glass 仅在 macOS 26+ 使用 `NSGlassEffectView`，旧系统的 `glass` 配置有效值为 Blur。三态共用 `TitleBarStyle::Overlay` + 隐藏标题；Windows/Linux 维持纯色不透明底。
 - Markdown 配色见 `styles/controls.css`（链接/代码块/表头/引用/hr 等）。代码块 hover 右上角有拷贝按钮（`.code-copy`，点击复制 `<code>` 文本，弹窗/历史详情/设置发布说明共用 `renderMarkdown` 故都生效）。
 
 ## 配置
@@ -377,7 +377,7 @@ node scripts/perf-popup.mjs             # 固定 canonical 弹窗性能场景
 ## 注意事项
 
 - **stdout 洁净**：GUI 阶段把 stderr 重定向到 /dev/null（`app/mod.rs` 的 `stderr_redirect`，Unix），自身错误用 `eprintln_real` 走原 stderr。
-- **首帧不白闪**：`src/index.html` 内联关键底色；macOS 毛玻璃下 body 透明叠色罩。
-- **macOS 透明/毛玻璃**依赖 `tauri` 的 `macos-private-api` feature 与 `macOSPrivateApi: true`。
+- **首帧不白闪**：`src/index.html` 内联关键底色；macOS 建窗 URL 携带有效材质，Solid 首帧完整实色，Blur/Glass 首帧透明叠色罩。
+- **macOS 窗口材质**依赖 `tauri` 的 `macos-private-api` feature 与 `macOSPrivateApi: true`；运行时原生层变更必须在主线程执行。
 - **release 自包含**：前端资源在 `cargo build` 时由 `generate_context!` 嵌入，故安装后无需 dev server。
 - Telegram 不接收图片；Cursor Hook 仅 mac/Linux（Windows 禁用并提示）。

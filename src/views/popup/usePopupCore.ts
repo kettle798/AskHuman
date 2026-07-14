@@ -1123,12 +1123,14 @@ export function usePopupCore() {
 
   // 方案6 预热：领用一次性守卫——首个带 request 的 init 才渲染，避免重复领用。
   let adopting = false;
+  let interactionRendered = false;
 
   // 把（含 request 的）init 渲染上屏：套主题/语言/来源 → 设 request → 双 rAF 打点 → 首帧后再做非关键初始化。
   // 预热弹窗（init.warm）窗口起始隐藏，绘制完成后调 popup_show_window 让后端延后 show（杜绝空白闪现）。
   function renderInit(init: PopupInit) {
     const interaction = init.interaction;
-    if (!interaction) return;
+    if (!interaction || interactionRendered) return;
+    interactionRendered = true;
     applyTheme(init.theme);
     theme.value = init.theme;
     // 精确语言来自 popup_init（零钥匙串）；main.ts 只做 auto 兜底，故此处校正。

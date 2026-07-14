@@ -134,7 +134,7 @@ onMounted(async () => {
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
 }
-.vibrancy .ij-header {
+.macos .ij-header {
   padding-top: 30px;
 }
 .ij-title {

@@ -516,7 +516,7 @@ onBeforeUnmount(() => {
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
 }
-.vibrancy .ag-header {
+.macos .ag-header {
   padding-top: 30px;
 }
 .ag-title {

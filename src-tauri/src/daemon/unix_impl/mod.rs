@@ -2829,7 +2829,7 @@ async fn on_config_changed(state: &Arc<ServerState>) {
     // 配置变更可能刚开启菜单栏图标 → 兜底拉起宿主（宿主自身也监听配置，二者均幂等）。
     maybe_spawn_gui_host(&new);
     // 方案6：弹窗预热开关随配置热切换——开则补热（self-gated），关则回收现有热实例。
-    // window_effect 变更时也必须回收：热进程建窗材质在 spawn 时固化（Glass 不挂 vibrancy），
+    // window_effect 变更时也必须回收：热进程建窗材质在 spawn 时固化，
     // 待命期切到 Blur 若仍领用旧进程且上屏只挂玻璃，会半透明无材质。重建后按新效果 apply_surface。
     let effect_changed = old.general.window_effect != new.general.window_effect;
     if warm_enabled(state) {

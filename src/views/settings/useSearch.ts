@@ -19,10 +19,9 @@ interface SearchEntry {
 export function useSettingsSearch(deps: {
   config: Ref<AppConfig | null>;
   activeTab: Ref<Tab>;
-  glassSupported: Ref<boolean>;
 }) {
   const { t } = useI18n();
-  const { config, activeTab, glassSupported } = deps;
+  const { config, activeTab } = deps;
 
   // 搜索态：点放大镜进入（隐藏 tab、显示输入框并聚焦），Esc/✕/选中结果退出。
   const searchActive = ref(false);
@@ -164,7 +163,7 @@ export function useSettingsSearch(deps: {
         ]),
       );
     }
-    if (isMac && glassSupported.value) {
+    if (isMac) {
       list.push(e("general", "settings.popupBehavior.windowEffect"));
     }
     if (!isWindows) {

@@ -95,7 +95,7 @@ pub enum DaemonLifecycleMode {
     KeepAlive,
 }
 
-/// 弹窗背景效果。仅 macOS 26+ 可在二者间切换；旧系统无论选哪个都呈现模糊。
+/// macOS 窗口材质。Glass 在不支持 Liquid Glass 的系统上解析为 Blur。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum WindowEffect {
@@ -104,6 +104,18 @@ pub enum WindowEffect {
     Glass,
     /// 传统毛玻璃模糊（`NSVisualEffectView` / UnderWindowBackground）。
     Blur,
+    /// 完全不透明的主题纯色，不使用任何 Visual Effects 视图。
+    Solid,
+}
+
+impl WindowEffect {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Glass => "glass",
+            Self::Blur => "blur",
+            Self::Solid => "solid",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -589,6 +601,16 @@ mod tests {
         assert!(c.channels.auto_end_watch);
         assert!(!c.agent_tasks.enabled);
         assert_eq!(c.agent_tasks.permission_prompt, AgentTaskPermission::Ask);
+    }
+
+    #[test]
+    fn window_effect_solid_round_trips() {
+        let json = serde_json::to_string(&WindowEffect::Solid).unwrap();
+        assert_eq!(json, "\"solid\"");
+        assert_eq!(
+            serde_json::from_str::<WindowEffect>(&json).unwrap(),
+            WindowEffect::Solid
+        );
     }
 
     #[test]

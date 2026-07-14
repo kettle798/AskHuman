@@ -335,7 +335,7 @@
 .navbar.scrolled {
   border-bottom-color: var(--border);
 }
-.vibrancy .navbar {
+.macos .navbar {
   padding-top: 30px;
 }
 .brand {

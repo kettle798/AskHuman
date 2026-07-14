@@ -16,6 +16,7 @@ const {
   changeTheme,
   changeLanguage,
   glassSupported,
+  effectiveWindowEffect,
   changeWindowEffect,
   changeAnimation,
   soundSupport,
@@ -129,7 +130,7 @@ const config = computed(() => ctx.config.value!);
       </label>
     </div>
     <p class="card-desc">{{ t("settings.popupBehavior.prewarmHint") }}</p>
-    <template v-if="isMac && glassSupported">
+    <template v-if="isMac">
       <hr class="divider" />
       <div class="row">
         <span class="label">{{
@@ -138,16 +139,23 @@ const config = computed(() => ctx.config.value!);
         <span class="spacer"></span>
         <div class="segmented">
           <button
-            :class="{ active: config.general.windowEffect === 'glass' }"
-            @click="changeWindowEffect('glass')"
+            :class="{ active: effectiveWindowEffect === 'solid' }"
+            @click="changeWindowEffect('solid')"
           >
-            {{ t("settings.popupBehavior.effectGlass") }}
+            {{ t("settings.popupBehavior.effectSolid") }}
           </button>
           <button
-            :class="{ active: config.general.windowEffect === 'blur' }"
+            :class="{ active: effectiveWindowEffect === 'blur' }"
             @click="changeWindowEffect('blur')"
           >
             {{ t("settings.popupBehavior.effectBlur") }}
+          </button>
+          <button
+            v-if="glassSupported"
+            :class="{ active: effectiveWindowEffect === 'glass' }"
+            @click="changeWindowEffect('glass')"
+          >
+            {{ t("settings.popupBehavior.effectGlass") }}
           </button>
         </div>
       </div>

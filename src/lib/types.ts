@@ -199,7 +199,7 @@ export type ThemeMode = "system" | "light" | "dark";
 
 export type PopupAnimation = "none" | "document" | "alert";
 
-export type WindowEffect = "glass" | "blur";
+export type WindowEffect = "glass" | "blur" | "solid";
 
 export interface PopupInit {
   /** Current interaction. A prewarmed popup returns null until assigned. */

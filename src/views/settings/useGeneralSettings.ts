@@ -1,4 +1,4 @@
-// 「通用」tab 相关状态与动作：外观 / 弹窗行为 / 菜单栏 / 历史 / 语音 / 窗口效果。
+// 「通用」tab 相关状态与动作：外观 / 弹窗行为 / 菜单栏 / 历史 / 语音 / 窗口材质。
 // （daemonLifecycle 虽展示在「高级」tab，但同属 general 配置段，也放这里。）
 import { computed, onBeforeUnmount, ref } from "vue";
 import { useI18n } from "vue-i18n";
@@ -13,7 +13,7 @@ import {
 } from "../../lib/ipc";
 import { isGlassSupported } from "tauri-plugin-liquid-glass-api";
 import { isMac } from "../../lib/platform";
-import { applyTheme } from "../../lib/theme";
+import { applyTheme, applyWindowMaterial } from "../../lib/theme";
 import {
   eventToSpec,
   isModifierOnly,
@@ -195,19 +195,23 @@ export function useGeneralSettings(core: SettingsCore) {
 
   onBeforeUnmount(stopRecordShortcut);
 
-  // 是否支持 Liquid Glass（macOS 26+）：决定「玻璃/模糊」开关是否显示。
-  const glassSupported = ref(true);
+  // Liquid Glass is an optional third material on macOS 26+.
+  const glassSupported = ref(false);
+  const effectiveWindowEffect = computed<WindowEffect>(() => {
+    const requested = config.value?.general.windowEffect ?? "glass";
+    return requested === "glass" && !glassSupported.value ? "blur" : requested;
+  });
 
-  // 切换弹窗背景效果（仅 macOS 26+ 显示）。持久化后实时作用于已打开的 popup + 设置窗口。
+  // Apply locally at once; the backend emits the resolved effect to every open window.
   async function changeWindowEffect(effect: WindowEffect) {
     if (!config.value) return;
     config.value.general.windowEffect = effect;
+    applyWindowMaterial(effect);
     await persist();
     try {
-      // 后端同时切换 popup 与 settings 两个窗口（玻璃用插件、模糊用 set_effects）。
       await applyWindowEffect(effect);
     } catch (e) {
-      console.error("切换窗口效果失败", e);
+      console.error("切换窗口材质失败", e);
     }
   }
 
@@ -262,6 +266,7 @@ export function useGeneralSettings(core: SettingsCore) {
     startRecordShortcut,
     clearShortcut,
     glassSupported,
+    effectiveWindowEffect,
     changeWindowEffect,
     toggleExperimental,
     lifecycleLabel,
