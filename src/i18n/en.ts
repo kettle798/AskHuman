@@ -109,6 +109,15 @@ export default {
       action: "Set up",
       dismiss: "Don't show again",
     },
+    todos: {
+      title: "Todos",
+      picked: "{n} selected",
+      empty: "No pending todos for this project",
+      chipHint: "Select to send with your reply (removed from the list once picked up)",
+      delete: "Delete",
+      addPlaceholder: "Add a todo for this project…",
+      add: "Add",
+    },
   },
   // 后端(Swift/Rust)语音事件以语义 key 上报，前端在此翻译。
   speech: {
@@ -521,6 +530,7 @@ export default {
     revokeInterject: "Revoke",
     revokeConfirm: "Revoke the queued message?",
     revokeOk: "Revoke",
+    openTodos: "Project todos",
     view: {
       status: "Status",
       type: "Type",
@@ -551,6 +561,23 @@ export default {
       hoursAgo: "{n}h ago",
       daysAgo: "{n}d ago",
     },
+  },
+  todosWin: {
+    title: "Todos",
+    projectLabel: "Project",
+    noProjects: "No projects yet",
+    noProjectsHint:
+      "Projects appear here once they have todos, a tracked agent session, or a recent workspace.",
+    empty: "No todos in this project",
+    emptyHint:
+      "Queued ideas are handed to the agent when it asks what to do next, and are removed once it starts working on them.",
+    addPlaceholder: "Add a todo for this project…",
+    add: "Add",
+    delete: "Delete",
+    clear: "Clear all",
+    clearConfirm: "Clear all todos in this project?",
+    confirmCancel: "Cancel",
+    clearOk: "Clear",
   },
   interject: {
     title: "Message to Agent",

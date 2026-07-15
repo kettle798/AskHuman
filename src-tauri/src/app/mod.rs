@@ -964,6 +964,13 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::restart_settings,
             crate::commands::popup_update_state,
             crate::commands::channel_health,
+            crate::commands::todos_list,
+            crate::commands::todos_add,
+            crate::commands::todos_remove,
+            crate::commands::todos_clear,
+            crate::commands::todos_init,
+            crate::commands::todos_projects,
+            crate::commands::open_todos,
         ])
         .on_window_event(|window, event| {
             match window.label() {
@@ -1351,6 +1358,11 @@ pub(crate) fn render_result(
     lang: Lang,
 ) -> (RenderOutcome, Vec<Vec<String>>) {
     use crate::models::OutputFormat;
+    // whats-next（spec todo-whats-next D3）：stdout 为一段纯文本（任务内容 / 固定结束句），
+    // 取消沿用 `[status]`；附件仍落盘并以 `[files]` 附于文本后。
+    if request.whats_next {
+        return render_whats_next(request, result, lang);
+    }
     let json = request.output_format == OutputFormat::Json;
     match result.action {
         ChannelAction::Cancel => (
@@ -1411,6 +1423,47 @@ pub(crate) fn render_result(
             )
         }
     }
+}
+
+/// whats-next 结果渲染（spec todo-whats-next D3）：提交映射（`output::whats_next_reply`）→
+/// 一段纯文本；回答附带的图片照常落盘，与透传文件一起按 `[files]` 附于文本后。
+fn render_whats_next(
+    request: &AskRequest,
+    result: &ChannelResult,
+    lang: Lang,
+) -> (RenderOutcome, Vec<Vec<String>>) {
+    let reply = output::whats_next_reply(request, result);
+    // 落盘图片（仅 Send 路径有回答；取消路径 answers 为空，循环自然跳过）。
+    let mut image_paths_per_q: Vec<Vec<String>> = Vec::with_capacity(result.answers.len());
+    for (i, answer) in result.answers.iter().enumerate() {
+        match image_writer::save(&answer.images, &request.id, i, lang) {
+            Ok(paths) => image_paths_per_q.push(paths),
+            Err(e) => {
+                return (
+                    RenderOutcome {
+                        stdout: String::new(),
+                        stderr: Some(format!("{}{}", i18n::err_prefix(lang), e)),
+                        exit_code: 1,
+                    },
+                    Vec::new(),
+                );
+            }
+        }
+    }
+    let files: Vec<String> = image_paths_per_q
+        .iter()
+        .flatten()
+        .cloned()
+        .chain(result.answers.iter().flat_map(|a| a.files.iter().cloned()))
+        .collect();
+    (
+        RenderOutcome {
+            stdout: output::whats_next_output(&reply, &files, lang),
+            stderr: None,
+            exit_code: 0,
+        },
+        image_paths_per_q,
+    )
 }
 
 /// 把结果输出到 stdout（或 stderr），返回退出码。（保留供复用；当前协调器内联渲染。）
@@ -2015,6 +2068,106 @@ where
     #[cfg(target_os = "macos")]
     set_runtime_window_effect_with_bg(&win, window_effect, window_bg);
     Ok(())
+}
+
+/// 创建（或聚焦已存在的）项目待办窗口（spec todo-whats-next D9）：全局唯一（label `todos`）。
+/// `project_override` 为 Some 时窗口预选该项目（经 URL 参数传递）；None 由前端自选默认项目。
+/// 实时同步：监听 `todos.json` 变化 → `todos-updated` 事件（daemon 不参与，窗口独立可用）。
+#[cfg(unix)]
+pub(crate) fn create_todos_window<R, M>(
+    manager: &M,
+    config: &AppConfig,
+    project_override: Option<&str>,
+    pin_above_popup: bool,
+) -> tauri::Result<()>
+where
+    R: tauri::Runtime,
+    M: Manager<R>,
+{
+    if let Some(w) = manager.get_webview_window("todos") {
+        let _ = w.set_focus();
+        // 已开窗时带新预选项目 → 通知前端切换（与设置窗口 goto-tab 同模式）。
+        if let Some(key) = project_override {
+            use tauri::Emitter;
+            let _ = w.emit("todos-goto-project", key.to_string());
+        }
+        return Ok(());
+    }
+    let theme = window_theme(config);
+    let lang = Lang::resolve(&config.general.language);
+    let window_bg = background_for(resolved_theme(config));
+    let mut url = String::from("index.html?view=todos");
+    if let Some(key) = project_override {
+        url.push_str("&project=");
+        url.push_str(&urlencode(key));
+    }
+    let window_effect = config.general.window_effect;
+    let effective_window_effect = effective_window_effect(window_effect);
+    append_window_effect_query(&mut url, effective_window_effect);
+    let builder = WebviewWindowBuilder::new(manager, "todos", WebviewUrl::App(url.into()))
+        .title(i18n::tr(lang, "title.todos"))
+        .inner_size(520.0, 560.0)
+        .min_inner_size(400.0, 320.0)
+        .center()
+        .always_on_top(pin_above_popup)
+        .theme(theme);
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    let win = apply_surface(builder, window_bg, effective_window_effect).build()?;
+    #[cfg(target_os = "macos")]
+    set_runtime_window_effect_with_bg(&win, window_effect, window_bg);
+    watch_todos_file(win);
+    Ok(())
+}
+
+/// 监听 `todos.json` 变更并向待办窗口发 `todos-updated`（前端据此重载；写入方可能是任意进程，
+/// 靠文件监听跨进程感知）。原子写（tmp + rename）换 inode，故监听**state 目录**再按文件名过滤
+/// （与 `watch_history_file` 同思路）。
+#[cfg(unix)]
+fn watch_todos_file<R: tauri::Runtime>(window: tauri::WebviewWindow<R>) {
+    use tauri::Emitter;
+    std::thread::spawn(move || {
+        use notify::{RecursiveMode, Watcher};
+        use std::sync::mpsc::{channel, RecvTimeoutError};
+        use std::time::Duration;
+        let dir = crate::paths::state_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let (tx, rx) = channel::<()>();
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if let Ok(ev) = res {
+                    let hit = ev
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name().map(|n| n == "todos.json").unwrap_or(false));
+                    if hit {
+                        let _ = tx.send(());
+                    }
+                }
+            }) {
+                Ok(w) => w,
+                Err(_) => return,
+            };
+        if watcher.watch(&dir, RecursiveMode::NonRecursive).is_err() {
+            return;
+        }
+        loop {
+            if rx.recv().is_err() {
+                break;
+            }
+            // 去抖：合并连续写入事件。
+            loop {
+                match rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(()) => continue,
+                    Err(RecvTimeoutError::Timeout) => break,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                }
+            }
+            // 窗口已关闭 → emit 失败 → 退出线程，自动释放 watcher。
+            if window.emit("todos-updated", ()).is_err() {
+                break;
+            }
+        }
+    });
 }
 
 /// 创建（或聚焦已存在的）插话 composer 窗口（spec agent-interject D7）：**每 session 全局唯一**

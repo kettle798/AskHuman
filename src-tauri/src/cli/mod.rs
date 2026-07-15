@@ -10,6 +10,7 @@ pub mod file_attachment;
 pub mod help;
 pub mod image_writer;
 pub mod output;
+pub mod todo_cmd;
 
 use crate::i18n::{self, Lang};
 use std::process::exit;
@@ -249,6 +250,11 @@ pub fn dispatch() {
             doctor::dispatch(&argv[2..], lang);
             exit(0);
         }
+        // 项目级待办队列（spec todo-whats-next D6）：add / list / rm / clear。
+        // 极端歧义（问题正好是 "todo"）可用 `AskHuman -q todo` 规避。
+        "todo" => {
+            todo_cmd::dispatch(&argv[2..], lang);
+        }
         // 隐藏调试子命令组（不进 help）：如钉钉 watch PoC 探针 `debug dd-watch-poc`。
         "debug" => {
             debug_cmd::dispatch(&argv[2..], lang);
@@ -271,6 +277,7 @@ pub fn dispatch() {
                         | "--select-only"
                         | "--single"
                         | "--output"
+                        | "--whats-next"
                 ) =>
         {
             eprintln!(
@@ -292,18 +299,26 @@ pub fn dispatch() {
                     }
                 };
                 let message = crate::models::MessagePrompt::new(parsed.message_text, files);
-                let questions: Vec<crate::models::Question> = parsed
-                    .questions
-                    .into_iter()
-                    .map(|q| {
-                        let options = q
-                            .options
-                            .into_iter()
-                            .map(|o| crate::models::OptionItem::new(o.text, o.recommended))
-                            .collect();
-                        crate::models::Question::new(q.message, options)
-                    })
-                    .collect();
+                // 项目 key（git 根，回退 cwd）：whats-next 取待办 + TaskRequest 归属共用。
+                let project = crate::project::detect();
+                // whats-next（spec D2）：问题与选项由系统固定生成——各待办 chip（带 id）+ 恒有
+                // 的「结束本轮」（末位）；无待办时只有「结束本轮」+ 自由输入框。
+                let questions: Vec<crate::models::Question> = if parsed.whats_next {
+                    vec![whats_next_question(&project, lang)]
+                } else {
+                    parsed
+                        .questions
+                        .into_iter()
+                        .map(|q| {
+                            let options = q
+                                .options
+                                .into_iter()
+                                .map(|o| crate::models::OptionItem::new(o.text, o.recommended))
+                                .collect();
+                            crate::models::Question::new(q.message, options)
+                        })
+                        .collect()
+                };
                 // unix：瘦客户端经 Daemon + GUI Helper（A11：上送 source name 与解析好的 lang）。
                 #[cfg(unix)]
                 {
@@ -334,7 +349,7 @@ pub fn dispatch() {
                         is_markdown: true,
                         source: crate::models::source_name_for_agent(resolved_agent_kind),
                         lang: lang.code().to_string(),
-                        project: crate::project::detect(),
+                        project,
                         select_only: parsed.select_only,
                         single: parsed.single,
                         output_format: parsed.output_format,
@@ -346,6 +361,7 @@ pub fn dispatch() {
                         from_mcp: from_mcp_env(),
                         perf_id,
                         perf_autodismiss: crate::perf::autodismiss(),
+                        whats_next: parsed.whats_next,
                     };
                     crate::client::run_ask(task);
                 }
@@ -356,6 +372,7 @@ pub fn dispatch() {
                     request.select_only = parsed.select_only;
                     request.single = parsed.single;
                     request.output_format = parsed.output_format;
+                    request.whats_next = parsed.whats_next;
                     crate::app::run_ask(request, crate::config::AppConfig::load());
                 }
             }
@@ -366,6 +383,20 @@ pub fn dispatch() {
             }
         },
     }
+}
+
+/// whats-next 的固定问题（spec todo-whats-next D2）：「接下来做什么？」+ 该项目当前各待办
+/// chip（携带条目 id，供终态出队）+ 恒有的「结束本轮」（末位）。待办直读 `todos.json` 快照。
+fn whats_next_question(project: &str, lang: Lang) -> crate::models::Question {
+    let mut options: Vec<crate::models::OptionItem> = crate::todos::list(project)
+        .into_iter()
+        .map(|entry| crate::models::OptionItem::with_todo(entry.text, entry.id))
+        .collect();
+    options.push(crate::models::OptionItem::new(
+        i18n::tr(lang, "whatsNext.endOption"),
+        false,
+    ));
+    crate::models::Question::new(i18n::tr(lang, "whatsNext.question").to_string(), options)
 }
 
 /// 探测发起 `AskHuman` 调用的 Agent 身份的**快速部分**（家族 + 会话 ID，仅读 env，零 ps）。

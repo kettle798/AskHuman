@@ -293,6 +293,7 @@ impl RequestRegistry {
         request.select_only = task.select_only;
         request.single = task.single;
         request.output_format = task.output_format;
+        request.whats_next = task.whats_next;
 
         let (final_tx, final_rx) = tokio::sync::mpsc::unbounded_channel();
         let coordinator = Coordinator::new_ipc(

@@ -71,6 +71,10 @@ pub struct AskRequest {
     /// 结果输出格式（全局）。
     #[serde(default)]
     pub output_format: OutputFormat,
+    /// whats-next 提问（spec todo-whats-next D2/D3）：结果渲染为一段纯文本（任务内容 /
+    /// 固定结束句），弹窗折叠待办区不重复渲染 chip。普通提问恒 false（序列化省略）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub whats_next: bool,
 }
 
 impl AskRequest {
@@ -83,6 +87,7 @@ impl AskRequest {
             select_only: false,
             single: false,
             output_format: OutputFormat::Text,
+            whats_next: false,
         }
     }
 }
@@ -133,6 +138,11 @@ impl Question {
 pub struct OptionItem {
     pub text: String,
     pub recommended: bool,
+    /// 该选项承载的待办条目 id（spec todo-whats-next D2/D5）：whats-next / Stop 卡把项目待办
+    /// 渲染为选项时携带；赢家回答选中带此 id 的选项 → Coordinator 在终态汇聚点原子出队。
+    /// 普通选项恒 None（序列化省略，旧端零感知）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo_id: Option<String>,
 }
 
 impl OptionItem {
@@ -140,6 +150,16 @@ impl OptionItem {
         Self {
             text: text.into(),
             recommended,
+            todo_id: None,
+        }
+    }
+
+    /// 携带待办条目 id 的选项（whats-next / Stop 卡的待办 chip）。
+    pub fn with_todo(text: impl Into<String>, todo_id: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            recommended: false,
+            todo_id: Some(todo_id.into()),
         }
     }
 }
@@ -155,14 +175,25 @@ impl<'de> Deserialize<'de> for OptionItem {
                 text: String,
                 #[serde(default)]
                 recommended: bool,
+                #[serde(default, rename = "todoId")]
+                todo_id: Option<String>,
             },
         }
         Ok(match Raw::deserialize(deserializer)? {
             Raw::Text(text) => OptionItem {
                 text,
                 recommended: false,
+                todo_id: None,
             },
-            Raw::Object { text, recommended } => OptionItem { text, recommended },
+            Raw::Object {
+                text,
+                recommended,
+                todo_id,
+            } => OptionItem {
+                text,
+                recommended,
+                todo_id,
+            },
         })
     }
 }
@@ -208,6 +239,10 @@ pub struct QuestionAnswer {
     /// 用户随回复附带的本地文件绝对路径（非图片，直接透传不复制）。
     #[serde(default)]
     pub files: Vec<String>,
+    /// Popup 折叠待办区选中的待办条目 id（spec todo-whats-next D7）：其文本已由前端并入
+    /// `user_input` 送达；此字段只供 Coordinator 在终态汇聚点按 id 出队。恒为空时序列化省略。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todo_ids: Vec<String>,
 }
 
 impl QuestionAnswer {

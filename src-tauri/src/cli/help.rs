@@ -47,12 +47,14 @@ pub fn help_text(lang: Lang) -> String {
             "  --single                Single choice (default: multiple choice)".to_string(),
             "  --select-only           Choice only: forbid free text/attachments (each question must have options)".to_string(),
             "  --output <text|json>    Output format (default: text)".to_string(),
+            "  --whats-next            Ask \"what should we do next?\" with the project's pending todos as choices (see --agent-help)".to_string(),
             String::new(),
             "Management:".to_string(),
             "  --settings              Open the settings window".to_string(),
             "  --history [--all]       Open the reply history window (current project; --all for every project)".to_string(),
             "  daemon <sub>            Manage the background daemon: status/stop/restart/start/logs (stop/restart drain active requests; add --force to terminate now)".to_string(),
-            "  mcp                     Run as an MCP server over STDIO, exposing the 'ask' tool (for MCP clients, not humans)".to_string(),
+            "  mcp                     Run as an MCP server over STDIO, exposing the 'ask' and 'whats_next' tools (for MCP clients, not humans)".to_string(),
+            "  todo <sub>              Project todo queue: add <text> / list / rm <n> / clear (todos surface as --whats-next choices)".to_string(),
             "  channel <sub>           Configure IM channels without a GUI (list/set/enable/disable/test/detect; see 'channel help')".to_string(),
             "  agents <sub>            Agent status & integrations (monitor/show/install/uninstall/update; see 'agents help')".to_string(),
             "  config <sub>            Generic config key/value fallback (show/get/set/unset/path; see 'config help')".to_string(),
@@ -80,12 +82,14 @@ pub fn help_text(lang: Lang) -> String {
             "  --single                单选（默认多选）".to_string(),
             "  --select-only           严格选择：禁用自由文本/附件（每题必须有选项）".to_string(),
             "  --output <text|json>    输出格式（默认 text）".to_string(),
+            "  --whats-next            提问「接下来做什么？」，本项目待办作为选项（见 --agent-help）".to_string(),
             String::new(),
             "管理:".to_string(),
             "  --settings              启动设置界面".to_string(),
             "  --history [--all]       启动回复历史窗口（默认当前项目；--all 查看全部项目）".to_string(),
             "  daemon <子命令>          管理后台 daemon：status/stop/restart/start/logs（stop/restart 默认等在途请求完结；--force 立即终止）".to_string(),
-            "  mcp                     以 MCP server（STDIO）运行，暴露 'ask' 工具（面向 MCP 客户端，非人类）".to_string(),
+            "  mcp                     以 MCP server（STDIO）运行，暴露 'ask' 与 'whats_next' 工具（面向 MCP 客户端，非人类）".to_string(),
+            "  todo <子命令>            项目级待办队列：add <text> / list / rm <n> / clear（待办会作为 --whats-next 的选项出现）".to_string(),
             "  channel <子命令>         无 GUI 配置 IM 渠道（list/set/enable/disable/test/detect；见 'channel help'）".to_string(),
             "  agents <子命令>          Agent 状态与集成（monitor/show/install/uninstall/update；见 'agents help'）".to_string(),
             "  config <子命令>          通用配置键值兜底（show/get/set/unset/path；见 'config help'）".to_string(),
@@ -213,6 +217,22 @@ pub fn agent_help_text(lang: Lang) -> String {
                 "# A long Markdown message with `backticks`, $vars and \"quotes\"".to_string(),
             );
             out.push("EOF".to_string());
+            out.push(String::new());
+            out.push("Ending your turn (--whats-next):".to_string());
+            out.push(format!(
+                "  {prog} --whats-next [\"<completion report>\"] [-f \"<file>\" ...] [--stdin]"
+            ));
+            out.push("  Run this after finishing the current task and before ending your turn. The user sees".to_string());
+            out.push("  your report plus their pending todo list for this project and picks what happens next.".to_string());
+            out.push("  Takes no -q/-o (the question is fixed). Output is plain text: either the next task".to_string());
+            out.push(format!(
+                "  (start it immediately), or \"{}\" —",
+                output::WHATS_NEXT_END_SENTENCE
+            ));
+            out.push(format!(
+                "  only then may you end the turn. {} output means it was dismissed: run it again.",
+                output::MARKER_STATUS
+            ));
         }
         Lang::Zh => {
             out.push(format!("{prog} —— 向人类发起提问并收集回应。"));
@@ -241,6 +261,21 @@ pub fn agent_help_text(lang: Lang) -> String {
             ));
             out.push("# 含 `反引号`、$VAR 与 \"引号\" 的长 Markdown 消息".to_string());
             out.push("EOF".to_string());
+            out.push(String::new());
+            out.push("结束回合前（--whats-next）:".to_string());
+            out.push(format!(
+                "  {prog} --whats-next [\"<完成报告>\"] [-f \"<文件>\" ...] [--stdin]"
+            ));
+            out.push("  完成当前任务后、结束回合前运行。用户会看到你的报告与本项目的待办列表，".to_string());
+            out.push("  并选择接下来做什么。不接受 -q/-o（问题固定）。输出为一段纯文本：".to_string());
+            out.push(format!(
+                "  下一个任务（立即开始执行），或 \"{}\"",
+                output::WHATS_NEXT_END_SENTENCE
+            ));
+            out.push(format!(
+                "  ——仅此时才可结束回合。出现 {} 表示被取消：请再次运行。",
+                output::MARKER_STATUS
+            ));
         }
     }
     out.join("\n")
@@ -400,5 +435,19 @@ mod tests {
         assert!(en.contains("Asking"));
         assert!(en.contains("Management:"));
         assert!(en.contains("--scripting-help"));
+    }
+
+    #[test]
+    fn help_and_agent_help_cover_whats_next_and_todo() {
+        // spec todo-whats-next D4/D6：--help 列出 --whats-next 与 todo 子命令；
+        // --agent-help 说明 whats-next 用法且「结束句」与实际输出常量一致。
+        for lang in [Lang::En, Lang::Zh] {
+            let h = help_text(lang);
+            assert!(h.contains("--whats-next"));
+            assert!(h.contains("todo "));
+            let ah = agent_help_text(lang);
+            assert!(ah.contains("--whats-next"));
+            assert!(ah.contains(output::WHATS_NEXT_END_SENTENCE));
+        }
     }
 }

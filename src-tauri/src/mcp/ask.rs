@@ -46,6 +46,19 @@ pub struct AskParams {
     pub files: Option<Vec<String>>,
 }
 
+// `whats_next` 工具的入参（spec todo-whats-next D2：`{ message?, files? }`）。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WhatsNextParams {
+    /// Optional completion report shown to the human above the fixed "What should we do
+    /// next?" question, rendered as Markdown.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Optional file paths (e.g. a report or summary document) to attach to what the human sees.
+    #[serde(default)]
+    pub files: Option<Vec<String>>,
+}
+
 // 单个问题。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[schemars(inline)]
@@ -234,6 +247,58 @@ structured content; any images the human attaches are returned as image content.
 
         Ok(tool_result)
     }
+
+    /// Ask the human what to do next (mandatory before ending a turn).
+    #[tool(
+        name = "whats_next",
+        description = "Ask the human what to do next. You MUST call this after completing the \
+current task and before ending your turn; optionally pass `message` with a completion report and \
+`files` with report documents. The human is shown their pending todo queue for this project plus \
+an \"end this turn\" choice. The result is plain text: either the next task to start working on \
+immediately, or a sentence stating the human approved ending the turn."
+    )]
+    async fn whats_next(
+        &self,
+        Parameters(params): Parameters<WhatsNextParams>,
+        cancel: CancellationToken,
+    ) -> Result<CallToolResult, McpError> {
+        let argv = build_whats_next_argv(&params);
+        let exe = std::env::current_exe().map_err(|e| {
+            McpError::internal_error(format!("cannot locate AskHuman executable: {e}"), None)
+        })?;
+        let mut command = tokio::process::Command::new(exe);
+        command.args(&argv).env("ASKHUMAN_FROM_MCP", "1");
+        let output = match capture_output(command, cancel).await {
+            Ok(o) => o,
+            Err(CaptureError::Cancelled) => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "AskHuman request was cancelled by the MCP client (not by the human).",
+                )]));
+            }
+            Err(CaptureError::Io(e)) => {
+                return Err(McpError::internal_error(
+                    format!("failed to spawn AskHuman: {e}"),
+                    None,
+                ));
+            }
+        };
+        // 结果就是一段纯文本（spec D3）：任务内容 / 固定结束句 / `[status]` 取消引导。
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let text = stdout.trim();
+        if !output.status.success() || text.is_empty() {
+            let code = output.status.code().unwrap_or(3);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = if stderr.trim().is_empty() {
+                format!("AskHuman produced no result (exit code {code})")
+            } else {
+                format!("AskHuman failed (exit code {code}): {}", stderr.trim())
+            };
+            return Ok(CallToolResult::error(vec![ContentBlock::text(msg)]));
+        }
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            text.to_string(),
+        )]))
+    }
 }
 
 /// Errors from [`capture_output`].
@@ -297,7 +362,9 @@ impl ServerHandler for AskServer {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
             "AskHuman bridges the agent and a human operator. Call the `ask` tool whenever you \
-need the human to decide, clarify, review, or approve something; it blocks until they reply.",
+need the human to decide, clarify, review, or approve something; it blocks until they reply. \
+Call the `whats_next` tool after completing the current task and before ending your turn to ask \
+the human what to do next.",
         );
         // `from_build_env()` 的名字/版本来自 rmcp crate 自身，改成本应用的品牌名与版本。
         let mut implementation = Implementation::from_build_env();
@@ -343,6 +410,25 @@ fn build_argv(params: &AskParams) -> Vec<String> {
 
     argv.push("--output".to_string());
     argv.push("json".to_string());
+    argv
+}
+
+/// 把 [`WhatsNextParams`] 翻译成 `AskHuman --whats-next` 的 argv（纯函数，便于单测）。
+/// 输出保持文本模式（结果本身就是一段纯文本，spec D3），不追加 `--output json`。
+fn build_whats_next_argv(params: &WhatsNextParams) -> Vec<String> {
+    let mut argv: Vec<String> = Vec::new();
+    if let Some(message) = params.message.as_ref() {
+        if !message.trim().is_empty() {
+            argv.push(message.clone());
+        }
+    }
+    argv.push("--whats-next".to_string());
+    if let Some(files) = params.files.as_ref() {
+        for f in files {
+            argv.push("-f".to_string());
+            argv.push(f.clone());
+        }
+    }
     argv
 }
 
@@ -511,6 +597,35 @@ mod tests {
                 "json",
             ]
         );
+    }
+
+    #[test]
+    fn whats_next_argv_message_stays_message() {
+        // Message 是完成报告，不追加 --output json（结果为纯文本，spec D3）。
+        let p: WhatsNextParams =
+            serde_json::from_value(json!({ "message": "All tests pass." })).unwrap();
+        assert_eq!(
+            build_whats_next_argv(&p),
+            vec!["All tests pass.", "--whats-next"]
+        );
+    }
+
+    #[test]
+    fn whats_next_argv_bare_and_with_files() {
+        let p: WhatsNextParams = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(build_whats_next_argv(&p), vec!["--whats-next"]);
+        let p: WhatsNextParams =
+            serde_json::from_value(json!({ "files": ["/tmp/report.md"] })).unwrap();
+        assert_eq!(
+            build_whats_next_argv(&p),
+            vec!["--whats-next", "-f", "/tmp/report.md"]
+        );
+    }
+
+    #[test]
+    fn whats_next_tool_is_registered() {
+        let server = AskServer::new();
+        assert!(server.tool_router.get("whats_next").is_some());
     }
 
     #[test]

@@ -102,6 +102,15 @@ export default {
       action: "去配置",
       dismiss: "不再提示",
     },
+    todos: {
+      title: "待办",
+      picked: "已选 {n} 条",
+      empty: "本项目暂无待办",
+      chipHint: "选中后随本次回复送达（agent 开始执行即从列表移除）",
+      delete: "删除",
+      addPlaceholder: "为本项目添加待办…",
+      add: "添加",
+    },
   },
   // 后端(Swift/Rust)语音事件以语义 key 上报，前端在此翻译。
   speech: {
@@ -501,6 +510,7 @@ export default {
     revokeInterject: "撤回",
     revokeConfirm: "撤回待送达的消息？",
     revokeOk: "撤回",
+    openTodos: "项目待办",
     view: {
       status: "状态",
       type: "类型",
@@ -531,6 +541,21 @@ export default {
       hoursAgo: "{n} 小时前",
       daysAgo: "{n} 天前",
     },
+  },
+  todosWin: {
+    title: "待办",
+    projectLabel: "项目",
+    noProjects: "暂无候选项目",
+    noProjectsHint: "项目有待办、有被追踪的 Agent 会话或最近使用过的 workspace 后会出现在这里。",
+    empty: "本项目暂无待办",
+    emptyHint: "记下的想法会在 agent 询问「接下来做什么」时供选择，开始执行即自动从列表移除。",
+    addPlaceholder: "为本项目添加待办…",
+    add: "添加",
+    delete: "删除",
+    clear: "清空",
+    clearConfirm: "清空本项目的全部待办？",
+    confirmCancel: "取消",
+    clearOk: "清空",
   },
   interject: {
     title: "给 Agent 发消息",

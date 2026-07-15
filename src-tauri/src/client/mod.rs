@@ -288,6 +288,16 @@ pub async fn open_for_subscribe() -> std::io::Result<(Reader, OwnedWriteHalf)> {
 /// `AgentsState` 即返回（不持续监听）。daemon 不可达或异常返回 None。
 pub async fn request_agents_snapshot() -> Option<serde_json::Value> {
     ensure_running().await.ok()?;
+    agents_snapshot_once().await
+}
+
+/// 同上，但 daemon 未运行时**不拉起**（待办窗口项目候选用，spec todo-whats-next D9）：
+/// 连不上直接返回 None，窗口照样可用。
+pub async fn agents_snapshot_if_running() -> Option<serde_json::Value> {
+    agents_snapshot_once().await
+}
+
+async fn agents_snapshot_once() -> Option<serde_json::Value> {
     let (mut reader, mut writer) = connect_split().await.ok()?;
     ipc::write_msg(&mut writer, &ClientMsg::Hello(hello()))
         .await

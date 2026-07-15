@@ -199,12 +199,15 @@ impl Coordinator {
         if !self.terminal.try_set(()) {
             return;
         }
-        let (exiter, pending_count) = {
+        let (exiter, pending_count, dequeue_ids) = {
             let inner = self.inner.lock().unwrap();
             // 进入收尾：此后 GUI 拦下关窗退出，独占由协调器主动 `app.exit`。
             self.finalizing.store(true, Ordering::SeqCst);
             let source = result.source_channel_id.clone();
             let action = result.action;
+            // 首个终态回答＝「开始执行」时刻（spec todo-whats-next D2）：收集回答消耗的待办 id，
+            // 锁外 best-effort 出队（whats-next / Stop 卡 chip + 弹窗折叠待办区）。
+            let dequeue_ids = crate::todos::ids_to_dequeue(&inner.request, &result);
             *self.winner.lock().unwrap() = Some(source.clone());
             *self.result.lock().unwrap() = Some(result);
 
@@ -238,8 +241,12 @@ impl Coordinator {
                     losers.iter().filter(|c| c.id() != "popup").count()
                 }
             };
-            (inner.exiter.clone(), pending)
+            (inner.exiter.clone(), pending, dequeue_ids)
         };
+
+        if !dequeue_ids.is_empty() {
+            let _ = crate::todos::take(&self.project, &dequeue_ids);
+        }
 
         self.pending.store(pending_count, Ordering::SeqCst);
 

@@ -11,6 +11,7 @@ import {
   focusAgentTerminal,
   interjectClear,
   openInterject,
+  openTodos,
 } from "../lib/ipc";
 import { isFocusableTerminal } from "../lib/terminals";
 import type { AgentKind, AgentRecord, AgentRunState } from "../lib/types";
@@ -236,6 +237,20 @@ async function onSendMessage(a: AgentRecord): Promise<void> {
   }
 }
 
+// 「项目待办」：打开待办窗口并预选该 agent 的项目（spec todo-whats-next D9）。需已知 cwd。
+function canOpenTodos(a: AgentRecord): boolean {
+  return !!a.cwd;
+}
+
+async function onOpenTodos(a: AgentRecord): Promise<void> {
+  if (!a.cwd) return;
+  try {
+    await openTodos(a.cwd);
+  } catch (err) {
+    console.warn("open todos failed", err);
+  }
+}
+
 // 撤回待送达插话：行内二次确认后清空队列（daemon 推回新快照，徽标消失）。
 const confirmRevokeSession = ref<string | null>(null);
 
@@ -384,6 +399,23 @@ onBeforeUnmount(() => {
                       stroke-linecap="round" stroke-linejoin="round" />
                     <path d="M5 5.6 H11 M5 7.8 H9" stroke="currentColor" stroke-width="1.3"
                       stroke-linecap="round" />
+                  </svg>
+                </button>
+                <button
+                  v-if="canOpenTodos(a)"
+                  type="button"
+                  class="focus-btn todo-btn"
+                  :title="t('agents.openTodos')"
+                  :aria-label="t('agents.openTodos')"
+                  @click="onOpenTodos(a)"
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <rect x="2" y="2.5" width="12" height="11" rx="2" fill="none"
+                      stroke="currentColor" stroke-width="1.3" />
+                    <path d="M4.6 6 L6 7.4 L8.2 5" fill="none" stroke="currentColor"
+                      stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+                    <path d="M9.8 6.6 H11.6 M4.8 10.4 H11.6" stroke="currentColor"
+                      stroke-width="1.3" stroke-linecap="round" />
                   </svg>
                 </button>
                 <button
@@ -760,6 +792,10 @@ onBeforeUnmount(() => {
 .msg-btn:hover {
   background: color-mix(in srgb, #0a84ff 14%, transparent);
   color: #0a84ff;
+}
+.todo-btn:hover {
+  background: color-mix(in srgb, #30d158 16%, transparent);
+  color: #248a3d;
 }
 .ij-row {
   display: flex;

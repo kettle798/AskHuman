@@ -24,6 +24,9 @@ import {
   popupShowWindow,
   popupImTipVisible,
   popupImTipDismiss,
+  todosList,
+  todosAdd,
+  todosRemove,
 } from "../../lib/ipc";
 import { isFocusableTerminal } from "../../lib/terminals";
 import { matchShortcut } from "../../lib/shortcut";
@@ -42,6 +45,7 @@ import type {
   Question,
   QuestionAnswer,
   ThemeMode,
+  TodoEntry,
 } from "../../lib/types";
 import { useSpeech } from "./useSpeech";
 import { useAttachments } from "./useAttachments";
@@ -258,6 +262,66 @@ export function usePopupCore() {
   const selectOnly = computed(() => request.value?.selectOnly ?? false);
   // 单选：选项渲染为 radio，每题恰好一个（D11）。
   const single = computed(() => request.value?.single ?? false);
+  // whats-next 提问（spec todo-whats-next D2/D7）：待办已是问题选项本体，折叠区不重复渲染 chip。
+  const whatsNext = computed(() => request.value?.whatsNext ?? false);
+
+  // ===== 折叠待办区（spec todo-whats-next D7）=====
+  // 该提问项目的待办列表；直读 todos.json（经后端命令），渲染后异步加载不阻塞首屏。
+  const todos = ref<TodoEntry[]>([]);
+  const todosOpen = ref(false);
+  // 选中的待办条目 id（提交时文本并入 userInput、id 送后端出队）。
+  const todoChosenIds = ref<string[]>([]);
+  const todoNewText = ref("");
+  // chip 点选作答仅在单题、非 whats-next、非严格选择时启用（多题归属歧义 / whats-next 已是
+  // 选项本体 / 严格选择禁自由文本）；其余场景折叠区只保留增删查看。
+  const todoChipsEnabled = computed(
+    () => total.value === 1 && !whatsNext.value && !selectOnly.value
+  );
+  // 无项目 key（未知 workspace）时无法归属待办，整区隐藏。
+  const todoSectionVisible = computed(
+    () => !!projectPath.value && !!request.value
+  );
+  const selectedTodos = computed(() =>
+    todos.value.filter((td) => todoChosenIds.value.includes(td.id))
+  );
+
+  async function loadTodos() {
+    if (!todoSectionVisible.value) return;
+    try {
+      todos.value = await todosList(projectPath.value);
+    } catch {
+      /* 旧后端无此命令：待办区保持空 */
+    }
+  }
+
+  function toggleTodo(id: string) {
+    if (!todoChipsEnabled.value) return;
+    const i = todoChosenIds.value.indexOf(id);
+    if (i >= 0) todoChosenIds.value.splice(i, 1);
+    else todoChosenIds.value.push(id);
+  }
+
+  async function addTodo() {
+    const text = todoNewText.value.trim();
+    if (!text || !projectPath.value) return;
+    todoNewText.value = "";
+    try {
+      const entry = await todosAdd(projectPath.value, text);
+      if (entry) todos.value.push(entry);
+    } catch {
+      todoNewText.value = text; // 失败还原输入，避免内容丢失
+    }
+  }
+
+  async function removeTodo(id: string) {
+    todos.value = todos.value.filter((td) => td.id !== id);
+    todoChosenIds.value = todoChosenIds.value.filter((x) => x !== id);
+    try {
+      await todosRemove(projectPath.value, id);
+    } catch {
+      /* best-effort：条目已不在文件中也无妨（spec D11） */
+    }
+  }
   const currentQuestion = computed<Question | null>(
     () => questions.value[current.value] ?? null
   );
@@ -371,8 +435,10 @@ export function usePopupCore() {
   const lastSeen = computed(
     () => !isMulti.value || (visited.value[total.value - 1] ?? false)
   );
-  const hasAnyAnswer = computed(() =>
-    questions.value.some((_, i) => isAnswered(i))
+  const hasAnyAnswer = computed(
+    () =>
+      questions.value.some((_, i) => isAnswered(i)) ||
+      todoChosenIds.value.length > 0
   );
   // 严格选择下「必须选中才能提交」：每个有选项的问题都需至少一个勾选。
   const canSubmit = computed(() => {
@@ -891,14 +957,28 @@ export function usePopupCore() {
   }
 
   function collectAnswers(): QuestionAnswer[] {
-    return questions.value.map((q, i) => ({
-      selectedOptions: q.predefinedOptions
-        .map((o) => o.text)
-        .filter((o) => (chosenByQ.value[i] ?? []).includes(o)),
-      userInput: inputByQ.value[i] ?? "",
-      images: imagesByQ.value[i] ?? [],
-      files: (replyFilesByQ.value[i] ?? []).map((f) => f.path),
-    }));
+    return questions.value.map((q, i) => {
+      const answer: QuestionAnswer = {
+        selectedOptions: q.predefinedOptions
+          .map((o) => o.text)
+          .filter((o) => (chosenByQ.value[i] ?? []).includes(o)),
+        userInput: inputByQ.value[i] ?? "",
+        images: imagesByQ.value[i] ?? [],
+        files: (replyFilesByQ.value[i] ?? []).map((f) => f.path),
+      };
+      // 折叠待办区选中的 chip（仅单题启用，恒归第 0 题，spec D7）：文本并入 userInput
+      // （与手输文本按空行拼接，待办在前），id 送后端出队。
+      if (i === 0 && todoChipsEnabled.value && selectedTodos.value.length) {
+        answer.userInput = [
+          ...selectedTodos.value.map((td) => td.text),
+          answer.userInput,
+        ]
+          .filter((s) => s.trim())
+          .join("\n\n");
+        answer.todoIds = selectedTodos.value.map((td) => td.id);
+      }
+      return answer;
+    });
   }
 
   async function submit() {
@@ -1182,6 +1262,10 @@ export function usePopupCore() {
     thumbsRefs.value = [];
     focusedQ.value = null;
     current.value = 0;
+    todos.value = [];
+    todosOpen.value = false;
+    todoChosenIds.value = [];
+    todoNewText.value = "";
     attach.loadThumbs();
     attach.loadDragIcons();
     // 纵向模式（实验开关开 且 多题）：不自动聚焦、保持全部折叠、建哨兵观察。
@@ -1290,6 +1374,7 @@ export function usePopupCore() {
   // 或为用户 / 托盘触发，略晚于首帧注册无碍（自更新态另用 popupUpdateState() 拉初值兜底）。
   // 放此处是为了不阻塞弹窗首屏（原先这些 await 串在 popupInit 之前，正是「加载中」停留的来源）。
   async function initAfterPaint(init: PopupInit) {
+    void loadTodos();
     await attach.initAttachmentPreviewListeners();
     unlistenDrop = await getCurrentWebview().onDragDropEvent((event) => {
       if (event.payload.type !== "drop") return;
@@ -1519,6 +1604,16 @@ export function usePopupCore() {
     imTipVisible,
     imTipConfigure,
     imTipDismiss,
+    // 折叠待办区（spec todo-whats-next D7）
+    todos,
+    todosOpen,
+    todoChosenIds,
+    todoNewText,
+    todoChipsEnabled,
+    todoSectionVisible,
+    toggleTodo,
+    addTodo,
+    removeTodo,
     // 子域
     ...speech,
     ...attach,

@@ -32,7 +32,7 @@ const QUICK_ASK_INTERJECT: &str =
 /// 某 label 是否为宿主统一承载的窗口（用于窗口计数 / 续命判定）。
 /// 插话 composer 窗口每 session 一个，label 动态（`interject-<hash>`），按前缀识别。
 pub fn is_hosted_label(label: &str) -> bool {
-    matches!(label, "settings" | "history" | "agents") || label.starts_with("interject-")
+    matches!(label, "settings" | "history" | "agents" | "todos") || label.starts_with("interject-")
 }
 
 // ===== 内嵌图标资源（三态；统一单色模板图）=====
@@ -546,6 +546,11 @@ fn build_specs(
         i18n::tr(lang, "tray.openHistory").to_string(),
         true,
     ));
+    nodes.push(Node::item(
+        "open_todos",
+        i18n::tr(lang, "tray.openTodos").to_string(),
+        true,
+    ));
     // 「Agent 状态」入口仅在开启了生命周期追踪时显示——否则窗口必为空，徒增困惑。
     // 忙闲数量直接并入标题（合并了原状态区的只读忙闲行）。
     // 有活动 agent（daemon 下发摘要）时父项变**子菜单**（spec agent-interject D7）：
@@ -795,6 +800,8 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
         // 托盘「历史」无调用方项目上下文 → 默认展示全部项目。
         "open_history" => open_window(app, WindowKind::History, true, None, None),
         "open_agents" => open_window(app, WindowKind::Agents, false, None, None),
+        // 托盘「待办」无项目上下文 → 由前端自选默认项目。
+        "open_todos" => open_window(app, WindowKind::Todos, false, None, None),
         "check_update" => {
             tauri::async_runtime::spawn(async {
                 if let Ok(info) = crate::update::check().await {
@@ -872,6 +879,10 @@ pub(crate) fn open_window(
             Some(t) => crate::app::create_interject_window(app, &cfg, t, pin_above_popup),
             None => return, // session 缺失：无法定位目标 agent，忽略。
         },
+        // `param` 槽位在待办窗口语义下是「预选项目 key」（spec todo-whats-next D9）。
+        WindowKind::Todos => {
+            crate::app::create_todos_window(app, &cfg, param.as_deref(), pin_above_popup)
+        }
     };
     if r.is_ok() {
         // 宿主是 accessory app（不自动激活）：新建窗口需显式聚焦，才能前置到置顶弹窗之上并接收键盘。
@@ -879,6 +890,7 @@ pub(crate) fn open_window(
             WindowKind::Settings => "settings".to_string(),
             WindowKind::History => "history".to_string(),
             WindowKind::Agents => "agents".to_string(),
+            WindowKind::Todos => "todos".to_string(),
             WindowKind::Interject => target
                 .as_ref()
                 .map(|t| crate::gui_host::interject_label(&t.session))

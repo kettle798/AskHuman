@@ -9,6 +9,7 @@ import ConfirmPane from "./popup/ConfirmPane.vue";
 import MessageSection from "./popup/MessageSection.vue";
 import QuestionCards from "./popup/QuestionCards.vue";
 import SequentialPane from "./popup/SequentialPane.vue";
+import TodoSection from "./popup/TodoSection.vue";
 import PopupFooter from "./popup/PopupFooter.vue";
 import PopupOverlays from "./popup/PopupOverlays.vue";
 import "./popup/popup.css";
@@ -72,6 +73,7 @@ const {
       @change="onFileChange"
     />
 
+    <TodoSection v-if="!isConfirm" />
     <PopupFooter />
     <PopupOverlays />
   </div>

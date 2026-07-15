@@ -351,6 +351,7 @@ impl MessagingChannel for SlackSession {
                         user_input: s.user_input,
                         images,
                         files,
+                        todo_ids: Vec::new(),
                     });
                 }
                 SlInbound::Message(event) => {
@@ -635,6 +636,7 @@ async fn message_to_answer(
         user_input,
         images,
         files,
+        todo_ids: Vec::new(),
     })
 }
 

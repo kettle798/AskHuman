@@ -304,6 +304,126 @@ pub fn popup_agent_resolved() -> PushedAgent {
         .unwrap_or_default()
 }
 
+// ===== 项目级待办队列（spec todo-whats-next D7/D9）：直读直写 todos.json，无 daemon 依赖 =====
+
+#[tauri::command]
+pub fn todos_list(project: String) -> Vec<crate::todos::TodoEntry> {
+    crate::todos::list(&project)
+}
+
+#[tauri::command]
+pub fn todos_add(project: String, text: String) -> Option<crate::todos::TodoEntry> {
+    crate::todos::add(&project, &text)
+}
+
+#[tauri::command]
+pub fn todos_remove(project: String, id: String) -> bool {
+    crate::todos::remove(&project, &id)
+}
+
+#[tauri::command]
+pub fn todos_clear(project: String) -> usize {
+    crate::todos::clear(&project)
+}
+
+/// 待办窗口初始化负载：主题 + 语言（与 `agents_init` 同模式）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodosInit {
+    theme: String,
+    lang: String,
+}
+
+#[tauri::command]
+pub fn todos_init(state: State<AppState>) -> TodosInit {
+    TodosInit {
+        theme: theme_str(state.config.general.theme),
+        lang: crate::i18n::Lang::resolve(&state.config.general.language)
+            .code()
+            .to_string(),
+    }
+}
+
+/// 待办窗口项目选择器候选（spec todo-whats-next D9）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoProjectInfo {
+    /// 项目 key（git 根路径）。
+    pub key: String,
+    /// 显示名（basename）。
+    pub name: String,
+    /// 该项目当前待办条数。
+    pub count: usize,
+}
+
+/// 项目选择器候选＝有待办的项目 ∪ 活跃 agent 的项目 ∪ 最近 workspace 索引（去重）。
+/// 排序：有待办者在前（按名），其余按 workspace 近期使用倒序。daemon 未运行时不拉起
+/// （agent 项目为空即可），窗口照样可用。
+#[tauri::command]
+pub async fn todos_projects() -> Vec<TodoProjectInfo> {
+    let todos = crate::todos::all();
+    let mut keys: Vec<String> = todos.keys().cloned().collect();
+    keys.sort_by_key(|k| crate::project::display_name(k).to_lowercase());
+
+    // 活跃 agent 的项目（cwd → git 根 key）。仅 Unix 有 daemon。
+    #[cfg(unix)]
+    if let Some(agents) = crate::client::agents_snapshot_if_running().await {
+        for rec in agents.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+            let ended = rec.get("state").and_then(|v| v.as_str()) == Some("ended");
+            let Some(cwd) = rec.get("cwd").and_then(|v| v.as_str()).filter(|c| !c.is_empty())
+            else {
+                continue;
+            };
+            if ended {
+                continue;
+            }
+            let key = crate::project::detect_from(std::path::Path::new(cwd));
+            if !key.is_empty() && !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+
+    // 最近 workspace 索引（IM Agent 任务同款；隐藏项不列）：按近期使用倒序追加。
+    let mut workspaces = crate::agents::workspaces::list();
+    workspaces.retain(|w| !w.hidden);
+    workspaces.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
+    for w in workspaces {
+        let key = crate::project::detect_from(std::path::Path::new(&w.path));
+        if !key.is_empty() && !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+
+    keys.into_iter()
+        .map(|key| TodoProjectInfo {
+            name: crate::project::display_name(&key),
+            count: todos.get(&key).map(|e| e.len()).unwrap_or(0),
+            key,
+        })
+        .collect()
+}
+
+/// 打开（或聚焦）项目待办窗口（spec todo-whats-next D9）：经统一宿主路由（全局单窗）。
+/// `dir` 为预选项目定位目录（如 agent 的 cwd），后端映射到 git 根 key；None＝前端自选默认。
+#[tauri::command]
+pub fn open_todos(app: AppHandle, dir: Option<String>) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let project = dir
+            .filter(|d| !d.trim().is_empty())
+            .map(|d| crate::project::detect_from(std::path::Path::new(&d)))
+            .filter(|k| !k.is_empty());
+        route_open_window(app, crate::gui_host::WindowKind::Todos, false, project, None);
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (app, dir);
+        Err("unsupported".to_string())
+    }
+}
+
 /// 前端提交的作答内容（按问题顺序，每题一项）。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -612,6 +732,10 @@ fn route_open_window(
                     Some(t) => crate::app::create_interject_window(&fallback, &cfg, t, pin),
                     None => Ok(()),
                 },
+                // `project` 槽位在待办窗口语义下是「预选项目 key」。
+                WindowKind::Todos => {
+                    crate::app::create_todos_window(&fallback, &cfg, project.as_deref(), pin)
+                }
             };
         });
     });

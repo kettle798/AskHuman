@@ -36,6 +36,9 @@ import type {
   SlackWaitArgs,
   TelegramTestArgs,
   ThemeMode,
+  TodoEntry,
+  TodoProjectInfo,
+  TodosInit,
   UpdateInfo,
   WindowEffect,
 } from "./types";
@@ -346,3 +349,28 @@ export const channelHealth = () =>
 
 export const popupUpdateState = () =>
   invoke<PushedUpdateState>("popup_update_state");
+
+// ===== 项目级待办队列（spec todo-whats-next D7/D9）：直读直写 todos.json =====
+
+export const todosList = (project: string) =>
+  invoke<TodoEntry[]>("todos_list", { project });
+
+export const todosAdd = (project: string, text: string) =>
+  invoke<TodoEntry | null>("todos_add", { project, text });
+
+export const todosRemove = (project: string, id: string) =>
+  invoke<boolean>("todos_remove", { project, id });
+
+export const todosClear = (project: string) =>
+  invoke<number>("todos_clear", { project });
+
+/** 待办窗口初始化：主题 + 语言。 */
+export const todosInit = () => invoke<TodosInit>("todos_init");
+
+/** 待办窗口项目选择器候选（有待办的项目 ∪ 活跃 agent 项目 ∪ 最近 workspace）。 */
+export const todosProjects = () =>
+  invoke<TodoProjectInfo[]>("todos_projects");
+
+/** 打开（或聚焦）项目待办窗口（经统一宿主路由，全局单窗）；`dir` 为预选项目定位目录。 */
+export const openTodos = (dir: string | null) =>
+  invoke<void>("open_todos", { dir });

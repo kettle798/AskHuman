@@ -18,6 +18,8 @@ pub enum WindowKind {
     Agents,
     /// 插话 composer（spec agent-interject D7）：每 session 全局唯一，`OpenWindow.session` 必填。
     Interject,
+    /// 项目待办窗口（spec todo-whats-next D9）：全局唯一；`project` 为预选项目 key（可空）。
+    Todos,
 }
 
 /// CLI / 弹窗 → 宿主 的消息。

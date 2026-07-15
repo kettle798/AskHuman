@@ -15,7 +15,13 @@ pub fn detect() -> String {
         Ok(p) => p,
         Err(_) => return String::new(),
     };
-    let root = git_root(&cwd).unwrap_or(cwd);
+    detect_from(&cwd)
+}
+
+/// Project key for an explicit directory (e.g. the cwd a hook reported on stdin): its git root,
+/// falling back to the directory itself.
+pub fn detect_from(dir: &Path) -> String {
+    let root = git_root(dir).unwrap_or_else(|| dir.to_path_buf());
     canonical_string(&root)
 }
 

@@ -11,6 +11,8 @@ export interface AskRequest {
   single: boolean;
   /** 结果输出格式（全局；仅影响 CLI 输出，弹窗不关心）。 */
   outputFormat: OutputFormat;
+  /** whats-next 提问（spec todo-whats-next D2/D7）：待办已是问题选项，折叠待办区只留增删。 */
+  whatsNext?: boolean;
 }
 
 export type ConfirmFieldKind = "text" | "path" | "timestamp";
@@ -175,6 +177,31 @@ export interface MessagePrompt {
 export interface OptionItem {
   text: string;
   recommended: boolean;
+  /** whats-next / Stop 卡待办 chip 对应的待办条目 id（spec todo-whats-next D2/D5）。 */
+  todoId?: string | null;
+}
+
+/** 项目级待办条目（spec todo-whats-next D1）。 */
+export interface TodoEntry {
+  id: string;
+  text: string;
+  createdAtMs: number;
+}
+
+/** 待办窗口项目选择器候选（spec todo-whats-next D9）。 */
+export interface TodoProjectInfo {
+  /** 项目 key（git 根路径）。 */
+  key: string;
+  /** 显示名（basename）。 */
+  name: string;
+  /** 该项目当前待办条数。 */
+  count: number;
+}
+
+/** 待办窗口 init 负载。 */
+export interface TodosInit {
+  theme: ThemeMode;
+  lang: string;
 }
 
 export interface Question {
@@ -240,6 +267,8 @@ export interface QuestionAnswer {
   userInput: string;
   images: ImageAttachment[];
   files: string[];
+  /** 折叠待办区选中的待办条目 id（spec todo-whats-next D7）：文本已并入 userInput，id 供后端出队。 */
+  todoIds?: string[];
 }
 
 export interface PopupSubmission {

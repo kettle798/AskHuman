@@ -14,6 +14,9 @@ pub const MARKER_USER_INPUT: &str = "[user_input]";
 pub const MARKER_FILES: &str = "[files]";
 pub const MARKER_STATUS: &str = "[status]";
 
+/// whats-next「准许结束」的固定输出（英文，agent 契约，spec todo-whats-next D3）。
+pub const WHATS_NEXT_END_SENTENCE: &str = "The user approved ending this turn — no more tasks.";
+
 /// 取消路径输出。
 pub fn cancel_output(lang: Lang) -> String {
     format!("{}\n{}", MARKER_STATUS, tr(lang, "status.cancel"))
@@ -128,6 +131,83 @@ pub fn send_output(
     }
 
     sections.join("\n\n")
+}
+
+/// whats-next 提交的语义映射结果（spec todo-whats-next D2 表格五分支）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WhatsNextReply {
+    /// 派活：stdout 输出任务文本（选中待办原文 ± 空行拼补充，或纯自由文本）。
+    Task(String),
+    /// 准许结束：stdout 输出固定英文结束句（agent 据 rules 输出结束 marker）。
+    End,
+    /// 未作答 / 取消：沿用普通 Ask 取消语义（`[status]` 指示继续询问）。
+    Cancelled,
+}
+
+/// whats-next 提交映射（纯函数，spec todo-whats-next D2/D3）。
+///
+/// 单题单选：选中待办 chip（带 `todo_id` 的选项）→ 该条原文（有补充文本时按空行拼接其后）；
+/// 只填文本 → 该文本；选「结束本轮」无文本 → End；「结束＋文本」视为继续（文本是新指令）。
+/// 出队不在此处：赢家回答的待办 id 由 `todos::ids_to_dequeue` 统一收集、Coordinator 出队。
+pub fn whats_next_reply(request: &AskRequest, result: &ChannelResult) -> WhatsNextReply {
+    if result.action == ChannelAction::Cancel {
+        return WhatsNextReply::Cancelled;
+    }
+    let answer = result.answers.first();
+    let input = answer
+        .and_then(|a| a.user_input.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    // 选中的选项按原文回查（channel 只回传文本）：优先待办 chip，其余（无 todo_id）即「结束本轮」。
+    let options = request
+        .questions
+        .first()
+        .map(|q| q.predefined_options.as_slice())
+        .unwrap_or(&[]);
+    let selected_todo = answer
+        .map(|a| a.selected_options.as_slice())
+        .unwrap_or(&[])
+        .iter()
+        .find_map(|sel| {
+            options
+                .iter()
+                .find(|o| &o.text == sel && o.todo_id.is_some())
+        });
+    if let Some(todo) = selected_todo {
+        let text = match input {
+            Some(extra) => format!("{}\n\n{}", todo.text, extra),
+            None => todo.text.clone(),
+        };
+        return WhatsNextReply::Task(text);
+    }
+    let selected_end = answer
+        .map(|a| a.selected_options.as_slice())
+        .unwrap_or(&[])
+        .iter()
+        .any(|sel| options.iter().any(|o| &o.text == sel && o.todo_id.is_none()));
+    match (selected_end, input) {
+        // 「结束＋文字」＝继续：文字是新指令（有话说＝还没完）。
+        (_, Some(text)) => WhatsNextReply::Task(text.to_string()),
+        (true, None) => WhatsNextReply::End,
+        // 空提交（无选择无文本）：视同未作答，继续询问。
+        (false, None) => WhatsNextReply::Cancelled,
+    }
+}
+
+/// whats-next 的 stdout 渲染（spec D3：一段纯文本；取消沿用 `[status]`）。
+/// 回答附带的图片/文件已由调用方落盘为路径，非空时按既有 `[files]` 区块附于文本之后，
+/// 避免静默丢弃用户随任务附带的材料（普通 Ask 同一契约，agent 已认识该标记）。
+pub fn whats_next_output(reply: &WhatsNextReply, file_paths: &[String], lang: Lang) -> String {
+    let base = match reply {
+        WhatsNextReply::Task(text) => text.clone(),
+        WhatsNextReply::End => WHATS_NEXT_END_SENTENCE.to_string(),
+        WhatsNextReply::Cancelled => return cancel_output(lang),
+    };
+    if file_paths.is_empty() {
+        base
+    } else {
+        format!("{}\n\n{}\n{}", base, MARKER_FILES, file_paths.join("\n"))
+    }
 }
 
 /// 结构化 JSON 输出（D7）：snake_case、美化多行、省略空字段；`answers` 仅含**有作答**的题。
@@ -374,6 +454,7 @@ mod tests {
             user_input: input.map(|s| s.to_string()),
             images: Vec::new(),
             files: files.iter().map(|x| x.to_string()).collect(),
+            todo_ids: Vec::new(),
         }
     }
 
@@ -441,6 +522,99 @@ mod tests {
         assert_eq!(files[0], "/tmp/a.png");
         assert_eq!(files[1], "/tmp/b.md");
         assert_eq!(v["answers"][0]["user_input"], "note");
+    }
+
+    // ===== whats-next（spec todo-whats-next D2/D3）=====
+
+    /// whats-next 请求：两条待办 chip + 末位「结束本轮」。
+    fn wn_request() -> AskRequest {
+        let mut r = AskRequest::new(
+            MessagePrompt::default(),
+            vec![Question::new(
+                "What should we do next?".into(),
+                vec![
+                    OptionItem::with_todo("修复登录 bug", "id-1"),
+                    OptionItem::with_todo("写发布说明", "id-2"),
+                    OptionItem::new("End this turn", false),
+                ],
+            )],
+            true,
+        );
+        r.single = true;
+        r.whats_next = true;
+        r
+    }
+
+    fn wn_result(selected: &[&str], input: Option<&str>) -> ChannelResult {
+        ChannelResult {
+            action: ChannelAction::Send,
+            answers: vec![answered(selected, input, &[])],
+            source_channel_id: "popup".into(),
+        }
+    }
+
+    #[test]
+    fn whats_next_selected_todo_outputs_its_text() {
+        let reply = whats_next_reply(&wn_request(), &wn_result(&["修复登录 bug"], None));
+        assert_eq!(reply, WhatsNextReply::Task("修复登录 bug".into()));
+    }
+
+    #[test]
+    fn whats_next_todo_with_supplement_joins_with_blank_line() {
+        let reply = whats_next_reply(&wn_request(), &wn_result(&["写发布说明"], Some(" 顺带更新截图 ")));
+        assert_eq!(
+            reply,
+            WhatsNextReply::Task("写发布说明\n\n顺带更新截图".into())
+        );
+    }
+
+    #[test]
+    fn whats_next_free_text_only_is_a_new_task() {
+        let reply = whats_next_reply(&wn_request(), &wn_result(&[], Some("先跑一遍测试")));
+        assert_eq!(reply, WhatsNextReply::Task("先跑一遍测试".into()));
+    }
+
+    #[test]
+    fn whats_next_end_without_text_approves_ending() {
+        let reply = whats_next_reply(&wn_request(), &wn_result(&["End this turn"], None));
+        assert_eq!(reply, WhatsNextReply::End);
+        assert_eq!(
+            whats_next_output(&reply, &[], Lang::En),
+            WHATS_NEXT_END_SENTENCE
+        );
+    }
+
+    #[test]
+    fn whats_next_end_with_text_means_continue() {
+        // 「结束＋文字」＝继续：文字是新指令（spec D2 表第 4 行）。
+        let reply = whats_next_reply(&wn_request(), &wn_result(&["End this turn"], Some("还有个想法")));
+        assert_eq!(reply, WhatsNextReply::Task("还有个想法".into()));
+    }
+
+    #[test]
+    fn whats_next_cancel_and_empty_submit_keep_asking() {
+        let cancel = ChannelResult::cancel("popup");
+        assert_eq!(
+            whats_next_reply(&wn_request(), &cancel),
+            WhatsNextReply::Cancelled
+        );
+        // 空提交（无选择无文本）同样视为未作答。
+        assert_eq!(
+            whats_next_reply(&wn_request(), &wn_result(&[], None)),
+            WhatsNextReply::Cancelled
+        );
+        assert!(whats_next_output(&WhatsNextReply::Cancelled, &[], Lang::En)
+            .starts_with("[status]\n"));
+    }
+
+    #[test]
+    fn whats_next_output_appends_files_block() {
+        let reply = WhatsNextReply::Task("任务".into());
+        assert_eq!(
+            whats_next_output(&reply, &s(&["/tmp/a.png"]), Lang::En),
+            "任务\n\n[files]\n/tmp/a.png"
+        );
+        assert_eq!(whats_next_output(&reply, &[], Lang::En), "任务");
     }
 
     #[test]

@@ -157,6 +157,10 @@ pub struct TaskRequest {
     /// 性能测试专用：弹窗画完首帧后自动取消（仅 harness 用，避免人工点按）。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub perf_autodismiss: bool,
+    /// whats-next 提问（spec todo-whats-next D2）：daemon 侧透传到 `AskRequest.whats_next`，
+    /// 结果渲染为一段纯文本。旧 CLI 不带 → false（普通提问，行为不变）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub whats_next: bool,
 }
 
 /// Hidden PermissionRequest hook → daemon confirmation task. The daemon owns request ids and

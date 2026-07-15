@@ -100,6 +100,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "title.history" => pick(lang, "AskHuman History", "AskHuman 历史记录"),
         "title.agents" => pick(lang, "AskHuman Agents", "AskHuman Agent 状态"),
         "title.interject" => pick(lang, "Message to Agent", "给 Agent 发消息"),
+        "title.todos" => pick(lang, "AskHuman Todos", "AskHuman 待办"),
 
         // —— macOS 附件右键菜单 ——
         "menu.open" => pick(lang, "Open", "打开"),
@@ -150,6 +151,39 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             lang,
             "--select-only requires every question to have options (-o)",
             "--select-only 要求每个问题都有选项(-o)",
+        ),
+        "cli.whatsNextConflict" => pick(
+            lang,
+            "--whats-next cannot be combined with {opt}",
+            "--whats-next 不能与 {opt} 同时使用",
+        ),
+
+        // —— whats-next 固定提问（spec todo-whats-next D2）——
+        "whatsNext.question" => pick(lang, "What should we do next?", "接下来做什么？"),
+        "whatsNext.endOption" => pick(lang, "End this turn", "结束本轮"),
+
+        // —— CLI todo 子命令（spec todo-whats-next D6）——
+        "todo.added" => pick(lang, "Added todo #{n}: {text}", "已添加待办 #{n}: {text}"),
+        "todo.empty" => pick(lang, "No pending todos for this project", "本项目暂无待办"),
+        "todo.listHeader" => pick(lang, "Pending todos ({project}):", "待办列表（{project}）:"),
+        "todo.removed" => pick(lang, "Removed todo #{n}: {text}", "已删除待办 #{n}: {text}"),
+        "todo.invalidIndex" => pick(
+            lang,
+            "invalid todo number: {n} (run `{prog} todo list` to see numbers)",
+            "无效的待办编号: {n}（运行 `{prog} todo list` 查看编号）",
+        ),
+        "todo.cleared" => pick(lang, "Cleared {n} todo(s)", "已清空 {n} 条待办"),
+        "todo.clearConfirm" => pick(
+            lang,
+            "Clear all {n} todo(s) of this project? [y/N] ",
+            "确认清空本项目全部 {n} 条待办？[y/N] ",
+        ),
+        "todo.clearAborted" => pick(lang, "Aborted; nothing was cleared", "已取消，未清空"),
+        "todo.missingText" => pick(lang, "todo add is missing the todo text", "todo add 缺少待办内容"),
+        "todo.unknownSubcommand" => pick(
+            lang,
+            "unknown todo subcommand: {cmd} (use add / list / rm / clear)",
+            "未知的 todo 子命令: {cmd}（可用 add / list / rm / clear）",
         ),
 
         // —— 文件附件解析错误 ——
@@ -900,6 +934,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         // 操作区。
         "tray.openSettings" => pick(lang, "Settings", "设置"),
         "tray.openHistory" => pick(lang, "History", "历史记录"),
+        "tray.openTodos" => pick(lang, "Todos", "待办"),
         "tray.openAgents" => pick(lang, "Agent Status", "Agent 状态"),
         "tray.openAgentsCounts" => pick(
             lang,
