@@ -44,7 +44,7 @@ AskHuman "请看看这个改动？" -f ./diff.patch -q "要继续吗？" -o "继
 | F7 | 发送共享 Message | `POST {baseUrl}/open-apis/im/v1/messages?receive_id_type=open_id`，body `{receive_id: openId, msg_type, content(JSON 字符串)}`。文本用 `msg_type=text`（`content={"text":..}`）；Markdown 走互动卡片或文本（见 §3 F12） |
 | F8 | 发送题目（互动卡片） | 卡片以 `msg_type=interactive` 直接发**卡片 JSON 2.0**（无需模板）。卡片含：标题 header + 正文（markdown/plain_text 组件）+ **表单容器**（内嵌每个选项一个 `checker` 勾选器 + 一个输入框 `input` + 一个 `form_action_type="submit"` 的提交按钮）。回调走长连接 `card.action.trigger` |
 | F9 | 选项形态 | 预定义选项用**复选框/勾选器组（`checker`，平铺直接勾）**，置于表单容器内；提交时一次性回传所有勾选状态（`form_value`）。无预定义选项时省略选项区，仅留输入框 + 提交 |
-| F10 | 收消息（长连接） | WS 收两类业务帧：① 事件 `im.message.receive_v1`（用户文字【作答期忽略】/图片/文件 / 自动识别码 / open_id 识别）；② 卡片回调 `card.action.trigger`（表单提交）。每条业务帧须 **3 秒内回包**（响应帧）：事件回空 ACK；卡片回调回 `{toast, card}`（更新卡片 + 轻提示）。控制帧 ping/pong（`method=0`）维持心跳；大消息按 `message_id`/`sum`/`seq` header 分片重组；断线重连（重新取 endpoint） |
+| F10 | 收消息（长连接） | WS 收两类业务帧：① 事件 `im.message.receive_v1`（用户文字【作答期忽略】/图片/文件 / 自动识别码 / open_id 识别）；② 卡片回调 `card.action.trigger`（表单提交）。每条业务帧须 **3 秒内回包**（响应帧）：事件回空 ACK；卡片回调回 `{toast, card}`（更新卡片 + 轻提示）。最终提交由会话给出响应体、Router 写回；会话须等 Router 完成 WebSocket 写入尝试后才返回答案，避免单进程随答案完成而提前退出。控制帧 ping/pong（`method=0`）维持心跳；大消息按 `message_id`/`sum`/`seq` header 分片重组；断线重连（重新取 endpoint） |
 | F11 | 每题完成方式 | 卡片上点「提交」即完成该题（勾选 + 补充文字一并回传）。回调 `event.action.form_value` 含各 `checker` 的勾选布尔与 `input` 文本；按勾选映射回选项文本，输入框文本作为补充输入 |
 | F12 | Markdown | 卡片正文：`is_markdown=true` 用 `markdown` 组件（飞书 lark_md 子集，尽量原样传递、不做重转义）；`is_markdown=false` 用 `plain_text`。共享 Message 文本走 `msg_type=text`（飞书富文本不强求）。题首加粗头部沿用「`「Question from {source}」`」/「`Question i/n`」规则 |
 | F13 | 作答-接收图片/文件（人→AI） | **支持**：作答期间累积用户在聊天里发的图片（`msg_type=image`）、文件（`msg_type=file`）；按 `message_id` + `file_key` 调 `GET {baseUrl}/open-apis/im/v1/messages/{message_id}/resources/{file_key}?type=image|file` 下载到本地临时文件（按真实类型修正扩展名）；图片进回答 `[图片]`、文件进回答 `[文件]`。**聊天里的纯文字忽略**（请用卡片输入框，避免双输入源冲突；与钉钉 DC8 一致） |
@@ -100,3 +100,4 @@ AskHuman "请看看这个改动？" -f ./diff.patch -q "要继续吗？" -o "继
 
 - **2026-06-06｜修复：卡片回调收不到（点提交转圈回弹）**：实测飞书卡片回调 `card.action.trigger` 经长连接投递时，帧头 `type` 为 `event`（非 `card`）。原实现按帧 `type` 路由，把它当普通事件丢弃。改为**以回包内 `header.event_type` 为准**路由（兼容 `type=event`/`card`），并新增环境变量 `HUMANINLOOP_FEISHU_DEBUG=1` 时写 `~/.humaninloop/feishu-debug.log` 的诊断日志（默认关闭）。
 - **2026-06-06｜终态卡片改为「钉钉模式」**：原终态（类 Telegram）把整张卡片换成「正文 + 一行 ✅ 已提交」，丢弃选项与按钮。改为**复刻钉钉**：同一表单结构下，勾选器 `disabled` 且按用户选择 `checked`、输入框 `default_value` 回显补充文字且 `disabled`、提交按钮 `disabled` 并改文案（提交→「已提交」；被抢答→「已在 {渠道} 回答」且勾选器不勾）。选中项仅禁用并保留高亮，不加删除线。
+- **2026-07-15｜修复：Windows 最终提交显示「未响应」**：Windows 单进程回退路径可能在会话把最终答案交给 Coordinator 后立即退出；原 oneshot 只保证响应体送到 Router，不保证 Router 已把响应帧写入 WebSocket，形成退出竞态。卡片 ACK 改为「响应体 + 写回完成」两阶段握手，最终提交等待 Router 完成写入尝试后再返回答案；中间卡片操作仍只提交响应体，不增加等待。

@@ -482,7 +482,7 @@ pub(super) async fn ensure_watch_route_for(
 pub(super) fn handle_watch_card_action(
     state: &Arc<ServerState>,
     data: &serde_json::Value,
-    ack: tokio::sync::oneshot::Sender<Option<serde_json::Value>>,
+    ack: crate::feishu::router::CardAck,
 ) {
     use crate::feishu::card::{build_watch_card, callback_update_card, WatchAction};
     let Some((mid, action)) = crate::feishu::card::parse_watch_action(data) else {

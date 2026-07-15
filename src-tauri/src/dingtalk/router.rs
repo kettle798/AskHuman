@@ -4,8 +4,9 @@
 //! 取消安全：Reader 任务**只**在 `stream.recv()` 上阻塞，绝不把它放进会被取消的 `select`，
 //! 以免半路丢用户消息。会话经 mpsc 收事件、经共享路由表登记/注销，不再各自持连接。
 //!
-//! 卡片回调遵循 spec §11：Reader 收到即**空 ACK**（满足钉钉 3 秒约束），卡片置灰由会话经
-//! OpenAPI `updateCard` 完成（与「被抢答收尾」走同一条路）。
+//! Card callbacks are routed to the owning session for a response body, then written by the Router.
+//! Terminal single-process callers can wait for the corresponding write completion signal before
+//! returning their answer.
 //!
 //! 单进程与 Daemon 复用同一套：Daemon 持**共享且常热**的 Router（跨请求复用，根治多连接抢消息）；
 //! 单进程则每进程起一个只挂 1 个会话的同款 Router。
@@ -28,12 +29,41 @@ const SUBMIT_ACK_TIMEOUT: Duration = Duration::from_millis(2500);
 pub enum DdInbound {
     /// 卡片回调（提问卡「提交」/ watch 卡按钮）：认领方裁决后经 `ack` 回包（成功置灰 / 空包），
     /// 由 Router 写回连接。其余回调（选项切换等）由 Router 直接空 ACK、不转发。
-    Card {
-        data: Value,
-        ack: oneshot::Sender<Value>,
-    },
+    Card { data: Value, ack: CardAck },
     /// 聊天消息（图片/文件/文字；已被底层 `StreamConn` 自动 ACK）。
     Bot(Value),
+}
+
+/// Response handle for a card callback.
+///
+/// Terminal single-process callers use `send_and_wait` so they cannot exit between handing the
+/// response to the Router and the Router attempting the Stream response write.
+pub struct CardAck {
+    response: oneshot::Sender<Value>,
+    write_complete: oneshot::Receiver<()>,
+}
+
+impl CardAck {
+    fn new(response: oneshot::Sender<Value>, write_complete: oneshot::Receiver<()>) -> Self {
+        Self {
+            response,
+            write_complete,
+        }
+    }
+
+    pub fn send(self, body: Value) -> Result<(), Value> {
+        self.response.send(body)
+    }
+
+    pub async fn send_and_wait(self, body: Value) -> Result<(), Value> {
+        let Self {
+            response,
+            write_complete,
+        } = self;
+        response.send(body)?;
+        let _ = tokio::time::timeout(SUBMIT_ACK_TIMEOUT, write_complete).await;
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -206,21 +236,33 @@ async fn reader_task(mut stream: StreamConn, routes: Arc<Mutex<Routes>>, alive: 
                 };
                 // 提交 / watch 回调：转发给认领方并带 oneshot 回执；超时等其裁决，按裁决回包
                 // （满足 3 秒）。孤儿回调（无登记 / 已退出 / 超时）→ 空包：诚实地不显示成功。
-                let resp = match sink {
+                let (resp, write_complete) = match sink {
                     Some(tx) => {
                         let (ack_tx, ack_rx) = oneshot::channel();
-                        if tx.send(DdInbound::Card { data, ack: ack_tx }).is_ok() {
-                            match tokio::time::timeout(SUBMIT_ACK_TIMEOUT, ack_rx).await {
-                                Ok(Ok(payload)) => payload,
-                                _ => json!({}),
-                            }
+                        let (write_tx, write_rx) = oneshot::channel();
+                        if tx
+                            .send(DdInbound::Card {
+                                data,
+                                ack: CardAck::new(ack_tx, write_rx),
+                            })
+                            .is_ok()
+                        {
+                            let payload =
+                                match tokio::time::timeout(SUBMIT_ACK_TIMEOUT, ack_rx).await {
+                                    Ok(Ok(payload)) => payload,
+                                    _ => json!({}),
+                                };
+                            (payload, Some(write_tx))
                         } else {
-                            json!({})
+                            (json!({}), None)
                         }
                     }
-                    None => json!({}),
+                    None => (json!({}), None),
                 };
                 stream.respond(&message_id, resp).await;
+                if let Some(write_complete) = write_complete {
+                    let _ = write_complete.send(());
+                }
             }
             StreamEvent::BotMessage(data) => {
                 dispatch_observers(&routes, &data);
@@ -253,4 +295,31 @@ fn dispatch_observers(routes: &Arc<Mutex<Routes>>, data: &Value) {
         return;
     }
     r.observers.retain(|tx| tx.send(data.clone()).is_ok());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CardAck;
+    use serde_json::json;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn terminal_ack_waits_for_stream_write() {
+        let (response_tx, response_rx) = oneshot::channel();
+        let (write_tx, write_rx) = oneshot::channel();
+        let ack = CardAck::new(response_tx, write_rx);
+        let payload = json!({ "success": true });
+
+        let waiter = tokio::spawn({
+            let payload = payload.clone();
+            async move { ack.send_and_wait(payload).await }
+        });
+
+        assert_eq!(response_rx.await.unwrap(), payload);
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        write_tx.send(()).unwrap();
+        assert!(waiter.await.unwrap().is_ok());
+    }
 }

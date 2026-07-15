@@ -303,7 +303,7 @@ impl MessagingChannel for DingTalkSession {
                     match card::parse_card_submit(&data) {
                         Some(s) if s.out_track_id == out_track_id && s.user_id == user_id => {
                             // 立刻回成功裁决：消除「请求失败」、置灰点击者（不在此等任何慢活）。
-                            let _ = ack.send(card::submit_ack_success());
+                            let _ = ack.send_and_wait(card::submit_ack_success()).await;
                             // 收尾并发下载（不在 3 秒关键路径），再经 OpenAPI 写公有终态文案。
                             for h in downloads {
                                 let _ = h.await;

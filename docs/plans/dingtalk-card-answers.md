@@ -98,6 +98,7 @@ private_input = ""
 - `StreamEvent::CardCallback` 改为携带 **messageId**（如 `CardCallback { data: Value, message_id: String }`）；SYSTEM ping 与 BotMessage 仍**自动 ACK**（行为不变）。
 - 卡片回调（topic `/v1.0/card/instances/callback`）在 `handle_frame` 中**不自动 ACK**，将 `message_id` 随事件上抛。
 - 新增公开方法 `respond(message_id, data_value)`：发送 `{code:200, headers{messageId,...}, message:"OK", data:<json 字符串>}`（即现有 `ack` 的可带 body 版本；保留无 body 的空 ACK 给跳过场景）。
+- Router 的回调句柄包含「响应体已移交」与「Stream 写回已完成」两阶段信号；普通操作只移交响应体，最终提交等待 `send().await` 完成后再返回答案。
 - 约束：会话层必须在 **3 秒内** 对每个卡片回调调用 `respond`（带回包）或空 ACK（跳过），否则钉钉会重推。
 - `commands.rs::dingtalk_detect_wait` 只用 BotMessage，不受影响；其匹配 `StreamEvent` 处补齐新 `CardCallback` 分支（直接空 ACK 跳过即可）。
 
@@ -119,8 +120,8 @@ private_input = ""
      - `CardCallback`：
        - `parse_card_submit` 命中且 `out_track_id` 匹配、`user_id==配置 userId` →
          - 组装 `QuestionAnswer { selected_options, user_input, images(累积), files(累积) }`；
-         - `stream.respond(message_id, {cardUpdateOptions:{updatePrivateDataByKey:true}, userPrivateData:{cardParamMap:{submitted:"true"}}})`；
-         - 返回 `Some(answer)`。
+         - 把 `{cardUpdateOptions:{updatePrivateDataByKey:true}, userPrivateData:{cardParamMap:{submitted:"true"}}}` 交给 Router，并等待 Stream 写回完成屏障；
+         - 屏障释放后返回 `Some(answer)`。
        - 否则（非本卡片/非 submit/解析失败）→ `stream.respond(message_id, {})` 空 ACK，继续等待。
      - `BotMessage`（`senderStaffId==userId`）：
        - `picture` → 下载转 base64 累积进 `images`（沿用现有 `download_image`）。
@@ -225,7 +226,7 @@ private_input = ""
 
 ## 13. 风险与注意
 
-- **3 秒 ACK**：卡片回调须 3 秒内 `respond`（带 submitted=true 回包或空 ACK），否则重推；会话层同步组装答案后立即 respond。
+- **3 秒 ACK**：卡片回调须 3 秒内 `respond`（带 submitted=true 回包或空 ACK），否则重推；会话层同步组装响应体后立即交给 Router，最终提交等待写回完成，不能只等待响应体 oneshot 被接收。
 - **提交失败 toast**：必须回包 `submitted=true`（私有数据，`updatePrivateDataByKey:true`），否则卡片成功条件不满足。
 - **selected_options 形态**：以真机回调为准（可能是文本数组或 `{text}` 对象数组），解析两者兼容并过滤初始空串 `[""]`。
 - **单 Stream 约束**（DC13）：维持不修；连续/并发提问可能相互干扰，仅记录。

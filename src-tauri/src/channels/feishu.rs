@@ -302,7 +302,9 @@ impl MessagingChannel for FeishuSession {
                             });
                             // 立刻经 Router 同步回包更新卡片 → 按钮 Loading 直接变终态（无闪烁）。
                             // 不再追加 OpenAPI patch_card：那次二次渲染正是残留「快速回弹」的来源。
-                            let _ = ack.send(Some(card::callback_update_card(finalized)));
+                            let _ = ack
+                                .send_and_wait(Some(card::callback_update_card(finalized)))
+                                .await;
                             // 收尾并发下载（不在 3 秒关键路径）。
                             for h in downloads {
                                 let _ = h.await;

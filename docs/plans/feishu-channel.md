@@ -83,9 +83,9 @@ AskHuman "..." -q ... -o ...       ▼
     - `method=0` 且 `type=pong`：解析 payload 里的 client_config 校准心跳；继续。
     - `method=1`（数据帧）：按 `message_id`/`sum`/`seq` 分片重组得到完整 payload（JSON）→ 解析 LarkEvent（`header.event_type` 或 schema 2.0 的 `header.event_type`/`event_type`）：
       - `im.message.receive_v1` → `WsEvent::Message(event_json)`（**自动回包空 ACK**，3 秒内）。
-      - `card.action.trigger` → `WsEvent::CardAction { data, frame_headers }`（**延迟回包**：由上层算出 `{toast, card}` 后调 `respond`，须 3 秒内）。
+      - `card.action.trigger` → `WsEvent::CardAction { data, frame_headers }`（**延迟回包**：由上层算出 `{toast, card}` 后交给 Router，须 3 秒内写回）。
       - 其它事件 → 自动空 ACK，忽略。
-  - `respond(frame_headers, body_json)`：回一个 `PbFrame`（同 `message_id`，`method=1`，payload = `body_json` 字符串）作为该数据帧的响应（飞书长连接「回包即响应」语义）。空 ACK = `respond(.., {})`。
+  - `respond(frame_headers, body_json)`：回一个 `PbFrame`（同 `message_id`，`method=1`，payload = `body_json` 字符串）作为该数据帧的响应（飞书长连接「回包即响应」语义）。空 ACK = `respond(.., {})`。Router 在 `send().await` 完成后触发写回完成信号，供会导致进程结束的最终提交等待。
   - 定时（按 `ping_interval`）发 ping 帧；读错/Close/超时 → 重连（重新取 endpoint + 连接，最多若干次），重连失败 `recv()` 返回 `None`。
 - 对上层暴露：`connect(http, base_url, app_id, app_secret)`、`recv()`、`respond(...)`。
 - **去重**：同一 `message_id` 重复推送按已处理集合去重（避免回包慢导致重推时重复累积）。
@@ -132,8 +132,8 @@ AskHuman "..." -q ... -o ...       ▼
   2. 事件循环（每 `POLL_INTERVAL`≈1s 检查 `preempt.is_cancelled()`，`recv()` 加 timeout 以便分片检查抢答）：
      - `WsEvent::CardAction`：`parse_card_submit` 命中且 `open_message_id==message_id`、`open_id==配置 openId` →
        - 组装 `QuestionAnswer { selected_options, user_input, images(累积), files(累积) }`；
-       - `ws.respond(headers, {toast:{type:"success", content:已提交}, card:{type:"raw"/"card_json", data: build_finalized_card(..,已提交)}})`（3 秒内，避免报错 toast、并把卡片置终态）；
-       - 返回 `Some(answer)`。
+       - 把 `{toast:{type:"success", content:已提交}, card:{type:"raw"/"card_json", data: build_finalized_card(..,已提交)}}` 交给 Router，并等待其完成 WebSocket 写入尝试（3 秒内，避免报错 toast、并把卡片置终态）；
+       - 写回完成屏障释放后返回 `Some(answer)`。
        - 否则（非本卡片/非提交/解析失败）→ `ws.respond(headers, {})` 空 ACK，继续。
      - `WsEvent::Message`：`sender.open_id==配置 openId` 且 `chat_type=="p2p"` →
        - `image` → 下载累积进 `images`（转 base64 `ImageAttachment`，沿用钉钉 `download_image` 形态）。
@@ -271,7 +271,7 @@ AskHuman "..." -q ... -o ...       ▼
 ## 11. 风险与注意
 
 - **protobuf 帧编解码 / 回包结构**：以真机联调为准固定 endpoint 请求体、数据帧响应体（事件空 ACK vs 卡片回调 `{toast, card}`）的确切字段，并在 `ws.rs` 注释锁定；参考钉钉 `stream.rs` 的 ACK/重连骨架。
-- **3 秒回包**：每条业务帧收到后尽快回包（卡片提交先组装答案再 `respond`；事件先空 ACK）。
+- **3 秒回包**：每条业务帧收到后尽快回包（卡片提交先组装响应体，Router 写回并释放完成屏障；事件先空 ACK）。最终提交不得只以 oneshot「响应体已移交」作为完成条件，否则 Windows 单进程可能先退出。
 - **集群模式多开互抢**（spec §6 已知问题）：维持不修，仅记录；连续/并发提问可能相互干扰。
 - **后台订阅保存的在线要求**：文档写清「先点自动识别保持连接 → 后台保存长连接订阅 → 私聊发码」的顺序。
 - **断线重连**：长等待期间 WS 可能断；重连后继续等本卡片回调/消息，不丢「当前题等待中」状态。

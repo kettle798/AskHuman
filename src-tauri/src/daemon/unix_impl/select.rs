@@ -441,7 +441,7 @@ pub(super) async fn handle_select_card_action(
     state: &Arc<ServerState>,
     channel_id: &str,
     data: &serde_json::Value,
-    ack: tokio::sync::oneshot::Sender<Option<serde_json::Value>>,
+    ack: crate::feishu::router::CardAck,
 ) {
     // Stage 双按钮确认卡。
     if let Some((mid, slot)) = crate::feishu::card::parse_confirm_action(data) {
@@ -534,7 +534,7 @@ pub(super) async fn select_pick_msg(
     session_id: &str,
     content: &str,
     lang: Lang,
-    ack: tokio::sync::oneshot::Sender<Option<serde_json::Value>>,
+    ack: crate::feishu::router::CardAck,
 ) {
     let snapshot = state.agents.snapshot();
     let rec = find_agent_by_session(&snapshot, session_id);
@@ -582,7 +582,7 @@ pub(super) async fn select_pick_watch(
     session_id: &str,
     config: &AppConfig,
     lang: Lang,
-    ack: tokio::sync::oneshot::Sender<Option<serde_json::Value>>,
+    ack: crate::feishu::router::CardAck,
 ) {
     let now = now_secs();
     let snapshot = state.agents.snapshot();
@@ -666,7 +666,7 @@ pub(super) async fn select_pick_unwatch(
     session_id: &str,
     config: &AppConfig,
     lang: Lang,
-    ack: tokio::sync::oneshot::Sender<Option<serde_json::Value>>,
+    ack: crate::feishu::router::CardAck,
 ) {
     let now = now_secs();
     // 找到该 session 在本渠道的订阅（可能已被别处取消/结束 → 视为已不在关注，只刷新卡）。
@@ -1484,7 +1484,7 @@ pub(super) async fn select_pick_export(
     kind: PickerKind,
     config: &AppConfig,
     lang: Lang,
-    ack: Option<tokio::sync::oneshot::Sender<Option<serde_json::Value>>>,
+    ack: Option<crate::feishu::router::CardAck>,
 ) {
     let snapshot = state.agents.snapshot();
     let seq = find_agent_by_session(&snapshot, session_id)
