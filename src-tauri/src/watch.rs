@@ -129,9 +129,9 @@ pub struct WatchFrame {
     pub steps_omitted: usize,
     /// 当前 TODO 清单（agent 未用 todo 功能则空）。
     pub todos: Vec<crate::agents::activity::TodoItem>,
-    /// agent 会话开始时刻（Unix 秒，注册表首次看到该 session；无则 None）。**不入签名**
-    /// （时长走字不应触发编辑）。
-    pub started_at: Option<u64>,
+    /// Cumulative active time for the session, excluding Idle intervals. **Not part of the
+    /// signature** so the clock never causes edits by itself.
+    pub active_elapsed_secs: Option<u64>,
     /// 活动时刻（Unix 秒；进「最近动态」标签）。
     pub at: Option<u64>,
 }
@@ -150,7 +150,7 @@ pub fn build_frame(seq: u64, rec: Option<&Value>, waiting: bool) -> WatchFrame {
             steps: Vec::new(),
             steps_omitted: 0,
             todos: Vec::new(),
-            started_at: None,
+            active_elapsed_secs: None,
             at: None,
         };
     };
@@ -188,15 +188,13 @@ pub fn build_frame(seq: u64, rec: Option<&Value>, waiting: bool) -> WatchFrame {
         steps: parts.steps,
         steps_omitted: parts.steps_omitted,
         todos: parts.todos,
-        started_at: rec.get("startedAt").and_then(|v| v.as_u64()),
+        active_elapsed_secs: rec.get("activeElapsedSecs").and_then(|v| v.as_u64()),
         at: parts.at,
     }
 }
 
-/// 帧签名：**只含用户可感知的内容**（状态、标题、文字、足迹步 + 省略数、TODO 清单、编号），
-/// 对结构化数据计算、跨渠道一致。签名不变 → 不编辑卡片。刻意**不含**活动时刻 `at` 与运行
-/// 时长：它们会在内容不变时走动（transcript mtime / 时钟），若计入会造成「内容没变、卡片却
-/// 被反复编辑」的无谓更新。
+/// Cross-channel signature of user-visible content. Activity timestamps and cumulative active
+/// time are intentionally excluded so clocks cannot trigger edits when content is unchanged.
 pub fn signature(f: &WatchFrame) -> String {
     use std::fmt::Write;
     let mut s = format!(
@@ -243,10 +241,9 @@ pub fn header_text(f: &WatchFrame, lang: Lang) -> String {
         )
 }
 
-/// 状态行：`🟢 工作中 · 已运行 6 分钟`。时长 = 整个 agent 会话的运行时间（注册表首次看到
-/// 该 session 起算——用户定案：回合时长「不知道是什么时间」，改为整体运行时长；<1 分钟
-/// 不显示；步数不显示）。已结束不显示（运行已停止，走字无意义）。
-pub fn state_line_text(f: &WatchFrame, now: u64, lang: Lang) -> String {
+/// Status line with cumulative active time. The total spans turns, excludes true Idle intervals,
+/// and continues while Waiting. Values under one minute remain hidden on Watch cards.
+pub fn state_line_text(f: &WatchFrame, _now: u64, lang: Lang) -> String {
     let mut state_line = match f.phase {
         WatchPhase::Working => i18n::tr(lang, "watch.stateWorking"),
         WatchPhase::Idle => i18n::tr(lang, "watch.stateIdle"),
@@ -254,16 +251,13 @@ pub fn state_line_text(f: &WatchFrame, now: u64, lang: Lang) -> String {
         WatchPhase::Ended => i18n::tr(lang, "watch.stateEnded"),
     }
     .to_string();
-    if !matches!(f.phase, WatchPhase::Ended) {
-        if let Some(start) = f.started_at {
-            let elapsed = now.saturating_sub(start);
-            if elapsed >= 60 {
-                state_line.push_str(" · ");
-                state_line.push_str(
-                    &i18n::tr(lang, "watch.statsElapsed")
-                        .replace("{t}", &fmt_duration(elapsed, lang)),
-                );
-            }
+    if let Some(elapsed) = f.active_elapsed_secs {
+        if elapsed >= 60 {
+            state_line.push_str(" · ");
+            state_line.push_str(
+                &i18n::tr(lang, "watch.statsActiveElapsed")
+                    .replace("{t}", &fmt_duration(elapsed, lang)),
+            );
         }
     }
     state_line
@@ -621,43 +615,42 @@ mod tests {
     }
 
     #[test]
-    fn stats_line_appends_elapsed_only() {
-        // 用户定案：状态行不显示步数，时长 = 整个 agent 会话运行时间（回合时长迷惑）。
+    fn stats_line_shows_cumulative_active_time_in_all_phases() {
         let now = 1_700_000_000u64;
         let mut r = rec("working");
-        r["startedAt"] = json!(now - 6 * 60);
+        r["activeElapsedSecs"] = json!(6 * 60);
         let f = build_frame(3, Some(&r), false);
         let v = card_view(&f, CardMode::Active, now, Lang::Zh, None);
-        assert_eq!(v.state_line, "🟢 工作中 · 已运行 6 分钟");
-        // 不足 1 分钟不显示时长。
+        assert_eq!(v.state_line, "🟢 工作中 · 累计工作 6 分钟");
+        // Cumulative time under one minute remains hidden on live Watch cards.
         let mut r2 = rec("working");
-        r2["startedAt"] = json!(now - 30);
+        r2["activeElapsedSecs"] = json!(30);
         let f2 = build_frame(3, Some(&r2), false);
         assert_eq!(
             card_view(&f2, CardMode::Active, now, Lang::Zh, None).state_line,
             "🟢 工作中"
         );
-        // 空闲态也显示（agent 仍在运行）；已结束不显示（运行已停止）。
+        // Idle and Ended cards retain the frozen cumulative total.
         let mut r4 = rec("idle");
-        r4["startedAt"] = json!(now - 600);
+        r4["activeElapsedSecs"] = json!(600);
         let f4 = build_frame(3, Some(&r4), false);
         assert_eq!(
             card_view(&f4, CardMode::Active, now, Lang::Zh, None).state_line,
-            "⚪ 空闲 · 已运行 10 分钟"
+            "⚪ 空闲 · 累计工作 10 分钟"
         );
         let mut r5 = rec("ended");
-        r5["startedAt"] = json!(now - 600);
+        r5["activeElapsedSecs"] = json!(600);
         let f5 = build_frame(3, Some(&r5), false);
         assert_eq!(
             card_view(&f5, CardMode::Active, now, Lang::Zh, None).state_line,
-            "⏹ 已结束"
+            "⏹ 已结束 · 累计工作 10 分钟"
         );
-        // 运行起点不入签名（时长走字不应触发编辑）：startedAt 变化签名不变。
+        // The cumulative clock is excluded from the signature and cannot trigger edits alone.
         assert_eq!(
             signature(&f),
             signature(&{
                 let mut r6 = rec("working");
-                r6["startedAt"] = json!(now - 7 * 60);
+                r6["activeElapsedSecs"] = json!(7 * 60);
                 build_frame(3, Some(&r6), false)
             })
         );
