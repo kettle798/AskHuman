@@ -90,6 +90,26 @@ async function onSelect(): Promise<void> {
 
 // 添加行「自动执行」开关（第 17 轮定案）：勾选后新增的待办在 whats-next 时直接派发。
 const newAuto = ref(false);
+const newAutoHintHovered = ref(false);
+const newAutoHintKeyboardFocused = ref(false);
+const newAutoHintPinned = ref(false);
+let newAutoHintTimer: number | undefined;
+
+function onNewAutoFocus(e: FocusEvent): void {
+  const target = e.currentTarget;
+  newAutoHintKeyboardFocused.value =
+    target instanceof HTMLElement && target.matches(":focus-visible");
+}
+
+function toggleNewAuto(): void {
+  newAuto.value = !newAuto.value;
+  newAutoHintPinned.value = true;
+  if (newAutoHintTimer !== undefined) window.clearTimeout(newAutoHintTimer);
+  newAutoHintTimer = window.setTimeout(() => {
+    newAutoHintPinned.value = false;
+    newAutoHintTimer = undefined;
+  }, 2400);
+}
 
 async function addEntry(): Promise<void> {
   const text = newText.value.trim();
@@ -266,6 +286,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  if (newAutoHintTimer !== undefined) window.clearTimeout(newAutoHintTimer);
   unlistenUpdated?.();
   unlistenGoto?.();
 });
@@ -427,22 +448,43 @@ onBeforeUnmount(() => {
           :placeholder="t('todosWin.addPlaceholder')"
           @keydown="onNewKeydown"
         />
-        <button
-          type="button"
-          class="td-auto td-auto-new"
-          :class="{ on: newAuto }"
-          :title="t('todosWin.autoNewHint')"
-          :aria-label="t('todosWin.autoNewHint')"
-          :aria-pressed="newAuto"
-          @click="newAuto = !newAuto"
+        <div
+          class="td-auto-hint-anchor"
+          @mouseenter="newAutoHintHovered = true"
+          @mouseleave="newAutoHintHovered = false"
         >
-          <svg viewBox="0 0 12 12" aria-hidden="true">
-            <path d="M6.8 1 L2.5 7 H5.6 L5.2 11 L9.5 5 H6.4 Z"
-              :fill="newAuto ? 'currentColor' : 'none'"
-              stroke="currentColor" stroke-width="1" stroke-linejoin="round" />
-          </svg>
-          <span>{{ t("todosWin.autoLabel") }}</span>
-        </button>
+          <button
+            type="button"
+            class="td-auto td-auto-new"
+            :class="{ on: newAuto }"
+            :aria-label="newAuto ? t('todosWin.autoOff') : t('todosWin.autoOn')"
+            aria-describedby="todo-auto-new-hint"
+            :aria-pressed="newAuto"
+            @focus="onNewAutoFocus"
+            @blur="newAutoHintKeyboardFocused = false"
+            @click="toggleNewAuto"
+          >
+            <svg viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M6.8 1 L2.5 7 H5.6 L5.2 11 L9.5 5 H6.4 Z"
+                :fill="newAuto ? 'currentColor' : 'none'"
+                stroke="currentColor" stroke-width="1" stroke-linejoin="round" />
+            </svg>
+            <span>{{ t("todosWin.autoLabel") }}</span>
+          </button>
+          <div
+            v-show="newAutoHintHovered || newAutoHintKeyboardFocused || newAutoHintPinned"
+            id="todo-auto-new-hint"
+            class="td-auto-hint"
+            role="tooltip"
+            aria-live="polite"
+          >
+            {{
+              newAuto
+                ? t("todosWin.autoNewEnabledHint")
+                : t("todosWin.autoNewDisabledHint")
+            }}
+          </div>
+        </div>
         <button
           type="button"
           class="td-btn td-btn-add"
@@ -641,6 +683,12 @@ onBeforeUnmount(() => {
   height: 12px;
 }
 /* 添加行的 ⚡ 开关：常显（不依赖行 hover），带「自动」文字标签便于理解。 */
+.td-auto-hint-anchor {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
 .td-auto-new {
   opacity: 0.75;
   align-self: center;
@@ -658,6 +706,38 @@ onBeforeUnmount(() => {
   opacity: 1;
   border-color: color-mix(in srgb, #ff9f0a 55%, transparent);
   background: color-mix(in srgb, #ff9f0a 12%, transparent);
+}
+.td-auto-hint {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 20;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 28px));
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  box-shadow: 0 5px 18px rgba(0, 0, 0, 0.22);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+  pointer-events: none;
+}
+.td-auto-hint::after {
+  content: "";
+  position: absolute;
+  right: 18px;
+  bottom: -5px;
+  width: 8px;
+  height: 8px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  transform: rotate(45deg);
 }
 .td-del {
   flex: 0 0 auto;

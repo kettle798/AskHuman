@@ -597,7 +597,10 @@ export default {
     restore: "Restore to todos",
     autoOn: "Mark as auto-run (dispatched directly at whats-next, no card)",
     autoOff: "Unmark auto-run",
-    autoNewHint: "Add new todo as auto-run",
+    autoNewEnabledHint:
+      "Auto-run is on: new todos are dispatched directly at whats-next without a prompt.",
+    autoNewDisabledHint:
+      "Auto-run is off: new todos wait to be selected at whats-next.",
   },
   interject: {
     title: "Message to Agent",
