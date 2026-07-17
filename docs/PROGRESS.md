@@ -1,21 +1,7 @@
 # PROGRESS
 
-按具体任务 / 需求记录待办与当前进展。任务 / 需求完成后删除其 section（历史留在 git）。
-
-## 待办：渠道设置排序与推荐标记真机验收
-
-实现已安装，待用户回到电脑后统一验收：本地弹窗与按需发送提示之后，飞书应为第一个外部
-IM 渠道并显示绿色“推荐”badge，后续依次为 Telegram、钉钉、Slack。
-
-## 待办：TCC 弹窗修复真机验证
-
-TCC（文件权限）弹窗修复用户尚未真机验证（Agent 任务确认弹层已验收）。
-
-## 待办：项目 review 的 P2 项（择机）
-
-报告见 `docs/investigations/project-review-2026-07.md`。剩余择机项：
-types.ts 改为从 Rust 派生（ts-rs/specta）、TS 7 升级（等 vue-tsc 支持）、
-agents.snapshot() typed 化 + pnpm/Node 版本对齐（R5）。
+记录需要跨会话保留的未完成 / 延期事项和明确下一步。任务 / 需求完成后删除其 section
+（历史留在 git）。
 
 ## 待办：Cursor 全局 Rules 迁移为用户级 always-on Skill
 

@@ -10,11 +10,9 @@ When the task is complete, check whether the change made any overview or referen
 
 If the task needs a **new or existing git worktree** for parallel feature work on this repo (so install/AskHuman do not share the main daemon or overwrite another agent’s binary), read [`docs/agent-worktree-setup.md`](docs/agent-worktree-setup.md) first and follow it—including asking the human via AskHuman whether to attach a channel preset—before coding. After `dev enable`, verification is still `./scripts/install.sh` then `AskHuman` (auto-routed into that worktree’s Dev Instance).
 
-## Tracking progress in docs/PROGRESS.md
+## Tracking unfinished work in docs/PROGRESS.md
 
-[`docs/PROGRESS.md`](docs/PROGRESS.md) has two jobs: track unfinished work and what's next, and mark the one task currently in progress. Read it first.
-
-Before starting ANY work, mark what you're now doing there (reuse an existing entry or add one; a simple task just needs the marker, not detailed steps). Keep it current as you go. When done, clear the marker so nothing shows as in progress, and delete finished sections — history stays in git.
+[`docs/PROGRESS.md`](docs/PROGRESS.md) tracks durable unfinished or deferred work and concrete next steps across sessions. Read it before starting work. When a tracked item is completed, delete its section — history stays in git.
 
 ## Verifying your changes
 
