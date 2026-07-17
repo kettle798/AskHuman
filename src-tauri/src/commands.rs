@@ -2401,6 +2401,7 @@ pub async fn update_check(
     };
     #[cfg(unix)]
     crate::app::gui_host::sync_checked_update(&app, &info, manual);
+    #[cfg(unix)]
     crate::client::notify_update_state_changed().await;
     Ok(info)
 }
