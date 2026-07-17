@@ -51,9 +51,11 @@ import { useAttachments } from "./useAttachments";
 import { useUpdateState } from "./useUpdateState";
 import {
   canComposerDock,
+  cmdEnterQuestionIndex,
   composerHomeVisibleRatio,
   isComposerHomeFullyVisible,
   resolveComposerDocked,
+  shouldRevealQuestionBeforeCmdEnter,
   type ComposerDockGeometry,
 } from "./composerDock";
 
@@ -737,10 +739,16 @@ export function usePopupCore() {
     verticalMode.value ? !(current.value === 0 && atTop.value) : current.value > 0
   );
 
-  // 纵向模式下 ⌘↵ 是否会「提交」：已看完全部 且 当前焦点之后再无未答题（含焦点在末题时恒真）。
+  const cmdEnterFromQ = computed(() =>
+    cmdEnterQuestionIndex(current.value, focusedQ.value)
+  );
+  // 纵向模式下 ⌘↵ 是否会「提交」：已看完全部 且 快捷键目标题之后再无未答题（含焦点在末题时恒真）。
   // 与 onCmdEnter 的分支完全一致——「谁挂 ⌘↵ = ⌘↵ 就干谁」，故 ⌘↵ 角标据此挂在提交按钮上。
   const cmdEnterWillSubmit = computed(
-    () => verticalMode.value && lastSeen.value && nextUnansweredAfter(current.value) < 0
+    () =>
+      verticalMode.value &&
+      lastSeen.value &&
+      nextUnansweredAfter(cmdEnterFromQ.value) < 0
   );
   // 提交按钮挂 ⌘↵ / 为主按钮：纵向按 cmdEnterWillSubmit，旧版顺序沿用 onLastQuestion。
   const submitShowsCmdEnter = computed(() =>
@@ -1258,13 +1266,22 @@ export function usePopupCore() {
   // 则提交，否则去下一个没看过的题继续读（推进「读完」门槛）。永不落到已答题（修「跳回已答」bug）。
   // 自由模式想留空提交：直接点底部「提交」按钮（阶段②/③ 可见）。
   function onCmdEnter() {
+    const from = cmdEnterFromQ.value;
     // 当前题**完全在屏外**（长 message 顶开首题等）→ 先把它露出来 + 聚焦 + 闪一下，而非直接跳到后面的未答题。
-    if (isCardOffScreen(current.value)) {
-      goToIdx(current.value);
-      flashCard(current.value);
+    // 但若该题输入框正在底部固定区获得焦点，编辑器已经可见，应直接继续 / 提交，不能跳回题卡。
+    if (
+      shouldRevealQuestionBeforeCmdEnter(
+        from,
+        focusedQ.value,
+        dockedComposerQ.value,
+        isCardOffScreen(from)
+      )
+    ) {
+      goToIdx(from);
+      flashCard(from);
       return;
     }
-    const u = nextUnansweredAfter(current.value);
+    const u = nextUnansweredAfter(from);
     if (u >= 0) {
       goToIdx(u);
       flashCard(u);

@@ -16,6 +16,24 @@ export const DEFAULT_COMPOSER_DOCK_THRESHOLDS: ComposerDockThresholds = {
   returnGap: 10,
 };
 
+export function cmdEnterQuestionIndex(
+  currentQuestion: number,
+  focusedQuestion: number | null
+): number {
+  return focusedQuestion ?? currentQuestion;
+}
+
+export function shouldRevealQuestionBeforeCmdEnter(
+  questionIndex: number,
+  focusedQuestion: number | null,
+  dockedQuestion: number | null,
+  cardOffScreen: boolean
+): boolean {
+  const focusedEditorIsDocked =
+    focusedQuestion === questionIndex && dockedQuestion === questionIndex;
+  return cardOffScreen && !focusedEditorIsDocked;
+}
+
 export function canComposerDock(
   focused: boolean,
   manuallyActivated: boolean,

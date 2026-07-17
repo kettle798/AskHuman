@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   canComposerDock,
+  cmdEnterQuestionIndex,
   composerHomeVisibleRatio,
   isComposerHomeFullyVisible,
   resolveComposerDocked,
+  shouldRevealQuestionBeforeCmdEnter,
   type ComposerDockGeometry,
 } from "./composerDock";
 
@@ -32,6 +34,19 @@ describe("canComposerDock", () => {
 
   it("does not start docking after the inline owner has blurred", () => {
     expect(canComposerDock(false, true, true, true)).toBe(false);
+  });
+});
+
+describe("docked composer Cmd+Enter", () => {
+  it("uses the focused editor instead of the scroll-spy question", () => {
+    expect(cmdEnterQuestionIndex(0, 2)).toBe(2);
+    expect(cmdEnterQuestionIndex(0, null)).toBe(0);
+  });
+
+  it("does not reveal an offscreen card when its focused editor is docked", () => {
+    expect(shouldRevealQuestionBeforeCmdEnter(2, 2, 2, true)).toBe(false);
+    expect(shouldRevealQuestionBeforeCmdEnter(2, null, 2, true)).toBe(true);
+    expect(shouldRevealQuestionBeforeCmdEnter(2, 2, null, true)).toBe(true);
   });
 });
 

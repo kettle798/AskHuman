@@ -144,3 +144,7 @@
 ### 2026-07（固定编辑器与当前题解耦）
 
 `docs/specs/popup-pinned-composer.md` 在不改变本规格导航 / 快捷键焦点模型的前提下，引入独立 composer owner：用户向上回看 Message 时，最近激活的输入框可固定在底部，scroll-spy 仍可更新 `current`。只有聚焦另一题输入框或在另一题执行明确作答动作才切换 / 清除旧 owner；单纯滚动、点正文或选择 Message 文字不会清除。
+
+固定 textarea 仍有焦点时，`⌘↵` 的“当前焦点”具体取 `focusedQ`，而不是可能已被 scroll-spy 改写的
+`current`；且编辑器已在固定区可见时跳过题卡 reveal-first。否则会在回看 Message 时把已填好的固定
+输入框误判为屏外题卡并跳回第 1 题。固定区失焦后继续沿用 `current`，不改变普通滚动导航语义。
