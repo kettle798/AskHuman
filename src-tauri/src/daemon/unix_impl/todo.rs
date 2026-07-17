@@ -3,7 +3,8 @@
 //! 流程：`/todo`（无参）→ 复用跨渠道单选卡选项目 → 发「待办管理卡」；`/todo <text>`
 //! 先选项目再追加。`/todo-rm` 同样先选项目，再复用单选卡逐条删除（就地刷新）。
 //! `/todo-auto` 镜像 `/todo`：切换卡每条待办一个「切换」按钮（已自动的带 ⚡ 徽标），点击翻转
-//! 自动执行标记并就地刷新；`/todo-auto <text>` 先选项目再新增一条自动执行待办。旧的
+//! 自动执行标记并就地刷新；飞书在同卡追加自动待办输入框，钉钉另发新增卡（空项目只发新增卡），
+//! TG/Slack 提示 `/todo-auto <text>`；该带文本形式先选项目再新增一条自动执行待办。旧的
 //! `/todo <n>`、`/todo <n> <text>`、`/todo-rm <n>`、`/todo-auto <n> [text]` Agent 编号形式
 //! 继续兼容，但不再作为主入口。管理卡新增入口按渠道分化：飞书代码卡自带
 //! 输入框（表单提交）；钉钉复用**提问卡模板**（自带 `allow_input` 输入框，无需新注册模板，
@@ -17,6 +18,8 @@ use super::*;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct TodoManagePayload {
     project: String,
+    #[serde(default)]
+    auto: bool,
 }
 
 fn manage_payload(picker: &PickerEntry) -> Option<TodoManagePayload> {
@@ -149,31 +152,9 @@ pub(super) async fn handle_todo_auto_cmd(
                         .replace("{n}", &count.to_string());
                     let _ = reply_channel_text(channel_id, config, &msg).await;
                 }
-                // `/todo-auto <n>`：直达该项目的切换卡。
+                // `/todo-auto <n>`：兼容直达该项目的切换 + 新增控制面。
                 None => {
-                    let Some((view, ids)) = todo_auto_view(&project, lang) else {
-                        let _ = reply_channel_text(
-                            channel_id,
-                            config,
-                            crate::i18n::tr(lang, "select.todoAutoEmptyCard"),
-                        )
-                        .await;
-                        return;
-                    };
-                    let sent = send_todo_entry_card(
-                        state,
-                        channel_id,
-                        config,
-                        PickerKind::TodoAutoEntry,
-                        &view,
-                        ids,
-                        project,
-                    )
-                    .await;
-                    if !sent {
-                        // 渠道不支持卡片（如未接入）→ 文本列表兜底（含 ⚡ 标）。
-                        let _ = reply_channel_text(channel_id, config, &view_as_text(&view)).await;
-                    }
+                    send_todo_auto_controls(state, channel_id, config, &project, lang).await
                 }
             }
         }
@@ -658,6 +639,7 @@ fn register_todo_manage(
 ) {
     let payload = serde_json::to_string(&TodoManagePayload {
         project: project.to_string(),
+        auto: false,
     })
     .ok();
     register_picker(
@@ -751,6 +733,7 @@ pub(super) async fn fs_select_pick_todo(
     let title = manage_title(project, lang);
     let payload = serde_json::to_string(&TodoManagePayload {
         project: project.to_string(),
+        auto: false,
     })
     .ok();
     morph_picker(
@@ -859,6 +842,97 @@ fn todo_auto_view(project: &str, lang: Lang) -> Option<(crate::select::SelectVie
     Some((view, ids))
 }
 
+fn todo_auto_view_or_empty(
+    project: &str,
+    lang: Lang,
+) -> (crate::select::SelectView, Vec<String>) {
+    todo_auto_view(project, lang).unwrap_or_else(|| {
+        let name = crate::project::display_name(project);
+        (
+            crate::select::build_view(
+                crate::select::title_todo_auto_entries(&name, lang),
+                Vec::new(),
+                crate::select::SelectAction::TodoAutoEntry,
+                lang,
+            ),
+            Vec::new(),
+        )
+    })
+}
+
+fn fs_todo_auto_card(view: &crate::select::SelectView, lang: Lang) -> serde_json::Value {
+    crate::feishu::card::build_todo_auto_card(
+        view,
+        crate::i18n::tr(lang, "select.todoAutoEmptyCard"),
+        crate::i18n::tr(lang, "todoIm.autoCardInputPlaceholder"),
+        crate::i18n::tr(lang, "todoIm.autoCardAddButton"),
+    )
+}
+
+fn todo_auto_add_title(project: &str, lang: Lang) -> String {
+    crate::i18n::tr(lang, "todoIm.autoAddTitle")
+        .replace("{project}", &crate::project::display_name(project))
+}
+
+fn todo_auto_add_hint(channel_id: &str, lang: Lang) -> String {
+    crate::i18n::tr(lang, "todoIm.autoAddHint")
+        .replace("{p}", crate::autochannel::cmd_prefix(channel_id))
+}
+
+async fn send_dd_todo_auto_add_card(
+    state: &Arc<ServerState>,
+    config: &AppConfig,
+    project: &str,
+    lang: Lang,
+) -> bool {
+    let otid = format!("todo-auto-add-{}", uuid::Uuid::new_v4());
+    let title = todo_auto_add_title(project, lang);
+    let map = crate::dingtalk::card::build_card_param_map(
+        &title,
+        crate::i18n::tr(lang, "todoIm.autoAddCardHint"),
+        &[],
+        false,
+        false,
+        "",
+    );
+    let private = crate::dingtalk::card::build_card_private_map();
+    let sent = match crate::dingtalk::client::DingTalkClient::new(&config.channels.dingding) {
+        Ok(client) => client
+            .create_and_deliver_card(
+                &otid,
+                crate::channels::dingding::effective_template_id(&config.channels.dingding),
+                map,
+                private,
+            )
+            .await
+            .is_ok(),
+        Err(_) => false,
+    };
+    if !sent {
+        return false;
+    }
+    let payload = serde_json::to_string(&TodoManagePayload {
+        project: project.to_string(),
+        auto: true,
+    })
+    .ok();
+    register_picker(
+        state,
+        PickerEntry {
+            channel: "dingding".to_string(),
+            message_id: otid,
+            kind: PickerKind::TodoManage,
+            title,
+            options: Vec::new(),
+            payload,
+            created_at: now_secs(),
+            posted_ms: now_ms(),
+        },
+    );
+    state.select.route_refresh.notify_one();
+    true
+}
+
 /// 直接发送一张预构建的待办条目卡（删除 / 切换）并登记台账：直达路径用（不经
 /// `send_agent_picker` 的通用 20 条截断，保持 10 条上限视图一致）。发送失败返回 false。
 async fn send_todo_entry_card(
@@ -888,6 +962,98 @@ async fn send_todo_entry_card(
     );
     state.select.route_refresh.notify_one();
     true
+}
+
+/// 发送 `/todo-auto` 项目控制面：飞书同卡“切换 + 新增”；钉钉有条目时发切换卡，
+/// 并始终另发新增卡；TG/Slack 保留切换卡并用文本提示新增命令。空项目仍提供新增入口。
+async fn send_todo_auto_controls(
+    state: &Arc<ServerState>,
+    channel_id: &str,
+    config: &AppConfig,
+    project: &str,
+    lang: Lang,
+) {
+    let populated = todo_auto_view(project, lang);
+    match channel_id {
+        "feishu" => {
+            let (view, ids) = todo_auto_view_or_empty(project, lang);
+            let card = fs_todo_auto_card(&view, lang);
+            let mid = match crate::feishu::client::FeishuClient::new(&config.channels.feishu) {
+                Ok(client) => client.send_card(&card).await.ok(),
+                Err(_) => None,
+            };
+            if let Some(mid) = mid {
+                register_picker(
+                    state,
+                    PickerEntry {
+                        channel: channel_id.to_string(),
+                        message_id: mid,
+                        kind: PickerKind::TodoAutoEntry,
+                        title: view.title,
+                        options: ids,
+                        payload: Some(project.to_string()),
+                        created_at: now_secs(),
+                        posted_ms: now_ms(),
+                    },
+                );
+                state.select.route_refresh.notify_one();
+            } else {
+                let mut text = view_as_text(&view);
+                text.push_str("\n\n");
+                text.push_str(&todo_auto_add_hint(channel_id, lang));
+                let _ = reply_channel_text(channel_id, config, &text).await;
+            }
+        }
+        "dingding" => {
+            if let Some((view, ids)) = populated {
+                let sent = send_todo_entry_card(
+                    state,
+                    channel_id,
+                    config,
+                    PickerKind::TodoAutoEntry,
+                    &view,
+                    ids,
+                    project.to_string(),
+                )
+                .await;
+                if !sent {
+                    let _ = reply_channel_text(channel_id, config, &view_as_text(&view)).await;
+                }
+            }
+            if !send_dd_todo_auto_add_card(state, config, project, lang).await {
+                let _ = reply_channel_text(
+                    channel_id,
+                    config,
+                    &todo_auto_add_hint(channel_id, lang),
+                )
+                .await;
+            }
+        }
+        _ => {
+            let mut text = String::new();
+            if let Some((view, ids)) = populated {
+                if !send_todo_entry_card(
+                    state,
+                    channel_id,
+                    config,
+                    PickerKind::TodoAutoEntry,
+                    &view,
+                    ids,
+                    project.to_string(),
+                )
+                .await
+                {
+                    text.push_str(&view_as_text(&view));
+                    text.push_str("\n\n");
+                }
+            } else {
+                text.push_str(crate::i18n::tr(lang, "select.todoAutoEmptyCard"));
+                text.push_str("\n\n");
+            }
+            text.push_str(&todo_auto_add_hint(channel_id, lang));
+            let _ = reply_channel_text(channel_id, config, &text).await;
+        }
+    }
 }
 
 /// 卡片发送失败（渠道不支持）时的文本兜底：标题 + 编号列表（含 ⚡ 徽标）+ 溢出提示。
@@ -1046,29 +1212,18 @@ pub(super) async fn fs_select_pick_todo_auto(
         remove_picker(state, "feishu", mid);
         return;
     }
-    match todo_auto_view(project, lang) {
-        Some((view, ids)) => {
-            let card = crate::feishu::card::build_select_card(&view);
-            let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
-            morph_picker(
-                state,
-                "feishu",
-                mid,
-                PickerKind::TodoAutoEntry,
-                view.title.clone(),
-                ids,
-                Some(project.to_string()),
-            );
-        }
-        None => {
-            let card = crate::feishu::card::build_select_final_card(
-                &crate::select::title_todo_auto(lang),
-                crate::i18n::tr(lang, "select.todoAutoEmptyCard"),
-            );
-            let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
-            remove_picker(state, "feishu", mid);
-        }
-    }
+    let (view, ids) = todo_auto_view_or_empty(project, lang);
+    let card = fs_todo_auto_card(&view, lang);
+    let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
+    morph_picker(
+        state,
+        "feishu",
+        mid,
+        PickerKind::TodoAutoEntry,
+        view.title.clone(),
+        ids,
+        Some(project.to_string()),
+    );
 }
 
 /// 钉钉 `/todo-auto` 选卡点选：同模板 → 本卡经 OpenAPI 就地刷新为切换卡。
@@ -1105,6 +1260,14 @@ pub(super) async fn dd_select_pick_todo_auto(
                 .await;
             remove_picker(state, "dingding", otid);
         }
+    }
+    if !send_dd_todo_auto_add_card(state, config, project, lang).await {
+        let _ = reply_channel_text(
+            "dingding",
+            config,
+            &todo_auto_add_hint("dingding", lang),
+        )
+        .await;
     }
 }
 
@@ -1157,6 +1320,12 @@ pub(super) async fn select_pick_todo_auto_inplace(
             remove_picker(state, channel_id, mid);
         }
     }
+    let _ = reply_channel_text(
+        channel_id,
+        config,
+        &todo_auto_add_hint(channel_id, lang),
+    )
+    .await;
 }
 
 // ===== 切换卡点「切换」（TodoAutoEntry）=====
@@ -1179,7 +1348,7 @@ fn auto_entry_toggle(
     (project, view)
 }
 
-/// 飞书切换卡点「切换」：翻转 + 就地刷新（空 → 定格）。
+/// 飞书切换卡点「切换」：翻转 + 就地刷新；并发清空后仍保留新增输入框。
 pub(super) async fn fs_select_pick_todo_auto_entry(
     state: &Arc<ServerState>,
     mid: &str,
@@ -1189,32 +1358,18 @@ pub(super) async fn fs_select_pick_todo_auto_entry(
     ack: crate::feishu::router::CardAck,
 ) {
     let (project, view) = auto_entry_toggle(picker, entry_id, lang);
-    match view {
-        Some((view, ids)) => {
-            let card = crate::feishu::card::build_select_card(&view);
-            let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
-            morph_picker(
-                state,
-                "feishu",
-                mid,
-                PickerKind::TodoAutoEntry,
-                view.title.clone(),
-                ids,
-                Some(project),
-            );
-        }
-        None => {
-            let card = crate::feishu::card::build_select_final_card(
-                &crate::select::title_todo_auto_entries(
-                    &crate::project::display_name(&project),
-                    lang,
-                ),
-                crate::i18n::tr(lang, "select.todoAutoEmptyCard"),
-            );
-            let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
-            remove_picker(state, "feishu", mid);
-        }
-    }
+    let (view, ids) = view.unwrap_or_else(|| todo_auto_view_or_empty(&project, lang));
+    let card = fs_todo_auto_card(&view, lang);
+    let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
+    morph_picker(
+        state,
+        "feishu",
+        mid,
+        PickerKind::TodoAutoEntry,
+        view.title.clone(),
+        ids,
+        Some(project),
+    );
 }
 
 /// 钉钉切换卡点「切换」：翻转 + OpenAPI 就地刷新（空 → 定格）。
@@ -1443,7 +1598,7 @@ pub(super) async fn select_pick_todo_rm_entry_inplace(
 
 // ===== 管理卡「新增」提交 =====
 
-/// 飞书待办管理卡表单提交（select 路由上唯一带表单的卡）：新增一条 + 卡片就地刷新。
+/// 飞书普通待办 / 自动待办卡表单提交：按卡片种类新增一条 + 卡片就地刷新。
 /// 无论如何消费 `ack`（无台账匹配 → 空 ACK 静默，D7）。
 pub(super) async fn fs_todo_manage_submit(
     state: &Arc<ServerState>,
@@ -1461,7 +1616,7 @@ pub(super) async fn fs_todo_manage_submit(
             .find(|p| {
                 p.channel == "feishu"
                     && p.message_id == submit.message_id
-                    && p.kind == PickerKind::TodoManage
+                    && matches!(p.kind, PickerKind::TodoManage | PickerKind::TodoAutoEntry)
             })
             .cloned()
     };
@@ -1469,17 +1624,42 @@ pub(super) async fn fs_todo_manage_submit(
         let _ = ack.send(None);
         return;
     };
-    let Some(payload) = manage_payload(&picker) else {
+    let auto = picker.kind == PickerKind::TodoAutoEntry;
+    let project = if auto {
+        picker.payload.clone()
+    } else {
+        manage_payload(&picker).map(|payload| payload.project)
+    };
+    let Some(project) = project else {
         let _ = ack.send(None);
         return;
     };
     if let Some(text) = &submit.user_input {
-        let _ = crate::todos::add(&payload.project, text);
+        if auto {
+            let _ = crate::todos::add_auto(&project, text);
+        } else {
+            let _ = crate::todos::add(&project, text);
+        }
     }
     // 空输入提交：不新增，仅刷新列表（顺带同步其它进程的增删结果）。
     let lang = Lang::current();
-    let card = fs_manage_card(&payload.project, lang);
-    let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
+    if auto {
+        let (view, ids) = todo_auto_view_or_empty(&project, lang);
+        let card = fs_todo_auto_card(&view, lang);
+        let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
+        morph_picker(
+            state,
+            "feishu",
+            &submit.message_id,
+            PickerKind::TodoAutoEntry,
+            view.title.clone(),
+            ids,
+            Some(project),
+        );
+    } else {
+        let card = fs_manage_card(&project, lang);
+        let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
+    }
 }
 
 /// 钉钉待办管理卡提交（提问卡模板）：同步 ACK 已由路由任务按「提交成功」回包（置灰点击者），
@@ -1509,7 +1689,11 @@ pub(super) async fn handle_todo_dd_submit(
         return true;
     };
     if let Some(text) = &submit.user_input {
-        let _ = crate::todos::add(&payload.project, text);
+        if payload.auto {
+            let _ = crate::todos::add_auto(&payload.project, text);
+        } else {
+            let _ = crate::todos::add(&payload.project, text);
+        }
     }
     let lang = Lang::current();
     let config = state.config_snapshot();
@@ -1518,7 +1702,11 @@ pub(super) async fn handle_todo_dd_submit(
             .update_card_private(
                 &picker.message_id,
                 serde_json::json!({
-                    "markdown": dd_manage_markdown(&payload.project, lang),
+                    "markdown": if payload.auto {
+                        crate::i18n::tr(lang, "todoIm.autoAddCardHint").to_string()
+                    } else {
+                        dd_manage_markdown(&payload.project, lang)
+                    },
                     "submit_status": "",
                 }),
                 serde_json::json!({ "submitted": "false", "private_input": "" }),

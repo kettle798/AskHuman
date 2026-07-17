@@ -528,7 +528,7 @@ pub(super) async fn handle_select_card_action(
         return;
     }
     let Some((mid, idx)) = crate::feishu::card::parse_select_action(data) else {
-        // 非单选点击：可能是待办管理卡的表单提交（本路由上唯一带表单的卡）；否则空 ACK。
+        // 非单选点击：可能是普通 / 自动待办卡的表单提交；否则空 ACK。
         fs_todo_manage_submit(state, data, ack).await;
         return;
     };

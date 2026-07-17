@@ -666,6 +666,39 @@ pub fn build_select_card(v: &crate::select::SelectView) -> Value {
     })
 }
 
+/// `/todo-auto` 管理卡：复用逐条切换列表，并在同一卡片底部追加“新增自动待办”表单。
+/// 空项目仍保留表单，以便直接创建第一条自动待办。
+pub fn build_todo_auto_card(
+    v: &crate::select::SelectView,
+    empty_text: &str,
+    input_placeholder: &str,
+    submit_label: &str,
+) -> Value {
+    let mut card = build_select_card(v);
+    let Some(elements) = card
+        .pointer_mut("/body/elements")
+        .and_then(Value::as_array_mut)
+    else {
+        return card;
+    };
+    if v.options.is_empty() {
+        elements.push(body_text(empty_text, true));
+    }
+    elements.push(json!({ "tag": "hr", "margin": "4px 0px 4px 0px" }));
+    elements.push(build_form(
+        &[],
+        &[],
+        None,
+        false,
+        false,
+        false,
+        input_placeholder,
+        submit_label,
+        "",
+    ));
+    card
+}
+
 /// 待办管理卡（spec todo-whats-next D8）：样式化头部（标题）+ markdown 列表正文 +
 /// 表单（输入框 + 「新增待办」提交按钮）。提交回调与提问卡同构（`form_value.user_input`），
 /// 由 daemon select 路由按台账 kind 分派（不与提问会话冲突）。
@@ -1242,6 +1275,52 @@ mod tests {
             "action": { "value": "{\"action\":\"submit\"}" }
         });
         assert!(parse_card_submit(&event, &[]).is_some());
+    }
+
+    #[test]
+    fn todo_auto_card_keeps_toggle_rows_and_add_form() {
+        let view = crate::select::build_view(
+            "自动待办".into(),
+            vec![crate::select::SelectOption {
+                id: "t1".into(),
+                dot: None,
+                seq: Some(1),
+                primary: "跑回归".into(),
+                badge: Some("⚡".into()),
+                elapsed: None,
+                secondary: None,
+            }],
+            crate::select::SelectAction::TodoAutoEntry,
+            crate::i18n::Lang::Zh,
+        );
+        let card = build_todo_auto_card(&view, "暂无待办", "输入自动待办", "新增自动待办");
+        let elements = card["body"]["elements"].as_array().unwrap();
+        assert!(elements.iter().any(|element| {
+            element
+                .pointer("/columns/1/elements/0/behaviors/0/value/select")
+                .and_then(Value::as_u64)
+                == Some(0)
+        }));
+        let form = form_of(&card);
+        assert_eq!(form["elements"][0]["name"], INPUT_NAME);
+        assert_eq!(form["elements"][1]["text"]["content"], "新增自动待办");
+    }
+
+    #[test]
+    fn empty_todo_auto_card_still_has_add_form() {
+        let view = crate::select::build_view(
+            "自动待办".into(),
+            Vec::new(),
+            crate::select::SelectAction::TodoAutoEntry,
+            crate::i18n::Lang::Zh,
+        );
+        let card = build_todo_auto_card(&view, "暂无待办", "输入自动待办", "新增自动待办");
+        assert!(card["body"]["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|element| element.to_string().contains("暂无待办")));
+        assert_eq!(form_of(&card)["elements"][0]["name"], INPUT_NAME);
     }
 
     #[test]

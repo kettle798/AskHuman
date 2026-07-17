@@ -774,6 +774,31 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "输入新待办，提交即新增",
         ),
         "todoIm.cardAddButton" => pick(lang, "Add todo", "新增待办"),
+        "todoIm.autoCardInputPlaceholder" => pick(
+            lang,
+            "Type a new auto-run todo",
+            "输入新的自动待办",
+        ),
+        "todoIm.autoCardAddButton" => pick(
+            lang,
+            "Add auto-run todo",
+            "新增自动待办",
+        ),
+        "todoIm.autoAddTitle" => pick(
+            lang,
+            "Add auto-run todo to \"{project}\"",
+            "为「{project}」新增自动待办",
+        ),
+        "todoIm.autoAddCardHint" => pick(
+            lang,
+            "New entries are marked auto-run ⚡ and will be dispatched directly by whats-next.",
+            "新增条目会标记为自动执行 ⚡，whats-next 时将直接派发。",
+        ),
+        "todoIm.autoAddHint" => pick(
+            lang,
+            "Add an auto-run todo: send {p}todo-auto <text> and choose this project.",
+            "新增自动待办：发送 {p}todo-auto <内容> 后选择本项目。",
+        ),
         "todoIm.noAgents" => pick(
             lang,
             "No live agent sessions; cannot locate a project. Todos can still be managed via the popup, tray window, or `AskHuman todo`.",
