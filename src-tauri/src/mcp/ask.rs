@@ -151,7 +151,11 @@ any input that only the human can provide. Provide `message` for free-form quest
 `{\"questions\":[{\"question\":\"Continue?\",\"options\":[{\"text\":\"Yes\",\"recommended\":true}]}]}`. \
 The reply is returned as \
 structured content; any images the human attaches are returned as image content.",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<AskResult>()
+        output_schema = rmcp::handler::server::tool::schema_for_type::<AskResult>(),
+        // Truthful hints that also let Codex-style clients skip per-call approval
+        // (their default treats missing destructive/open_world hints as true):
+        // asking the operator destroys nothing and reaches no external world.
+        annotations(destructive_hint = false, open_world_hint = false)
     )]
     async fn ask(
         &self,
@@ -260,7 +264,8 @@ structured content; any images the human attaches are returned as image content.
 this only after the current task is fully complete and before ending; use `ask` for any question, \
 decision, or next step within the current task. Optionally pass `message` with a completion report \
 and `files` with report documents. The human replies with the next task (start it immediately), or \
-approves ending the turn — only then may you end it."
+approves ending the turn — only then may you end it.",
+        annotations(destructive_hint = false, open_world_hint = false)
     )]
     async fn whats_next(
         &self,

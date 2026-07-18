@@ -70,6 +70,8 @@ pub fn analyze_codex_with(input: &Value, zh: bool, shell_runner: ShellRunner<'_>
     // Per-type derivation first (cheap), rollout gate second (I/O).
     enum Pending {
         Ready((PermissionMemory, Vec<ConfirmChoice>)),
+        /// Built-in AskHuman self-call whitelist (D49): auto-allow once the gate passes.
+        SelfCall,
         /// Network candidate: needs the rollout owner-command cross-check (D39 condition 3).
         Network(NetworkTarget),
         /// Plain shell script: needs the owner FunctionCall fields + worker (D38/D44).
@@ -82,7 +84,11 @@ pub fn analyze_codex_with(input: &Value, zh: bool, shell_runner: ShellRunner<'_>
             .map(Pending::Ready)
     } else if tool_name.starts_with("mcp__") {
         // MCP tool call: tool_name is registry-generated, not model-forgeable (D40).
-        mcp_enhancement(tool_name, cwd, zh).map(Pending::Ready)
+        if mcp_self_call(tool_name, cwd) {
+            Some(Pending::SelfCall)
+        } else {
+            mcp_enhancement(tool_name, cwd, zh).map(Pending::Ready)
+        }
     } else if tool_name == "Bash" {
         // Network interception candidate (D39 conditions 1+2) first; anything else with a
         // command is a plain shell request (Phase 4).
@@ -107,7 +113,7 @@ pub fn analyze_codex_with(input: &Value, zh: bool, shell_runner: ShellRunner<'_>
     let owner_command = match &pending {
         Pending::Network(target) => Some(target.command.as_str()),
         Pending::Shell(script) => Some(script.as_str()),
-        Pending::Ready(_) => None,
+        Pending::Ready(_) | Pending::SelfCall => None,
     };
     let Some(scan) = rollout_scan(object, owner_command) else {
         return Analysis::Basic;
@@ -120,6 +126,7 @@ pub fn analyze_codex_with(input: &Value, zh: bool, shell_runner: ShellRunner<'_>
 
     let (memory, extra_choices) = match pending {
         Pending::Ready(enhancement) => enhancement,
+        Pending::SelfCall => return Analysis::AutoAllow,
         Pending::Network(target) => {
             // D39 condition 3: the owner FunctionCall's model-written justification must
             // differ from the Codex-generated description, else this is a forged/plain
@@ -132,11 +139,18 @@ pub fn analyze_codex_with(input: &Value, zh: bool, shell_runner: ShellRunner<'_>
                 None => return Analysis::Basic,
             }
         }
-        Pending::Shell(script) => match shell_enhancement(&scan, &script, cwd, zh, shell_runner) {
-            ShellOutcome::AutoAllow => return Analysis::AutoAllow,
-            ShellOutcome::Enhanced(enhancement) => enhancement,
-            ShellOutcome::Basic => return Analysis::Basic,
-        },
+        Pending::Shell(script) => {
+            // Built-in self-call whitelist (D49): a lone literal `AskHuman` ask-style
+            // invocation resolving to this very binary never needs a popup.
+            if shell_self_call(&script, cwd) {
+                return Analysis::AutoAllow;
+            }
+            match shell_enhancement(&scan, &script, cwd, zh, shell_runner) {
+                ShellOutcome::AutoAllow => return Analysis::AutoAllow,
+                ShellOutcome::Enhanced(enhancement) => enhancement,
+                ShellOutcome::Basic => return Analysis::Basic,
+            }
+        }
     };
     Analysis::Enhanced {
         memory,
@@ -609,6 +623,201 @@ fn mcp_permanent_channel(tool_name: &str, cwd: &str, codex_home: &Path) -> McpPe
         }
     }
     McpPermanent::Shadow
+}
+
+// ===== Built-in AskHuman self-call whitelist (D49) =====
+
+/// Flags a whitelisted ask-style invocation may use (each takes a following value,
+/// except `--stdin`). Any other `-`-prefixed token fails toward the popup.
+const SELF_CALL_ASK_FLAGS: &[&str] = &[
+    "-q",
+    "--question",
+    "-o",
+    "--option",
+    "-o!",
+    "--option!",
+    "-f",
+    "--file",
+    "--stdin",
+];
+/// `--whats-next` additionally rejects `-q` (its question is fixed).
+const SELF_CALL_WHATS_NEXT_FLAGS: &[&str] = &[
+    "-o",
+    "--option",
+    "-o!",
+    "--option!",
+    "-f",
+    "--file",
+    "--stdin",
+];
+
+/// Ask-style usages only (D49): free-form ask, `--whats-next`, `--agent-help`,
+/// `todo add`. Config / daemon / dev subcommands never ride the whitelist.
+fn self_call_usage_allowed(args: &[String]) -> bool {
+    fn flags_ok(args: &[String], allowed: &[&str]) -> bool {
+        args.iter()
+            .all(|arg| !arg.starts_with('-') || allowed.contains(&arg.as_str()))
+    }
+    match args.first().map(String::as_str) {
+        None => false,
+        Some("--agent-help") => args.len() == 1,
+        Some("todo") => {
+            args.get(1).map(String::as_str) == Some("add")
+                && args.len() >= 3
+                && args[2..].iter().all(|arg| !arg.starts_with('-'))
+        }
+        Some("--whats-next") => flags_ok(&args[1..], SELF_CALL_WHATS_NEXT_FLAGS),
+        Some(first) => {
+            // A leading positional is the ask message. A bare command-like token
+            // ("daemon", "config", "__x"...) could instead dispatch a CLI subcommand
+            // — current or future — so it fails toward the popup; real messages
+            // contain spaces, punctuation, or non-ASCII.
+            let command_like = !first.starts_with('-')
+                && first
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            !command_like && flags_ok(args, SELF_CALL_ASK_FLAGS)
+        }
+    }
+}
+
+/// Shell whitelist: the script is a single literal `AskHuman` invocation (per
+/// `self_call_usage_allowed`) whose argv[0] provably resolves to this very binary.
+fn shell_self_call(script: &str, cwd: &str) -> bool {
+    let Ok(current) = std::env::current_exe() else {
+        return false;
+    };
+    shell_self_call_at(script, cwd, &current, std::env::var_os("PATH").as_deref())
+}
+
+fn shell_self_call_at(
+    script: &str,
+    cwd: &str,
+    current_exe: &Path,
+    path_var: Option<&std::ffi::OsStr>,
+) -> bool {
+    let Some(argv) = crate::shell_safety::parse_lone_literal_command(script) else {
+        return false;
+    };
+    let Some((program, args)) = argv.split_first() else {
+        return false;
+    };
+    if !self_call_usage_allowed(args) {
+        return false;
+    }
+    let Ok(current) = std::fs::canonicalize(current_exe) else {
+        return false;
+    };
+    let candidate = if program.contains('/') {
+        if program.starts_with('/') {
+            PathBuf::from(program)
+        } else {
+            let Some(base) = crate::permission_rules::normalize_path(".", cwd) else {
+                return false;
+            };
+            Path::new(&base).join(program)
+        }
+    } else {
+        // PATH lookup mirroring exec semantics; relative PATH entries never count
+        // (a workspace-planted binary must not ride the whitelist).
+        let Some(found) = find_in_path(program, path_var) else {
+            return false;
+        };
+        found
+    };
+    // Canonicalized (symlink-resolved) identity with the running hook binary.
+    std::fs::canonicalize(&candidate)
+        .map(|path| path == current)
+        .unwrap_or(false)
+}
+
+fn find_in_path(name: &str, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let path_var = path_var?;
+    for dir in std::env::split_paths(path_var) {
+        if !dir.is_absolute() {
+            continue;
+        }
+        let candidate = dir.join(name);
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// MCP whitelist: `mcp__askhuman__{ask,whats_next}` where every readable config layer
+/// defining an `askhuman` server points its `command` at this binary, and none sets an
+/// explicit prompt/writes approval mode for the tool (user intent wins, mirrors D40).
+fn mcp_self_call(tool_name: &str, cwd: &str) -> bool {
+    let Some(codex_home) = default_codex_home() else {
+        return false;
+    };
+    let Ok(current) = std::env::current_exe() else {
+        return false;
+    };
+    mcp_self_call_at(tool_name, cwd, &codex_home, &current)
+}
+
+fn mcp_self_call_at(tool_name: &str, cwd: &str, codex_home: &Path, current_exe: &Path) -> bool {
+    let tool = match tool_name {
+        "mcp__askhuman__ask" => "ask",
+        "mcp__askhuman__whats_next" => "whats_next",
+        _ => return false,
+    };
+    let Ok(current) = std::fs::canonicalize(current_exe) else {
+        return false;
+    };
+    let layers = readable_config_layers(cwd, codex_home);
+    let mut defined = false;
+    for layer in &layers {
+        let Some(server) = layer
+            .doc
+            .as_table()
+            .get("mcp_servers")
+            .and_then(toml_edit::Item::as_table_like)
+            .and_then(|table| table.get("askhuman"))
+            .and_then(toml_edit::Item::as_table_like)
+        else {
+            continue;
+        };
+        defined = true;
+        if let Some(mode) = layer_explicit_mode(layer, "askhuman", tool) {
+            if mode == "prompt" || mode == "writes" {
+                return false;
+            }
+        }
+        // A workspace-defined `askhuman` server pointing anywhere else must not ride
+        // the whitelist; only absolute commands are resolvable.
+        let Some(command) = server.get("command").and_then(toml_edit::Item::as_str) else {
+            return false;
+        };
+        if !command.starts_with('/') {
+            return false;
+        }
+        match std::fs::canonicalize(command) {
+            Ok(path) if path == current => {}
+            _ => return false,
+        }
+    }
+    defined
 }
 
 // ===== Network host approvals (D39, §6.5.1) =====
@@ -1419,6 +1628,257 @@ mod tests {
         input["tool_name"] = json!("web_search");
         input["tool_input"] = json!({"query": "weather"});
         assert!(matches!(analyze_codex(&input, false), Analysis::Basic));
+    }
+
+    // ===== built-in AskHuman self-call whitelist (D49) =====
+
+    /// A fake executable standing in for the installed AskHuman binary.
+    fn fake_exe(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn self_call_usage_covers_ask_shapes_only() {
+        let ok = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+            self_call_usage_allowed(&args)
+        };
+        assert!(ok(&["--agent-help"]));
+        assert!(ok(&["todo", "add", "review the deploy plan"]));
+        assert!(ok(&[
+            "--whats-next",
+            "done",
+            "-o!",
+            "next task",
+            "-f",
+            "report.md"
+        ]));
+        assert!(ok(&["--whats-next", "--stdin"]));
+        assert!(ok(&[
+            "看看这个改动？",
+            "-f",
+            "./diff.patch",
+            "-q",
+            "继续吗？",
+            "-o",
+            "继续"
+        ]));
+        assert!(ok(&["-q", "要继续部署吗？", "-o!", "继续", "-o", "停止"]));
+
+        assert!(!ok(&[]));
+        assert!(!ok(&["--agent-help", "extra"]));
+        assert!(!ok(&["todo", "list"]));
+        assert!(!ok(&["todo", "add"]));
+        assert!(!ok(&["--whats-next", "-q", "smuggled question"]));
+        assert!(!ok(&["--settings"]));
+        assert!(!ok(&["daemon", "stop"]));
+        assert!(!ok(&["config", "set", "x"]));
+        assert!(!ok(&["-q", "x", "--unknown-flag"]));
+    }
+
+    #[test]
+    fn shell_self_call_requires_real_binary_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let exe = fake_exe(&root, "AskHuman");
+        let impostor_dir = root.join("workspace");
+        std::fs::create_dir_all(&impostor_dir).unwrap();
+        let impostor = fake_exe(&impostor_dir, "AskHuman");
+        let cwd = impostor_dir.to_string_lossy().to_string();
+        let path_var = std::ffi::OsString::from(root.as_os_str());
+
+        // Absolute path to the installed binary.
+        let script = format!("{} -q \"continue?\" -o yes", exe.display());
+        assert!(shell_self_call_at(&script, &cwd, &exe, Some(&path_var)));
+        // Bare name resolving through an absolute PATH entry.
+        assert!(shell_self_call_at(
+            "AskHuman --agent-help",
+            &cwd,
+            &exe,
+            Some(&path_var)
+        ));
+        // Symlink to the installed binary canonicalizes to the same identity.
+        #[cfg(unix)]
+        {
+            let link = root.join("ah-link");
+            std::os::unix::fs::symlink(&exe, &link).unwrap();
+            let script = format!("{} --agent-help", link.display());
+            assert!(shell_self_call_at(&script, &cwd, &exe, Some(&path_var)));
+        }
+
+        // A workspace-planted binary (relative or absolute) is not us.
+        assert!(!shell_self_call_at(
+            "./AskHuman --agent-help",
+            &cwd,
+            &exe,
+            Some(&path_var)
+        ));
+        let script = format!("{} --agent-help", impostor.display());
+        assert!(!shell_self_call_at(&script, &cwd, &exe, Some(&path_var)));
+        // Relative PATH entries never resolve.
+        let loose_path = std::ffi::OsString::from(".");
+        assert!(!shell_self_call_at(
+            "AskHuman --agent-help",
+            &cwd,
+            &exe,
+            Some(&loose_path)
+        ));
+        // Non-ask usage of the genuine binary still pops up.
+        let script = format!("{} daemon stop", exe.display());
+        assert!(!shell_self_call_at(&script, &cwd, &exe, Some(&path_var)));
+        // Compound scripts never ride the whitelist.
+        let script = format!("{} --agent-help && rm -rf /", exe.display());
+        assert!(!shell_self_call_at(&script, &cwd, &exe, Some(&path_var)));
+    }
+
+    #[test]
+    fn shell_self_call_auto_allows_through_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let exe = fake_exe(&root, "AskHuman");
+        // Guardian-suppressed turns stay suppressed even for self-calls.
+        let rollout = write_rollout(&[turn_context(
+            "turn-1",
+            Some("auto_review"),
+            json!("on-request"),
+        )]);
+        let mut input = hook_input(rollout.path(), PATCH);
+        input["tool_name"] = json!("Bash");
+        input["tool_input"] = json!({ "command": format!("{} --agent-help", exe.display()) });
+        assert!(matches!(analyze_codex(&input, false), Analysis::Suppress));
+        // Note: the AutoAllow half of the flow needs current_exe to be the hook binary,
+        // which unit tests cannot fake; identity coverage lives in
+        // `shell_self_call_requires_real_binary_identity`.
+    }
+
+    #[test]
+    fn mcp_self_call_requires_matching_server_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let exe = fake_exe(&root, "AskHuman");
+        let codex_home = root.join("codex-home");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        let cwd = root.to_string_lossy().to_string();
+        let write_config = |command: &str, extra: &str| {
+            std::fs::write(
+                codex_home.join("config.toml"),
+                format!(
+                    "[mcp_servers.askhuman]\ncommand = \"{command}\"\nargs = [\"mcp\"]\n{extra}"
+                ),
+            )
+            .unwrap();
+        };
+
+        write_config(&exe.to_string_lossy(), "");
+        assert!(mcp_self_call_at(
+            "mcp__askhuman__ask",
+            &cwd,
+            &codex_home,
+            &exe
+        ));
+        assert!(mcp_self_call_at(
+            "mcp__askhuman__whats_next",
+            &cwd,
+            &codex_home,
+            &exe
+        ));
+        // Other tools of the server (none exist today) and other servers never match.
+        assert!(!mcp_self_call_at(
+            "mcp__askhuman__evil",
+            &cwd,
+            &codex_home,
+            &exe
+        ));
+        assert!(!mcp_self_call_at(
+            "mcp__other__ask",
+            &cwd,
+            &codex_home,
+            &exe
+        ));
+
+        // Explicit prompt mode configured by the user wins.
+        write_config(
+            &exe.to_string_lossy(),
+            "default_tools_approval_mode = \"prompt\"\n",
+        );
+        assert!(!mcp_self_call_at(
+            "mcp__askhuman__ask",
+            &cwd,
+            &codex_home,
+            &exe
+        ));
+
+        // A server pointing at a different binary is not us.
+        let impostor = fake_exe(&root, "NotAskHuman");
+        write_config(&impostor.to_string_lossy(), "");
+        assert!(!mcp_self_call_at(
+            "mcp__askhuman__ask",
+            &cwd,
+            &codex_home,
+            &exe
+        ));
+
+        // Relative command strings are unresolvable -> fail closed.
+        write_config("AskHuman", "");
+        assert!(!mcp_self_call_at(
+            "mcp__askhuman__ask",
+            &cwd,
+            &codex_home,
+            &exe
+        ));
+
+        // No layer defines the server at all -> no whitelist.
+        std::fs::remove_file(codex_home.join("config.toml")).unwrap();
+        assert!(!mcp_self_call_at(
+            "mcp__askhuman__ask",
+            &cwd,
+            &codex_home,
+            &exe
+        ));
+    }
+
+    #[test]
+    fn mcp_self_call_rejects_workspace_defined_impostor_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let exe = fake_exe(&root, "AskHuman");
+        let codex_home = root.join("codex-home");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        std::fs::write(
+            codex_home.join("config.toml"),
+            format!(
+                "[mcp_servers.askhuman]\ncommand = \"{}\"\n",
+                exe.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        // A project layer redefines `askhuman` with another command: every defining
+        // layer must point at us, so the whitelist stays off.
+        let project = root.join("proj");
+        std::fs::create_dir_all(project.join(".codex")).unwrap();
+        let impostor = fake_exe(&root, "Impostor");
+        std::fs::write(
+            project.join(".codex/config.toml"),
+            format!(
+                "[mcp_servers.askhuman]\ncommand = \"{}\"\n",
+                impostor.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let cwd = project.to_string_lossy().to_string();
+        assert!(!mcp_self_call_at(
+            "mcp__askhuman__ask",
+            &cwd,
+            &codex_home,
+            &exe
+        ));
     }
 
     #[test]

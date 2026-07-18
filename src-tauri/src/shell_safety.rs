@@ -90,6 +90,112 @@ pub fn is_banned_prefix(prefix: &[String]) -> bool {
     })
 }
 
+// ===== AskHuman self-call whitelist parser (not a Codex port) =====
+
+/// Node kinds allowed anywhere in a whitelisted lone-command script. Everything else
+/// (expansions, substitutions, pipes, lists, assignments, file redirects, escapes...)
+/// fails toward the popup.
+const LONE_COMMAND_ALLOWED_KINDS: &[&str] = &[
+    "program",
+    "redirected_statement",
+    "command",
+    "command_name",
+    "word",
+    "number",
+    "string",
+    "string_content",
+    "raw_string",
+    "concatenation",
+    "heredoc_redirect",
+    "heredoc_start",
+    "heredoc_body",
+    "heredoc_content",
+    "heredoc_end",
+];
+
+/// Parses a script that consists of exactly one fully literal command, optionally with a
+/// single inert stdin heredoc (`<<'EOF' ... EOF`), into its argv. Returns `None` for
+/// anything else: multiple statements, pipes/lists, any expansion or substitution
+/// (including inside an unquoted heredoc body), file redirects, or env-var prefixes.
+///
+/// Used by the built-in AskHuman self-call whitelist; deliberately much stricter than
+/// the ported Codex parsing above.
+pub fn parse_lone_literal_command(script: &str) -> Option<Vec<String>> {
+    let tree = try_parse_shell(script)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return None;
+    }
+
+    // Whole-tree kind allowlist over every named node.
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.is_named() && !LONE_COMMAND_ALLOWED_KINDS.contains(&node.kind()) {
+            return None;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+
+    // Exactly one top-level statement.
+    let mut cursor = root.walk();
+    let statements: Vec<Node> = root.named_children(&mut cursor).collect();
+    let command = match statements.as_slice() {
+        [single] if single.kind() == "command" => *single,
+        [single] if single.kind() == "redirected_statement" => {
+            let body = single.child_by_field_name("body")?;
+            if body.kind() != "command" {
+                return None;
+            }
+            let mut cursor = single.walk();
+            for child in single.named_children(&mut cursor) {
+                if child.id() == body.id() {
+                    continue;
+                }
+                // Only the heredoc redirect itself; tree-sitter parks trailing
+                // `&& cmd` continuations *inside* heredoc_redirect, so its named
+                // children must be nothing but the heredoc parts.
+                if child.kind() != "heredoc_redirect" {
+                    return None;
+                }
+                let mut inner = child.walk();
+                for part in child.named_children(&mut inner) {
+                    if !matches!(
+                        part.kind(),
+                        "heredoc_start" | "heredoc_body" | "heredoc_end"
+                    ) {
+                        return None;
+                    }
+                }
+            }
+            body
+        }
+        _ => return None,
+    };
+
+    // Strict argv extraction: every named child must parse as a literal word (the
+    // ported `parse_literal_command_from_node` silently skips unparseable children,
+    // which is fine for Codex heuristics but too lax for a whitelist).
+    let mut words = Vec::new();
+    let mut cursor = command.walk();
+    for child in command.named_children(&mut cursor) {
+        if child.kind() == "command_name" {
+            if !words.is_empty() {
+                return None;
+            }
+            words.push(parse_literal_shell_word(child.named_child(0)?, script)?);
+        } else {
+            if words.is_empty() {
+                return None;
+            }
+            words.push(parse_literal_shell_word(child, script)?);
+        }
+    }
+    (!words.is_empty()).then_some(words)
+}
+
 // ===== bash.rs port =====
 
 fn try_parse_shell(shell_lc_arg: &str) -> Option<Tree> {
@@ -735,6 +841,77 @@ mod tests {
 
     fn parse_seq(src: &str) -> Option<Vec<Vec<String>>> {
         parse_shell_script_into_commands(src)
+    }
+
+    // ===== lone literal command (self-call whitelist parser) =====
+
+    #[test]
+    fn lone_command_accepts_plain_and_quoted_args() {
+        assert_eq!(
+            parse_lone_literal_command("AskHuman --agent-help"),
+            Some(vec_str(&["AskHuman", "--agent-help"]))
+        );
+        assert_eq!(
+            parse_lone_literal_command(
+                "AskHuman -q \"要继续吗？\" -o! '继续' -o \"停止\" -f ./diff.patch"
+            ),
+            Some(vec_str(&[
+                "AskHuman",
+                "-q",
+                "要继续吗？",
+                "-o!",
+                "继续",
+                "-o",
+                "停止",
+                "-f",
+                "./diff.patch"
+            ]))
+        );
+    }
+
+    #[test]
+    fn lone_command_accepts_inert_heredoc() {
+        let script = "AskHuman --whats-next --stdin <<'EOF'\n# 报告 `x` $VAR \"quoted\"\nEOF";
+        assert_eq!(
+            parse_lone_literal_command(script),
+            Some(vec_str(&["AskHuman", "--whats-next", "--stdin"]))
+        );
+        // Unquoted delimiter is fine only while the body stays expansion-free.
+        assert_eq!(
+            parse_lone_literal_command("AskHuman --stdin <<EOF\nplain text\nEOF"),
+            Some(vec_str(&["AskHuman", "--stdin"]))
+        );
+        assert_eq!(
+            parse_lone_literal_command("AskHuman --stdin <<EOF\nhas $(evil) inside\nEOF"),
+            None
+        );
+        assert_eq!(
+            parse_lone_literal_command("AskHuman --stdin <<EOF\nhas $VAR inside\nEOF"),
+            None
+        );
+    }
+
+    #[test]
+    fn lone_command_rejects_compound_and_dynamic_scripts() {
+        for script in [
+            "AskHuman -q a; rm -rf /",
+            "AskHuman -q a && rm -rf /",
+            "AskHuman -q a || true",
+            "AskHuman -q a | cat",
+            "AskHuman -q \"$(cat /etc/passwd)\"",
+            "AskHuman -q \"$HOME\"",
+            "AskHuman -q `id`",
+            "PATH=/evil AskHuman -q a",
+            "AskHuman -q a > /tmp/out",
+            "AskHuman -q a 2>&1",
+            "AskHuman --stdin <<'EOF' && rm -rf /\nbody\nEOF",
+            "AskHuman --stdin <<'EOF' > /tmp/out\nbody\nEOF",
+            "if true; then AskHuman -q a; fi",
+            "AskHuman -q $'a\\nb'",
+            "",
+        ] {
+            assert_eq!(parse_lone_literal_command(script), None, "{script:?}");
+        }
     }
 
     #[test]
