@@ -335,6 +335,13 @@ pub fn todos_remove(project: String, id: String) -> bool {
     crate::todos::remove(&project, &id)
 }
 
+/// GUI checkbox complete: dequeue into execution history (same path as whats-next `take`).
+/// Returns whether the entry existed and was moved.
+#[tauri::command]
+pub fn todos_complete(project: String, id: String) -> bool {
+    !crate::todos::take(&project, &[id]).is_empty()
+}
+
 #[tauri::command]
 pub fn todos_clear(project: String) -> usize {
     crate::todos::clear(&project)

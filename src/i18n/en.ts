@@ -583,6 +583,10 @@ export default {
     add: "Add",
     delete: "Delete",
     deleteConfirm: "Confirm delete",
+    complete: "Mark complete",
+    undoComplete: "Undo complete",
+    copy: "Copy text",
+    copied: "Copied",
     dragHint: "Drag to reorder (top entries appear first on cards and options)",
     clear: "Clear todos",
     clearHist: "Clear history",
@@ -601,6 +605,14 @@ export default {
     autoOff: "Unmark auto-run",
     autoNewHint:
       "When enabled, the Agent will automatically run this todo after completing the preceding task.",
+    time: {
+      justNow: "Just now",
+      secondsAgo: "{n}s ago",
+      minutesAgo: "{n}m ago",
+      hoursAgo: "{n}h ago",
+      daysAgo: "{n}d ago",
+      yesterday: "Yesterday",
+    },
   },
   interject: {
     title: "Message to Agent",

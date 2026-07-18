@@ -366,6 +366,10 @@ export const todosSetAuto = (project: string, id: string, auto: boolean) =>
 export const todosRemove = (project: string, id: string) =>
   invoke<boolean>("todos_remove", { project, id });
 
+/** GUI 勾选完成：出队并写入执行历史（与 whats-next take 同路径）。 */
+export const todosComplete = (project: string, id: string) =>
+  invoke<boolean>("todos_complete", { project, id });
+
 export const todosClear = (project: string) =>
   invoke<number>("todos_clear", { project });
 

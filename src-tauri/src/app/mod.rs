@@ -974,6 +974,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::todos_list,
             crate::commands::todos_add,
             crate::commands::todos_remove,
+            crate::commands::todos_complete,
             crate::commands::todos_clear,
             crate::commands::todos_reorder,
             crate::commands::todos_set_auto,

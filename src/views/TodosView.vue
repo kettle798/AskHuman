@@ -7,6 +7,7 @@ import { applyLanguage } from "../i18n";
 import {
   todosAdd,
   todosClear,
+  todosComplete,
   todosHistory,
   todosHistoryClear,
   todosInit,
@@ -24,7 +25,7 @@ import type {
   TodoProjectInfo,
 } from "../lib/types";
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 
 const projects = ref<TodoProjectInfo[]>([]);
 const selected = ref<string>("");
@@ -80,6 +81,12 @@ async function reloadEntries(): Promise<void> {
     todosList(selected.value),
     todosHistory(selected.value),
   ]);
+  // Drop optimistic complete state for ids that no longer exist in the queue.
+  for (const id of [...pendingCompleteTimers.keys()]) {
+    if (!entries.value.some((e) => e.id === id)) {
+      clearPendingComplete(id);
+    }
+  }
 }
 
 async function reloadAll(): Promise<void> {
@@ -97,6 +104,7 @@ async function onSelect(): Promise<void> {
   confirmKind.value = null;
   confirmDeleteId.value = null;
   histOpen.value = false;
+  clearAllPendingComplete();
   await reloadEntries();
 }
 
@@ -173,6 +181,7 @@ async function removeEntry(id: string): Promise<void> {
     return;
   }
   confirmDeleteId.value = null;
+  clearPendingComplete(id);
   try {
     await todosRemove(selected.value, id);
   } catch (err) {
@@ -185,6 +194,7 @@ async function doConfirmedClear(): Promise<void> {
   const kind = confirmKind.value;
   confirmKind.value = null;
   if (!selected.value || !kind) return;
+  if (kind === "todos") clearAllPendingComplete();
   try {
     if (kind === "todos") {
       await todosClear(selected.value);
@@ -197,23 +207,114 @@ async function doConfirmedClear(): Promise<void> {
   await reloadAll();
 }
 
+// ===== 勾选完成：乐观 UI + 1s 可撤回，超时 take 进 history =====
+const COMPLETE_DELAY_MS = 1000;
+/** id → timer handle for optimistic complete. */
+const pendingCompleteTimers = new Map<string, number>();
+/** Reactive set of ids currently in the completing (checked / strikethrough) state. */
+const completingIds = ref<Set<string>>(new Set());
+
+function isCompleting(id: string): boolean {
+  return completingIds.value.has(id);
+}
+
+function clearPendingComplete(id: string): void {
+  const timer = pendingCompleteTimers.get(id);
+  if (timer !== undefined) {
+    window.clearTimeout(timer);
+    pendingCompleteTimers.delete(id);
+  }
+  if (completingIds.value.has(id)) {
+    const next = new Set(completingIds.value);
+    next.delete(id);
+    completingIds.value = next;
+  }
+}
+
+function clearAllPendingComplete(): void {
+  for (const timer of pendingCompleteTimers.values()) {
+    window.clearTimeout(timer);
+  }
+  pendingCompleteTimers.clear();
+  completingIds.value = new Set();
+}
+
+function onPendingCheck(id: string): void {
+  if (!selected.value) return;
+  if (isCompleting(id)) {
+    // Uncheck within the grace window → cancel.
+    clearPendingComplete(id);
+    return;
+  }
+  const next = new Set(completingIds.value);
+  next.add(id);
+  completingIds.value = next;
+  const timer = window.setTimeout(() => {
+    pendingCompleteTimers.delete(id);
+    void commitComplete(id);
+  }, COMPLETE_DELAY_MS);
+  pendingCompleteTimers.set(id, timer);
+}
+
+async function commitComplete(id: string): Promise<void> {
+  if (!selected.value) {
+    clearPendingComplete(id);
+    return;
+  }
+  try {
+    await todosComplete(selected.value, id);
+  } catch (err) {
+    console.warn("todo complete failed", err);
+    clearPendingComplete(id);
+  }
+  // Reload (or todos-updated) will drop the id from completingIds once gone from the queue.
+  await reloadAll();
+}
+
+// ===== 时间：相对显示 + 自定义即时绝对时间 tooltip =====
+const timeTipId = ref<string | null>(null);
+
 function absoluteTime(ms: number): string {
   return ms ? new Date(ms).toLocaleString() : "";
 }
 
-// ===== 执行历史（第 16 轮定案：仅执行出队进历史；可一键恢复回队列末尾）=====
+function relativeTime(ms: number): string {
+  if (!ms) return "";
+  const now = Date.now();
+  const diff = Math.max(0, now - ms);
+  const sec = Math.floor(diff / 1000);
+  if (sec < 5) return t("todosWin.time.justNow");
+  if (sec < 60) return t("todosWin.time.secondsAgo", { n: sec });
+  const min = Math.floor(sec / 60);
+  if (min < 60) return t("todosWin.time.minutesAgo", { n: min });
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return t("todosWin.time.hoursAgo", { n: hr });
+  const d = new Date(ms);
+  const yd = new Date(now - 86400000);
+  if (
+    d.getFullYear() === yd.getFullYear() &&
+    d.getMonth() === yd.getMonth() &&
+    d.getDate() === yd.getDate()
+  ) {
+    return t("todosWin.time.yesterday");
+  }
+  const day = Math.floor(hr / 24);
+  if (day < 7) return t("todosWin.time.daysAgo", { n: day });
+  try {
+    return new Intl.DateTimeFormat(locale.value, {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(d);
+  } catch {
+    return d.toLocaleString();
+  }
+}
+
+// ===== 执行历史（执行出队 + GUI 勾选完成；可一键恢复回队列末尾）=====
 const history = ref<TodoDoneEntry[]>([]);
 const histOpen = ref(false);
-
-function shortTime(ms: number): string {
-  if (!ms) return "";
-  return new Date(ms).toLocaleString(undefined, {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 async function restoreEntry(id: string): Promise<void> {
   if (!selected.value) return;
@@ -223,6 +324,24 @@ async function restoreEntry(id: string): Promise<void> {
     console.warn("todo restore failed", err);
   }
   await reloadAll();
+}
+
+/** id of the row whose copy button just succeeded (brief visual feedback). */
+const copiedId = ref<string | null>(null);
+let copiedTimer: number | undefined;
+
+async function copyTodoText(id: string, text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    copiedId.value = id;
+    if (copiedTimer !== undefined) window.clearTimeout(copiedTimer);
+    copiedTimer = window.setTimeout(() => {
+      if (copiedId.value === id) copiedId.value = null;
+      copiedTimer = undefined;
+    }, 1200);
+  } catch (err) {
+    console.warn("todo copy failed", err);
+  }
 }
 
 // ===== 拖拽排序（第 14 轮定案，仅 GUI 窗口）=====
@@ -298,6 +417,7 @@ onMounted(async () => {
       confirmKind.value = null;
       confirmDeleteId.value = null;
       histOpen.value = false;
+      clearAllPendingComplete();
       await reloadAll();
       await focusAddInput();
     }
@@ -308,6 +428,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (newAutoHintTimer !== undefined) window.clearTimeout(newAutoHintTimer);
+  if (copiedTimer !== undefined) window.clearTimeout(copiedTimer);
+  clearAllPendingComplete();
   unlistenUpdated?.();
   unlistenGoto?.();
   unlistenSettings?.();
@@ -352,68 +474,180 @@ onBeforeUnmount(() => {
           v-for="(e, i) in entries"
           :key="e.id"
           class="td-row"
-          :class="{ dragging: dragIndex === i }"
+          :class="{ dragging: dragIndex === i, completing: isCompleting(e.id) }"
           @dragover="onDragOverRow(i, $event)"
           @drop.prevent
         >
+          <!-- 手柄列始终占位，与历史行复选框对齐。 -->
           <span
-            v-if="entries.length > 1"
-            class="td-handle"
-            draggable="true"
-            :title="t('todosWin.dragHint')"
-            @dragstart="onDragStart(i, $event)"
-            @dragend="onDragEnd"
+            class="td-handle-slot"
+            :class="{ active: entries.length > 1 }"
           >
-            <svg viewBox="0 0 10 14" aria-hidden="true">
-              <circle cx="3" cy="3" r="1.1" fill="currentColor" />
-              <circle cx="7" cy="3" r="1.1" fill="currentColor" />
-              <circle cx="3" cy="7" r="1.1" fill="currentColor" />
-              <circle cx="7" cy="7" r="1.1" fill="currentColor" />
-              <circle cx="3" cy="11" r="1.1" fill="currentColor" />
-              <circle cx="7" cy="11" r="1.1" fill="currentColor" />
-            </svg>
-          </span>
-          <div class="td-content" :title="absoluteTime(e.createdAtMs)">
-            <span class="td-text">{{ e.text }}</span>
-            <span v-if="agentLabel(e.agentKind)" class="td-source">
-              {{ t("todosWin.addedBy", { agent: agentLabel(e.agentKind) }) }}
+            <span
+              v-if="entries.length > 1"
+              class="td-handle"
+              draggable="true"
+              :title="t('todosWin.dragHint')"
+              @dragstart="onDragStart(i, $event)"
+              @dragend="onDragEnd"
+            >
+              <svg viewBox="0 0 10 14" aria-hidden="true">
+                <circle cx="3" cy="3" r="1.1" fill="currentColor" />
+                <circle cx="7" cy="3" r="1.1" fill="currentColor" />
+                <circle cx="3" cy="7" r="1.1" fill="currentColor" />
+                <circle cx="7" cy="7" r="1.1" fill="currentColor" />
+                <circle cx="3" cy="11" r="1.1" fill="currentColor" />
+                <circle cx="7" cy="11" r="1.1" fill="currentColor" />
+              </svg>
             </span>
+          </span>
+
+          <button
+            type="button"
+            class="td-check"
+            :class="{ checked: isCompleting(e.id) }"
+            :aria-label="
+              isCompleting(e.id) ? t('todosWin.undoComplete') : t('todosWin.complete')
+            "
+            :aria-pressed="isCompleting(e.id)"
+            @click.stop="onPendingCheck(e.id)"
+          >
+            <svg v-if="isCompleting(e.id)" viewBox="0 0 16 16" aria-hidden="true">
+              <circle cx="8" cy="8" r="7" fill="currentColor" />
+              <path
+                d="M5 8.2 L7.1 10.3 L11.2 5.8"
+                fill="none"
+                stroke="#fff"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <svg v-else viewBox="0 0 16 16" aria-hidden="true">
+              <circle
+                cx="8"
+                cy="8"
+                r="6.25"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.4"
+              />
+            </svg>
+          </button>
+
+          <div class="td-main">
+            <div class="td-top">
+              <span class="td-text">{{ e.text }}</span>
+              <button
+                v-if="confirmDeleteId === e.id"
+                type="button"
+                class="td-del-confirm"
+                @click.stop="removeEntry(e.id)"
+              >
+                {{ t("todosWin.deleteConfirm") }}
+              </button>
+              <button
+                v-else
+                type="button"
+                class="td-del"
+                :title="t('todosWin.delete')"
+                :aria-label="t('todosWin.delete')"
+                @click.stop="removeEntry(e.id)"
+              >
+                <svg viewBox="0 0 12 12" aria-hidden="true">
+                  <path
+                    d="M3 3 L9 9 M9 3 L3 9"
+                    stroke="currentColor"
+                    stroke-width="1.4"
+                    stroke-linecap="round"
+                  />
+                </svg>
+              </button>
+            </div>
+            <div class="td-meta">
+              <span
+                class="td-time-anchor"
+                @mouseenter="timeTipId = `p-${e.id}`"
+                @mouseleave="timeTipId = null"
+              >
+                <span class="td-time">{{ relativeTime(e.createdAtMs) }}</span>
+                <span
+                  v-show="timeTipId === `p-${e.id}` && e.createdAtMs"
+                  class="td-time-tip"
+                  role="tooltip"
+                >
+                  {{ absoluteTime(e.createdAtMs) }}
+                </span>
+              </span>
+              <span v-if="agentLabel(e.agentKind)" class="td-source">
+                · {{ agentLabel(e.agentKind) }}
+              </span>
+              <button
+                type="button"
+                class="td-auto"
+                :class="{ on: e.auto }"
+                :title="e.auto ? t('todosWin.autoOff') : t('todosWin.autoOn')"
+                :aria-label="e.auto ? t('todosWin.autoOff') : t('todosWin.autoOn')"
+                @click.stop="toggleAuto(e)"
+              >
+                <svg viewBox="0 0 12 12" aria-hidden="true">
+                  <path
+                    d="M6.8 1 L2.5 7 H5.6 L5.2 11 L9.5 5 H6.4 Z"
+                    :fill="e.auto ? 'currentColor' : 'none'"
+                    stroke="currentColor"
+                    stroke-width="1"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </button>
+              <button
+                type="button"
+                class="td-copy"
+                :class="{ done: copiedId === e.id }"
+                :title="
+                  copiedId === e.id ? t('todosWin.copied') : t('todosWin.copy')
+                "
+                :aria-label="
+                  copiedId === e.id ? t('todosWin.copied') : t('todosWin.copy')
+                "
+                @click.stop="copyTodoText(e.id, e.text)"
+              >
+                <svg
+                  v-if="copiedId === e.id"
+                  viewBox="0 0 12 12"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M2.5 6.2 L5 8.7 L9.5 3.5"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.4"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+                <svg v-else viewBox="0 0 12 12" aria-hidden="true">
+                  <rect
+                    x="4"
+                    y="4"
+                    width="6"
+                    height="6"
+                    rx="1.2"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                  />
+                  <path
+                    d="M3 8 V3.2 A1.2 1.2 0 0 1 4.2 2 H8"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                    stroke-linecap="round"
+                  />
+                </svg>
+              </button>
+            </div>
           </div>
-          <button
-            type="button"
-            class="td-auto"
-            :class="{ on: e.auto }"
-            :title="e.auto ? t('todosWin.autoOff') : t('todosWin.autoOn')"
-            :aria-label="e.auto ? t('todosWin.autoOff') : t('todosWin.autoOn')"
-            @click="toggleAuto(e)"
-          >
-            <svg viewBox="0 0 12 12" aria-hidden="true">
-              <path d="M6.8 1 L2.5 7 H5.6 L5.2 11 L9.5 5 H6.4 Z"
-                :fill="e.auto ? 'currentColor' : 'none'"
-                stroke="currentColor" stroke-width="1" stroke-linejoin="round" />
-            </svg>
-          </button>
-          <button
-            v-if="confirmDeleteId === e.id"
-            type="button"
-            class="td-del-confirm"
-            @click.stop="removeEntry(e.id)"
-          >
-            {{ t("todosWin.deleteConfirm") }}
-          </button>
-          <button
-            v-else
-            type="button"
-            class="td-del"
-            :title="t('todosWin.delete')"
-            :aria-label="t('todosWin.delete')"
-            @click.stop="removeEntry(e.id)"
-          >
-            <svg viewBox="0 0 12 12" aria-hidden="true">
-              <path d="M3 3 L9 9 M9 3 L3 9" stroke="currentColor" stroke-width="1.4"
-                stroke-linecap="round" />
-            </svg>
-          </button>
         </li>
       </ul>
 
@@ -425,7 +659,7 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <!-- 执行历史折叠区：仅执行出队的待办；可一键恢复回队列末尾。 -->
+      <!-- 执行历史折叠区：执行出队 + GUI 勾选完成；可一键恢复回队列末尾。 -->
       <section v-if="history.length" class="td-hist">
         <div class="td-hist-head">
           <button type="button" class="td-hist-toggle" @click="histOpen = !histOpen">
@@ -444,26 +678,109 @@ onBeforeUnmount(() => {
         </div>
         <ul v-if="histOpen" class="td-list td-hist-list">
           <li v-for="h in history" :key="h.id" class="td-row td-hist-row">
-            <div class="td-content" :title="absoluteTime(h.doneAtMs)">
-              <span class="td-text">{{ h.text }}</span>
-              <span v-if="agentLabel(h.agentKind)" class="td-source">
-                {{ t("todosWin.addedBy", { agent: agentLabel(h.agentKind) }) }}
-              </span>
-            </div>
-            <span class="td-hist-time">{{ shortTime(h.doneAtMs) }}</span>
+            <!-- 与待办行手柄列同宽留白，复选框上下对齐。 -->
+            <span class="td-handle-slot" />
             <button
               type="button"
-              class="td-restore"
-              :title="t('todosWin.restore')"
+              class="td-check td-check-hist"
               :aria-label="t('todosWin.restore')"
-              @click="restoreEntry(h.id)"
+              @click.stop="restoreEntry(h.id)"
             >
-              <svg viewBox="0 0 12 12" aria-hidden="true">
-                <path d="M4.5 2 L2 4.5 L4.5 7 M2 4.5 H8 A2.5 2.5 0 0 1 8 9.5 H5"
-                  fill="none" stroke="currentColor" stroke-width="1.3"
-                  stroke-linecap="round" stroke-linejoin="round" />
+              <!-- 默认：实心已勾选；hover：同尺寸圆内换成恢复图标 + 蓝色 tint。 -->
+              <svg class="td-check-done" viewBox="0 0 16 16" aria-hidden="true">
+                <circle cx="8" cy="8" r="7" fill="currentColor" />
+                <path
+                  d="M5 8.2 L7.1 10.3 L11.2 5.8"
+                  fill="none"
+                  stroke="#fff"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+              <svg class="td-check-restore" viewBox="0 0 16 16" aria-hidden="true">
+                <circle cx="8" cy="8" r="7" fill="currentColor" />
+                <!-- Restore glyph inset inside the disc so it does not fill the circle. -->
+                <path
+                  d="M7 5.1 L5.4 6.8 L7 8.5 M5.4 6.8 H9.6 A2.1 2.1 0 0 1 9.6 11 H7.4"
+                  fill="none"
+                  stroke="#fff"
+                  stroke-width="1.25"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
               </svg>
             </button>
+            <div class="td-main">
+              <div class="td-top">
+                <span class="td-text">{{ h.text }}</span>
+              </div>
+              <div class="td-meta">
+                <span
+                  class="td-time-anchor"
+                  @mouseenter="timeTipId = `h-${h.id}`"
+                  @mouseleave="timeTipId = null"
+                >
+                  <span class="td-time">{{ relativeTime(h.doneAtMs) }}</span>
+                  <span
+                    v-show="timeTipId === `h-${h.id}` && h.doneAtMs"
+                    class="td-time-tip"
+                    role="tooltip"
+                  >
+                    {{ absoluteTime(h.doneAtMs) }}
+                  </span>
+                </span>
+                <span v-if="agentLabel(h.agentKind)" class="td-source">
+                  · {{ agentLabel(h.agentKind) }}
+                </span>
+                <button
+                  type="button"
+                  class="td-copy"
+                  :class="{ done: copiedId === h.id }"
+                  :title="
+                    copiedId === h.id ? t('todosWin.copied') : t('todosWin.copy')
+                  "
+                  :aria-label="
+                    copiedId === h.id ? t('todosWin.copied') : t('todosWin.copy')
+                  "
+                  @click.stop="copyTodoText(h.id, h.text)"
+                >
+                  <svg
+                    v-if="copiedId === h.id"
+                    viewBox="0 0 12 12"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M2.5 6.2 L5 8.7 L9.5 3.5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.4"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                  <svg v-else viewBox="0 0 12 12" aria-hidden="true">
+                    <rect
+                      x="4"
+                      y="4"
+                      width="6"
+                      height="6"
+                      rx="1.2"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.2"
+                    />
+                    <path
+                      d="M3 8 V3.2 A1.2 1.2 0 0 1 4.2 2 H8"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.2"
+                      stroke-linecap="round"
+                    />
+                  </svg>
+                </button>
+              </div>
+            </div>
           </li>
         </ul>
       </section>
@@ -497,9 +814,13 @@ onBeforeUnmount(() => {
             @click="toggleNewAuto"
           >
             <svg viewBox="0 0 12 12" aria-hidden="true">
-              <path d="M6.8 1 L2.5 7 H5.6 L5.2 11 L9.5 5 H6.4 Z"
+              <path
+                d="M6.8 1 L2.5 7 H5.6 L5.2 11 L9.5 5 H6.4 Z"
                 :fill="newAuto ? 'currentColor' : 'none'"
-                stroke="currentColor" stroke-width="1" stroke-linejoin="round" />
+                stroke="currentColor"
+                stroke-width="1"
+                stroke-linejoin="round"
+              />
             </svg>
             <span>{{ t("todosWin.autoLabel") }}</span>
           </button>
@@ -648,14 +969,31 @@ onBeforeUnmount(() => {
   border-style: dashed;
   border-color: var(--control-border);
 }
+.td-row.completing .td-text {
+  text-decoration: line-through;
+  color: var(--text-secondary);
+  opacity: 0.72;
+}
+.td-row.completing .td-meta {
+  opacity: 0.55;
+}
+
+/* 手柄列固定宽度：历史行同宽留白，上下复选框对齐。 */
+.td-handle-slot {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 20px;
+  margin: 1px -2px 0 -4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 .td-handle {
-  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 14px;
   height: 20px;
-  margin: 0 -2px 0 -4px;
   color: var(--text-secondary);
   opacity: 0.55;
   cursor: grab;
@@ -670,26 +1008,9 @@ onBeforeUnmount(() => {
   width: 10px;
   height: 14px;
 }
-.td-content {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.td-text {
-  font-size: 13px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.td-source {
-  color: var(--text-muted, #8e8e93);
-  font-size: 10px;
-  line-height: 1.25;
-}
-/* 自动执行 ⚡ 切换：未开启时随行 hover 淡入；开启后常显琥珀色实心。 */
-.td-auto {
+
+/* 圆形复选框。 */
+.td-check {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -699,7 +1020,123 @@ onBeforeUnmount(() => {
   margin-top: 1px;
   padding: 0;
   border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.td-check:hover {
+  color: #0a84ff;
+}
+.td-check.checked {
+  color: #0a84ff;
+}
+.td-check svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+.td-check-hist {
+  /* Solid checked disc, slightly muted; same 16px glyph size for both states. */
+  color: color-mix(in srgb, var(--text-secondary) 55%, transparent);
+  position: relative;
+  border-radius: 50%;
+}
+.td-check-hist .td-check-done,
+.td-check-hist .td-check-restore {
+  width: 16px;
+  height: 16px;
+}
+.td-check-hist .td-check-done {
+  display: block;
+}
+.td-check-hist .td-check-restore {
+  display: none;
+}
+/* Hover: same circle size, only icon + blue tint on the solid fill — no bg plate. */
+.td-check-hist:hover {
+  color: color-mix(in srgb, #0a84ff 72%, var(--text-secondary));
+  background: transparent;
+}
+.td-check-hist:hover .td-check-done {
+  display: none;
+}
+.td-check-hist:hover .td-check-restore {
+  display: block;
+}
+
+.td-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.td-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.td-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.td-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  min-height: 18px;
+  color: var(--text-muted, #8e8e93);
+  font-size: 11px;
+  line-height: 1.3;
+}
+.td-time-anchor {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.td-time {
+  cursor: default;
+}
+.td-time-tip {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 28px));
+  padding: 5px 8px;
+  border: var(--hairline) solid var(--border);
   border-radius: 6px;
+  background: var(--bg);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.35;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.td-source {
+  color: var(--text-muted, #8e8e93);
+}
+
+/* 自动执行 ⚡：跟在 meta 文字后；off 时随行 hover 淡入，on 时常显琥珀色。 */
+.td-auto {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
   background: transparent;
   color: var(--text-secondary);
   opacity: 0;
@@ -718,6 +1155,38 @@ onBeforeUnmount(() => {
   color: #ff9f0a;
 }
 .td-auto svg {
+  width: 12px;
+  height: 12px;
+}
+/* 复制正文：跟在 ⚡ 右侧，仅行 hover 出现；成功后短暂勾号反馈。 */
+.td-copy {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  opacity: 0;
+  cursor: pointer;
+}
+.td-row:hover .td-copy {
+  opacity: 0.75;
+}
+.td-copy:hover {
+  opacity: 1;
+  background: color-mix(in srgb, #0a84ff 14%, transparent);
+  color: #0a84ff;
+}
+.td-copy.done {
+  opacity: 1;
+  color: #30d158;
+}
+.td-copy svg {
   width: 12px;
   height: 12px;
 }
@@ -792,6 +1261,10 @@ onBeforeUnmount(() => {
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
+  opacity: 0;
+}
+.td-row:hover .td-del {
+  opacity: 1;
 }
 .td-del:hover {
   background: color-mix(in srgb, #ff453a 14%, transparent);
@@ -953,38 +1426,10 @@ onBeforeUnmount(() => {
   margin-top: 8px;
 }
 .td-hist-row {
-  align-items: center;
+  opacity: 0.78;
 }
 .td-hist-row .td-text {
   color: var(--text-secondary);
-}
-.td-hist-time {
-  flex: 0 0 auto;
-  font-size: 11px;
-  color: var(--text-muted, #8e8e93);
-  white-space: nowrap;
-}
-.td-restore {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-.td-restore:hover {
-  background: color-mix(in srgb, #0a84ff 14%, transparent);
-  color: #0a84ff;
-}
-.td-restore svg {
-  width: 12px;
-  height: 12px;
 }
 /* ===== 清空确认模态（与历史窗口 .overlay/.dialog 同构） ===== */
 .td-overlay {
