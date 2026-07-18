@@ -1081,21 +1081,17 @@ fn network_target(tool_input: &Value) -> Option<NetworkTarget> {
 /// the owner FunctionCall. Fail closed toward plain-shell treatment.
 fn network_cross_check(scan: &RolloutScan, target: &NetworkTarget) -> bool {
     if scan.owner_calls.is_empty() {
-        // No owner FunctionCall: only the native ownerless prompt-command shape qualifies.
+        // No owner call: only the native ownerless prompt-command shape qualifies.
         let target_text = format!("{}://{}:{}", target.protocol, target.host, target.port);
         return target.command == format!("network-access {target_text}");
     }
-    if scan
+    // D44 (refined): the forgery check is per call — a justification equal to the
+    // Codex-generated description means the model authored the description itself.
+    // Diverging justifications across retries of the same command are harmless.
+    !scan
         .owner_calls
         .iter()
         .any(|call| call.justification.as_deref() == Some(target.description.as_str()))
-    {
-        return false;
-    }
-    // Multiple FunctionCalls for the same command with diverging fields: fail closed (D44).
-    scan.owner_calls
-        .iter()
-        .all(|call| call.justification == scan.owner_calls[0].justification)
 }
 
 fn network_enhancement(
@@ -1221,19 +1217,32 @@ fn shell_enhancement(
     zh: bool,
     shell_runner: ShellRunner<'_>,
 ) -> ShellOutcome {
-    // D44: the owner FunctionCall supplies prefix_rule / sandbox_permissions. No owner
-    // call means we cannot prove a plain first-time shell approval; diverging fields
-    // abandon derivation. Both fail closed to the basic popup.
-    let Some(first) = scan.owner_calls.first() else {
-        return ShellOutcome::Basic;
-    };
-    if scan.owner_calls.iter().any(|call| call != first) {
+    // D44 (refined 2026-07-18): owner calls supply prefix_rule / sandbox_permissions. No
+    // owner call means we cannot prove a plain first-time shell approval (fail closed).
+    // Multiple owner calls with diverging fields are a normal retry pattern (e.g. an
+    // escalated attempt rejected under untrusted, then a plain retry), so fields merge
+    // conservatively instead of abandoning the derivation.
+    if scan.owner_calls.is_empty() {
         return ShellOutcome::Basic;
     }
-    let sandbox_override = first
-        .sandbox_permissions
-        .as_deref()
-        .is_some_and(|value| value != "use_default");
+    // Any escalated attempt makes the whole request escalated (more segments prompt).
+    let sandbox_override = scan.owner_calls.iter().any(|call| {
+        call.sandbox_permissions
+            .as_deref()
+            .is_some_and(|value| value != "use_default")
+    });
+    // The model prefix tier is only trusted when every owner call agrees on it;
+    // otherwise the worker's fallback derivation still runs.
+    let first_prefix = &scan.owner_calls[0].prefix_rule;
+    let prefix_rule = if scan
+        .owner_calls
+        .iter()
+        .all(|call| &call.prefix_rule == first_prefix)
+    {
+        first_prefix.clone()
+    } else {
+        None
+    };
     let Some(context) = scan.turn_context.as_ref() else {
         return ShellOutcome::Basic;
     };
@@ -1246,7 +1255,7 @@ fn shell_enhancement(
         approval_policy,
         sandbox_kind,
         sandbox_override,
-        prefix_rule: first.prefix_rule.clone(),
+        prefix_rule,
     };
     let Some(output) = shell_runner(&probe) else {
         return ShellOutcome::Basic;
@@ -1562,11 +1571,10 @@ fn scan_rollout_line(
             if payload.get("name").and_then(Value::as_str) != Some("exec") {
                 return;
             }
-            let Some(arguments) = exec_command_object(input) else {
-                return;
-            };
-            if let Some(call) = owner_call_from_arguments(&Value::Object(arguments), probe) {
-                scan.owner_calls.push(call);
+            for arguments in exec_command_objects(input) {
+                if let Some(call) = owner_call_from_arguments(&Value::Object(arguments), probe) {
+                    scan.owner_calls.push(call);
+                }
             }
         }
         _ => {}
@@ -1607,31 +1615,34 @@ fn owner_call_from_arguments(arguments: &Value, probe: &str) -> Option<OwnerCall
     })
 }
 
-/// Strict extraction of the single `tools.exec_command({...})` argument object from a
-/// code_mode JS cell. Anything ambiguous — multiple calls, non-double-quoted strings,
-/// unsupported syntax — yields `None`, leaving the request without a provable owner
-/// (fail closed to the basic popup).
-fn exec_command_object(source: &str) -> Option<serde_json::Map<String, Value>> {
+/// Strict extraction of every `tools.exec_command({...})` argument object from a
+/// code_mode JS cell (one cell routinely runs several commands). Calls that do not
+/// parse as double-quoted JSON-compatible literals are skipped: an unparseable call
+/// can never *prove* ownership, so skipping only fails toward the basic popup.
+fn exec_command_objects(source: &str) -> Vec<serde_json::Map<String, Value>> {
     const NEEDLE: &str = "tools.exec_command(";
-    let start = source.find(NEEDLE)?;
-    let rest = &source[start + NEEDLE.len()..];
-    if rest.contains(NEEDLE) {
-        return None;
-    }
-    let mut parser = JsObjectParser {
-        bytes: rest.as_bytes(),
-        pos: 0,
-    };
-    parser.skip_ws();
-    let object = parser.parse_object(0)?;
-    parser.skip_ws();
-    if parser.eat(b',') {
+    let mut objects = Vec::new();
+    let mut cursor = 0;
+    while let Some(found) = source[cursor..].find(NEEDLE) {
+        cursor += found + NEEDLE.len();
+        let mut parser = JsObjectParser {
+            bytes: &source.as_bytes()[cursor..],
+            pos: 0,
+        };
         parser.skip_ws();
+        let Some(object) = parser.parse_object(0) else {
+            continue;
+        };
+        parser.skip_ws();
+        if parser.eat(b',') {
+            parser.skip_ws();
+        }
+        if !parser.eat(b')') {
+            continue;
+        }
+        objects.push(object);
     }
-    if !parser.eat(b')') {
-        return None;
-    }
-    Some(object)
+    objects
 }
 
 /// Minimal recognizer for JS object literals restricted to JSON-expressible content:
@@ -2866,7 +2877,9 @@ mod tests {
     }
 
     #[test]
-    fn divergent_owner_justifications_fail_closed() {
+    fn divergent_owner_justifications_check_forgery_per_call() {
+        // D44 refined: diverging justifications across retries are harmless; the
+        // network treatment stands as long as none equals the description.
         let rollout = write_rollout(&[
             turn_context("turn-1", Some("user"), json!("on-request")),
             shell_call("turn-1", "curl https://api.github.com/repos", Some("first")),
@@ -2874,6 +2887,25 @@ mod tests {
                 "turn-1",
                 "curl https://api.github.com/repos",
                 Some("second"),
+            ),
+        ]);
+        let input = network_input(
+            rollout.path(),
+            "curl https://api.github.com/repos",
+            NET_DESC,
+        );
+        assert!(matches!(
+            analyze_codex(&input, false),
+            Analysis::Enhanced { .. }
+        ));
+        // But any single call whose justification equals the description is a forgery.
+        let rollout = write_rollout(&[
+            turn_context("turn-1", Some("user"), json!("on-request")),
+            shell_call("turn-1", "curl https://api.github.com/repos", Some("first")),
+            shell_call(
+                "turn-1",
+                "curl https://api.github.com/repos",
+                Some(NET_DESC),
             ),
         ]);
         let input = network_input(
@@ -3045,10 +3077,12 @@ mod tests {
     }
 
     #[test]
-    fn exec_command_object_extracts_strictly() {
+    fn exec_command_objects_extract_strictly() {
         // Real code_mode cell shape: newlines, bare keys, arrays, trailing statements.
         let source = "const r = await tools.exec_command({\n  cmd: \"curl -sS https://example.com\",\n  workdir: \"/w\",\n  yield_time_ms: 10000,\n  sandbox_permissions: \"require_escalated\",\n  justification: \"why not\",\n  prefix_rule: [\"curl\", \"-sS\"],\n});\ntext(JSON.stringify(r));\n";
-        let object = exec_command_object(source).unwrap();
+        let objects = exec_command_objects(source);
+        assert_eq!(objects.len(), 1);
+        let object = &objects[0];
         assert_eq!(
             object.get("cmd").and_then(Value::as_str),
             Some("curl -sS https://example.com")
@@ -3059,19 +3093,27 @@ mod tests {
             Some("why not")
         );
         // Quoted keys, escapes, and nested objects parse; JSON semantics preserved.
-        let object = exec_command_object(
+        let objects = exec_command_objects(
             "tools.exec_command({\"cmd\": \"echo \\\"hi\\\"\", env: { A: \"1\" }, ok: true })",
-        )
-        .unwrap();
+        );
         assert_eq!(
-            object.get("cmd").and_then(Value::as_str),
+            objects[0].get("cmd").and_then(Value::as_str),
             Some("echo \"hi\"")
         );
+        // A cell driving several commands yields every parseable call.
+        let objects = exec_command_objects(
+            "await tools.exec_command({cmd: \"a\"});\nawait tools.exec_command({cmd: \"b\"});",
+        );
+        assert_eq!(
+            objects
+                .iter()
+                .filter_map(|object| object.get("cmd").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
 
-        // Ambiguity and non-JSON syntax fail closed.
+        // Non-JSON syntax is skipped per call (never a false owner).
         for bad in [
-            // Two calls in one cell.
-            "tools.exec_command({cmd: \"a\"}); tools.exec_command({cmd: \"b\"});",
             // Single-quoted / template strings.
             "tools.exec_command({cmd: 'a'})",
             "tools.exec_command({cmd: `a`})",
@@ -3084,8 +3126,14 @@ mod tests {
             // No call at all.
             "tools.write_stdin({chars: \"x\"})",
         ] {
-            assert!(exec_command_object(bad).is_none(), "should reject: {bad}");
+            assert!(exec_command_objects(bad).is_empty(), "should reject: {bad}");
         }
+        // A parse failure in one call does not hide a later parseable call.
+        let objects = exec_command_objects(
+            "tools.exec_command({cmd: 'x'}); tools.exec_command({cmd: \"ok\"})",
+        );
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].get("cmd").and_then(Value::as_str), Some("ok"));
     }
 
     fn exec_cell_call(turn: &str, js: &str) -> Value {
@@ -3295,10 +3343,10 @@ mod tests {
     }
 
     #[test]
-    fn ownerless_or_divergent_shell_calls_stay_basic() {
+    fn ownerless_shell_calls_stay_basic() {
         let panicking_runner =
             |_probe: &ShellProbe| -> Option<ShellWorkerOutput> { panic!("must not run worker") };
-        // No owner FunctionCall in the rollout.
+        // No owner call in the rollout.
         let rollout = write_rollout(&[shell_turn_context(
             "turn-1",
             json!("on-request"),
@@ -3309,16 +3357,83 @@ mod tests {
             analyze_codex_with(&input, false, &panicking_runner),
             Analysis::Basic
         ));
-        // Two owner calls with diverging prefix_rule fields (D44).
+    }
+
+    #[test]
+    fn divergent_owner_fields_merge_conservatively() {
+        // D44 refined: the escalated-then-plain retry pattern keeps memory options.
+        // Diverging prefix_rule drops the model tier (fallback derivation still runs);
+        // any escalated attempt makes the probe escalated.
         let rollout = write_rollout(&[
-            shell_turn_context("turn-1", json!("on-request"), "restricted"),
-            shell_call_full("turn-1", "git status", Some(json!(["git"])), None),
+            shell_turn_context("turn-1", json!("untrusted"), "restricted"),
+            shell_call_full(
+                "turn-1",
+                "git status",
+                Some(json!(["git"])),
+                Some("require_escalated"),
+            ),
             shell_call_full("turn-1", "git status", None, None),
         ]);
         let input = shell_input(rollout.path(), "git status");
+        let runner = |probe: &ShellProbe| {
+            assert_eq!(probe.prefix_rule, None, "diverging model tier is dropped");
+            assert!(probe.sandbox_override, "any escalated attempt counts");
+            Some(worker_output(&[&["git", "status"]]))
+        };
         assert!(matches!(
-            analyze_codex_with(&input, false, &panicking_runner),
-            Analysis::Basic
+            analyze_codex_with(&input, false, &runner),
+            Analysis::Enhanced { .. }
+        ));
+        // Agreeing owner calls still pass the model tier through.
+        let rollout = write_rollout(&[
+            shell_turn_context("turn-1", json!("untrusted"), "restricted"),
+            shell_call_full("turn-1", "git status", Some(json!(["git"])), None),
+            shell_call_full("turn-1", "git status", Some(json!(["git"])), None),
+        ]);
+        let input = shell_input(rollout.path(), "git status");
+        let runner = |probe: &ShellProbe| {
+            assert_eq!(probe.prefix_rule.as_deref(), Some(&["git".to_string()][..]));
+            assert!(!probe.sandbox_override);
+            Some(worker_output(&[&["git", "status"]]))
+        };
+        assert!(matches!(
+            analyze_codex_with(&input, false, &runner),
+            Analysis::Enhanced { .. }
+        ));
+    }
+
+    #[test]
+    fn real_world_escalated_then_plain_retry_keeps_memory_options() {
+        // Byte-level replay of the observed 2026-07-18 session: the model first tries
+        // require_escalated (rejected under untrusted, no popup), then retries plain,
+        // and the popup arrives with both cells already in the rollout.
+        let command = "curl -L --fail --silent --show-error https://example.com | sed -n 's:.*<title>\\([^<]*\\)</title>.*:\\1:p'";
+        let escalated = "const r = await tools.exec_command({\n  cmd: \"curl -L --fail --silent --show-error https://example.com | sed -n 's:.*<title>\\\\([^<]*\\\\)</title>.*:\\\\1:p'\",\n  workdir: \"/w\",\n  yield_time_ms: 30000,\n  max_output_tokens: 2000,\n  sandbox_permissions: \"require_escalated\",\n  justification: \"是否允许我联网运行 curl 访问 https://example.com 并提取页面标题？\",\n  prefix_rule: [\"curl\"]\n});\ntext(JSON.stringify(r));\n";
+        let plain = "const r = await tools.exec_command({\n  cmd: \"curl -L --fail --silent --show-error https://example.com | sed -n 's:.*<title>\\\\([^<]*\\\\)</title>.*:\\\\1:p'\",\n  workdir: \"/w\",\n  yield_time_ms: 30000,\n  max_output_tokens: 2000\n});\ntext(JSON.stringify(r));\n";
+        let rollout = write_rollout(&[
+            shell_turn_context("turn-1", json!("untrusted"), "restricted"),
+            exec_cell_call("turn-1", escalated),
+            exec_cell_call("turn-1", plain),
+        ]);
+        let input = shell_input(rollout.path(), command);
+        let runner = |probe: &ShellProbe| {
+            assert_eq!(probe.prefix_rule, None);
+            assert!(probe.sandbox_override);
+            Some(worker_output(&[
+                &[
+                    "curl",
+                    "-L",
+                    "--fail",
+                    "--silent",
+                    "--show-error",
+                    "https://example.com",
+                ],
+                &["sed", "-n", "s:.*<title>\\([^<]*\\)</title>.*:\\1:p"],
+            ]))
+        };
+        assert!(matches!(
+            analyze_codex_with(&input, false, &runner),
+            Analysis::Enhanced { .. }
         ));
     }
 

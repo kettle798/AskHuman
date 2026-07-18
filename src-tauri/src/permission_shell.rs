@@ -498,7 +498,8 @@ pub fn locate_codex_bin() -> Option<PathBuf> {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("");
-        if basename.contains("codex") {
+        // Case-insensitive: the desktop app's process is "Codex", the CLI is "codex".
+        if basename.to_ascii_lowercase().contains("codex") {
             return Some(parent);
         }
     }
