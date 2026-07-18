@@ -421,7 +421,10 @@ struct GuiTodoProjectCandidate {
     todo_count: usize,
 }
 
-fn gui_todo_project_sort(a: &GuiTodoProjectCandidate, b: &GuiTodoProjectCandidate) -> std::cmp::Ordering {
+fn gui_todo_project_sort(
+    a: &GuiTodoProjectCandidate,
+    b: &GuiTodoProjectCandidate,
+) -> std::cmp::Ordering {
     a.activity_rank
         .cmp(&b.activity_rank)
         .then_with(|| b.pinned.cmp(&a.pinned))
@@ -435,9 +438,7 @@ fn gui_todo_project_sort(a: &GuiTodoProjectCandidate, b: &GuiTodoProjectCandidat
         .then_with(|| a.key.cmp(&b.key))
 }
 
-fn build_todo_project_list(
-    agents: Option<&serde_json::Value>,
-) -> Vec<TodoProjectInfo> {
+fn build_todo_project_list(agents: Option<&serde_json::Value>) -> Vec<TodoProjectInfo> {
     let todos = crate::todos::all();
     let mut by_key: std::collections::HashMap<String, GuiTodoProjectCandidate> =
         std::collections::HashMap::new();

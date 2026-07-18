@@ -981,10 +981,7 @@ mod tests {
     fn command_phrase_keys_are_unique() {
         let mut seen = std::collections::HashSet::new();
         for (key, _) in COMMAND_PHRASES {
-            assert!(
-                seen.insert(*key),
-                "duplicate command phrase key: {key}"
-            );
+            assert!(seen.insert(*key), "duplicate command phrase key: {key}");
         }
     }
 
@@ -1009,7 +1006,10 @@ mod tests {
         assert_eq!(classify("状态"), Parsed::Command(Command::Status(None)));
         assert_eq!(classify("status"), Parsed::Command(Command::Status(None)));
         assert_eq!(classify("插话"), Parsed::Command(Command::Msg(None, None)));
-        assert_eq!(classify("发消息"), Parsed::Command(Command::Msg(None, None)));
+        assert_eq!(
+            classify("发消息"),
+            Parsed::Command(Command::Msg(None, None))
+        );
         assert_eq!(classify("待办"), Parsed::Command(Command::Todo(None, None)));
         assert_eq!(classify("todo"), Parsed::Command(Command::Todo(None, None)));
         assert_eq!(classify("删待办"), Parsed::Command(Command::TodoRm(None)));

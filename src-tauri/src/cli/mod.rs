@@ -715,14 +715,8 @@ mod tests {
             normalize_whats_next_option_key("End this turn!"),
             "endthisturn"
         );
-        assert_eq!(
-            normalize_whats_next_option_key("  结束本轮。 "),
-            "结束本轮"
-        );
-        assert_eq!(
-            normalize_whats_next_option_key("We're done"),
-            "weredone"
-        );
+        assert_eq!(normalize_whats_next_option_key("  结束本轮。 "), "结束本轮");
+        assert_eq!(normalize_whats_next_option_key("We're done"), "weredone");
         assert_eq!(
             normalize_whats_next_option_key("No more tasks"),
             "nomoretasks"
@@ -740,7 +734,9 @@ mod tests {
         assert!(is_spurious_whats_next_end_option("We're done"));
         // Real tasks that only contain end-ish words stay.
         assert!(!is_spurious_whats_next_end_option("结束本轮的文档撰写"));
-        assert!(!is_spurious_whats_next_end_option("Stop the flaky e2e suite"));
+        assert!(!is_spurious_whats_next_end_option(
+            "Stop the flaky e2e suite"
+        ));
         assert!(!is_spurious_whats_next_end_option("Write docs"));
     }
 
