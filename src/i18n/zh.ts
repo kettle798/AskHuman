@@ -113,6 +113,7 @@ export default {
       chipHint: "选中后随本次回复送达（agent 开始执行即从列表移除）",
       delete: "删除",
       deleteConfirm: "确认删除",
+      more: "……还有 {n} 条待办未列出（可在待办窗口或 /todo 查看调序）。",
       // 每条选中的待办并入回答时的整行文案（与手输文本空行分隔）。
       mergeLine: "另外看一下这个待办任务：{text}",
     },

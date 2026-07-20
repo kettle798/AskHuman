@@ -1128,6 +1128,10 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                             apply_surface(builder, window_bg, effective_window_effect).build()?;
                         #[cfg(target_os = "macos")]
                         set_runtime_window_effect_with_bg(&win, window_effect, window_bg);
+                        // Todos may be added from the separate manager window, CLI, MCP, or IM
+                        // while this question is open. Keep the popup's project list live.
+                        #[cfg(unix)]
+                        watch_todos_file(win.clone());
                         // 预热路径：窗口保持隐藏待命，待 `Show` 领用、前端绘制完成后由 `popup_show_window` 上屏。
                         if !warm {
                             // macOS：隐藏构建后先设原生出现动画（样式由设置决定），再 show()。
@@ -2186,9 +2190,9 @@ where
     Ok(())
 }
 
-/// 监听 `todos.json` 变更并向待办窗口发 `todos-updated`（前端据此重载；写入方可能是任意进程，
-/// 靠文件监听跨进程感知）。原子写（tmp + rename）换 inode，故监听**state 目录**再按文件名过滤
-/// （与 `watch_history_file` 同思路）。
+/// 监听 `todos.json` 变更并向目标窗口发 `todos-updated`（待办窗口与提问 Popup 都据此重载；
+/// 写入方可能是任意进程，靠文件监听跨进程感知）。原子写（tmp + rename）换 inode，故监听
+/// **state 目录**再按文件名过滤（与 `watch_history_file` 同思路）。
 #[cfg(unix)]
 fn watch_todos_file<R: tauri::Runtime>(window: tauri::WebviewWindow<R>) {
     use tauri::Emitter;

@@ -120,6 +120,7 @@ export default {
       chipHint: "Select to send with your reply (removed from the list once picked up)",
       delete: "Delete",
       deleteConfirm: "Confirm delete",
+      more: "…{n} more todo(s) not listed (view or reorder in the Todos window or /todo).",
       // Line merged into the answer for each selected todo (blank-line separated).
       mergeLine: "Also look into this todo task: {text}",
     },

@@ -58,6 +58,10 @@ import {
   shouldRevealQuestionBeforeCmdEnter,
   type ComposerDockGeometry,
 } from "./composerDock";
+import {
+  refreshWhatsNextTodos,
+  selectedWhatsNextTodo,
+} from "./whatsNextTodos";
 
 export function usePopupCore() {
   const { t } = useI18n();
@@ -559,6 +563,8 @@ export function usePopupCore() {
   const single = computed(() => request.value?.single ?? false);
   // whats-next 提问（spec todo-whats-next D2/D7）：待办已是问题选项本体，折叠区不重复渲染 chip。
   const whatsNext = computed(() => request.value?.whatsNext ?? false);
+  let whatsNextStaticOptions: Question["predefinedOptions"] = [];
+  let whatsNextBaseMessage = "";
 
   // ===== 待办下拉区（spec todo-whats-next D7，第 11 轮改版）=====
   // 该提问项目的待办列表；直读 todos.json（经后端命令），渲染后异步加载不阻塞首屏。
@@ -582,10 +588,34 @@ export function usePopupCore() {
     todos.value.filter((td) => todoChosenIds.value.includes(td.id))
   );
 
+  let todoLoadGeneration = 0;
   async function loadTodos() {
-    if (!projectPath.value || whatsNext.value) return;
+    if (!projectPath.value || !request.value) return;
+    const generation = ++todoLoadGeneration;
     try {
-      todos.value = await todosList(projectPath.value);
+      const latest = await todosList(projectPath.value);
+      if (generation !== todoLoadGeneration) return;
+      const liveIds = new Set(latest.map((todo) => todo.id));
+      todos.value = latest;
+      if (whatsNext.value) {
+        const question = request.value.questions[0];
+        if (!question) return;
+        const refreshed = refreshWhatsNextTodos(
+          question.predefinedOptions,
+          whatsNextStaticOptions,
+          latest,
+          chosenByQ.value[0] ?? [],
+          t("popup.todos.optionPrefix"),
+        );
+        question.predefinedOptions = refreshed.options;
+        question.message = refreshed.hiddenTodos
+          ? `${whatsNextBaseMessage}\n\n${t("popup.todos.more", { n: refreshed.hiddenTodos })}`
+          : whatsNextBaseMessage;
+        chosenByQ.value[0] = refreshed.selectedOptions;
+        return;
+      }
+      // External deletes/completions must also clear stale local selections.
+      todoChosenIds.value = todoChosenIds.value.filter((id) => liveIds.has(id));
     } catch {
       /* 旧后端无此命令：待办区保持空 */
     }
@@ -819,6 +849,7 @@ export function usePopupCore() {
   let unlistenCloseReq: UnlistenFn | null = null;
   let unlistenFlash: UnlistenFn | null = null;
   let unlistenAgent: UnlistenFn | null = null;
+  let unlistenTodos: UnlistenFn | null = null;
   // 方案6 预热弹窗：daemon 领用时 emit 的唤醒事件，前端据此 pull 请求并渲染。
   let unlistenShow: UnlistenFn | null = null;
 
@@ -1308,6 +1339,26 @@ export function usePopupCore() {
         images: imagesByQ.value[i] ?? [],
         files: (replyFilesByQ.value[i] ?? []).map((f) => f.path),
       };
+      // Local whats-next TODO options refresh after the daemon snapshots its request. Submit a
+      // refreshed TODO as raw task text + stable id so output and dequeue semantics stay exact.
+      const whatsNextTodo =
+        i === 0 && whatsNext.value
+          ? selectedWhatsNextTodo(
+              q.predefinedOptions,
+              chosenByQ.value[i] ?? [],
+              todos.value,
+              t("popup.todos.optionPrefix"),
+            )
+          : null;
+      if (whatsNextTodo) {
+        answer.selectedOptions = answer.selectedOptions.filter(
+          (text) => text !== whatsNextTodo.optionText,
+        );
+        answer.userInput = [whatsNextTodo.text, answer.userInput.trim()]
+          .filter((text) => text.trim())
+          .join("\n\n");
+        answer.todoIds = [whatsNextTodo.id];
+      }
       // 待办下拉区选中的条目（恒归**最后一题**，spec D7 第 11 轮改版）：每条加「另外看一下
       // 这个待办任务：」前缀并入 userInput（手输文本在前、待办在后，空行分隔），id 送后端出队。
       if (
@@ -1640,6 +1691,11 @@ export function usePopupCore() {
     verticalEnabled.value = init.verticalQuestions ?? false;
     const req = interaction.type === "ask" ? interaction.request : null;
     request.value = req;
+    const whatsNextQuestion = req?.whatsNext ? req.questions[0] : null;
+    whatsNextStaticOptions = whatsNextQuestion
+      ? whatsNextQuestion.predefinedOptions.filter((option) => !option.todoId)
+      : [];
+    whatsNextBaseMessage = whatsNextQuestion?.message.split("\n\n", 1)[0] ?? "";
     confirmRequest.value = interaction.type === "confirm" ? interaction.request : null;
     permissionEdit.value = interaction.type === "confirm" ? init.popupEdit ?? null : null;
     permissionDiff.value = permissionEdit.value?.initialDiff
@@ -1783,6 +1839,11 @@ export function usePopupCore() {
   // 或为用户 / 托盘触发，略晚于首帧注册无碍（自更新态另用 popupUpdateState() 拉初值兜底）。
   // 放此处是为了不阻塞弹窗首屏（原先这些 await 串在 popupInit 之前，正是「加载中」停留的来源）。
   async function initAfterPaint(init: PopupInit) {
+    // Any process may update todos.json while the question stays open. The popup host watches
+    // the file and emits this event to refresh the ordinary todo section or whats-next options.
+    unlistenTodos = await listen("todos-updated", () => {
+      void loadTodos();
+    });
     void loadTodos();
     await attach.initAttachmentPreviewListeners();
     unlistenDrop = await getCurrentWebview().onDragDropEvent((event) => {
@@ -1889,6 +1950,7 @@ export function usePopupCore() {
     unlistenCloseReq?.();
     unlistenFlash?.();
     unlistenAgent?.();
+    unlistenTodos?.();
     unlistenShow?.();
     if (timeTicker) window.clearInterval(timeTicker);
     if (flashTimer) window.clearTimeout(flashTimer);
