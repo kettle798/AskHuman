@@ -327,9 +327,9 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 - headless/SSH 可用 `channel`、`agents`、`config`、`doctor` 完成渠道配置与 Agent 集成；各子命令提供 help 和 JSON 输出。
 - `channel set` 无 flag 走交互向导，有 flag 走脚本；密钥只从 env/file/stdin 或隐藏输入读取，不进 argv。
-- `agents mode` 维护 None/CLI/MCP 整包；permission、lifecycle、stop 是正交 capability，Grok 仅 None/MCP 且不支持 stop/interject。
+- `agents mode` 维护 None/CLI/MCP 整包；permission/stop 的 preference 独立保存，但只有 CLI/MCP mode 才安装交互接管 Hook，None 隐藏对应设置并卸载其 active 能力；lifecycle 始终正交，Grok 仅 None/MCP 且不支持 stop/interject。
 - 全局交互协议把 Sub Agent 作为唯一例外并禁止其使用 AskHuman；Claude/Codex mode 另带 `SubagentStart` 提示 Hook，Cursor/Grok 只依赖协议文本。
-- `agents update [<agent>]` 按当前 mode 重新 reconcile 单家或全部托管产物；重复设置相同 mode 也会完整更新，但不改正交 capability 偏好。
+- `agents update [<agent>]` 按当前 mode 重新 reconcile 单家或全部托管产物；重复设置相同 mode 也会完整更新，但不改独立保存的 capability 偏好。
 - `config` 是通用键值兜底，`doctor` 汇总 Daemon、渠道和集成；两者复用同一配置与集成模块，不维护第二套逻辑。
 
 ## MCP 支持（CLI 之外的第二种集成形态）
@@ -359,6 +359,7 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 - 只处理 Claude Code、Codex、Cursor 的自然完成；Grok、错误和用户中断不能可靠 continuation，不发卡。
 - 三家独立开关默认关；询问“继续/结束”，24h 或基础设施失败 fail-open，投放沿用活跃槽 ∪ watch 渠道。
+- Stop preference 独立保存，但只在 CLI/MCP mode 生效；None 隐藏开关并卸载 confirm 能力，重新集成时自动恢复。若 lifecycle tracking 仍开，共享 Stop handler 只保留 `track`、不弹确认卡。
 - 继续时使用各家原生 continuation，下一次自然 Stop 再询问，不做外部 resume。
 - Stop 确认复用普通 Ask 单选链路但不写回复历史；它与 lifecycle 共用单一 Stop handler，避免并发 Hook 提前置空闲。
 - `[user_confirmed_end_turn]` 出现在最后回复任意位置即表示用户已明确同意结束，命中后直接放行，避免再次确认。

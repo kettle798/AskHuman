@@ -10,7 +10,8 @@
 
 use crate::integrations::agent_rules::{self, AgentTarget, Variant};
 use crate::integrations::{
-    agent_permission, agent_subagent_guard, claude_hook, cursor_hook, mcp_config, mutation_lock,
+    agent_permission, agent_stop, agent_subagent_guard, claude_hook, cursor_hook, mcp_config,
+    mutation_lock,
 };
 use anyhow::Result;
 
@@ -227,6 +228,7 @@ fn set_unlocked(target: AgentTarget, mode: Mode) -> Result<()> {
                 timeout_hook_install(target)?;
             }
             agent_permission::reconcile_unlocked(target, mode)?;
+            agent_stop::reconcile_unlocked(stop_kind(target), mode)?;
             Ok(())
         }
         Mode::Mcp => {
@@ -238,6 +240,7 @@ fn set_unlocked(target: AgentTarget, mode: Mode) -> Result<()> {
             agent_subagent_guard::reconcile_unlocked(target, mode)?;
             mcp_config::install(target)?;
             agent_permission::reconcile_unlocked(target, mode)?;
+            agent_stop::reconcile_unlocked(stop_kind(target), mode)?;
             Ok(())
         }
     }
@@ -285,7 +288,17 @@ fn uninstall_all_unlocked(target: AgentTarget) -> Result<()> {
     }
     mcp_config::uninstall(target)?;
     agent_permission::reconcile_unlocked(target, Mode::None)?;
+    agent_stop::reconcile_unlocked(stop_kind(target), Mode::None)?;
     Ok(())
+}
+
+fn stop_kind(target: AgentTarget) -> crate::agents::AgentKind {
+    match target {
+        AgentTarget::Cursor => crate::agents::AgentKind::Cursor,
+        AgentTarget::ClaudeCode => crate::agents::AgentKind::Claude,
+        AgentTarget::Codex => crate::agents::AgentKind::Codex,
+        AgentTarget::Grok => crate::agents::AgentKind::Grok,
+    }
 }
 
 #[cfg(test)]
@@ -305,5 +318,22 @@ mod tests {
         assert!(!timeout_hook_supported(AgentTarget::Codex));
         assert!(!timeout_hook_is_installed(AgentTarget::Codex));
         assert!(!timeout_hook_needs_update(AgentTarget::Codex));
+    }
+
+    #[test]
+    fn stop_kind_covers_every_agent_target() {
+        assert_eq!(
+            stop_kind(AgentTarget::Cursor),
+            crate::agents::AgentKind::Cursor
+        );
+        assert_eq!(
+            stop_kind(AgentTarget::ClaudeCode),
+            crate::agents::AgentKind::Claude
+        );
+        assert_eq!(
+            stop_kind(AgentTarget::Codex),
+            crate::agents::AgentKind::Codex
+        );
+        assert_eq!(stop_kind(AgentTarget::Grok), crate::agents::AgentKind::Grok);
     }
 }

@@ -1673,7 +1673,8 @@ pub struct AgentModeStatus {
     /// PermissionRequest capability state; kept separate from the timeout hook.
     permission: agent_permission::PermissionStatus,
     permission_needs_update: bool,
-    /// Stop confirmation capability, independent from integration mode and lifecycle tracking.
+    /// Stop confirmation preference; activation is integration-mode gated while lifecycle tracking
+    /// remains independent.
     stop: agent_stop::StopStatus,
     /// MCP 配置文件展示路径。
     mcp_config_path: String,
