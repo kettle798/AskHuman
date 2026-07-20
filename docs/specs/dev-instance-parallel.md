@@ -207,6 +207,7 @@ AskHuman dev enable --preset feishu-test
 |---|---|
 | graceful drain | **实例内**仍生效（本树 install 换 bin → 本树 daemon drain）；**跨实例不互等** |
 | 空闲退出 | 每实例独立 |
+| macOS launchd | 每实例按 `ASKHUMAN_HOME` 派生独立 daemon label；与主实例、其它工作树互不 bootout；登出时随当前 GUI domain 退出 |
 | GUI host | 每实例独立 sock/lock（避免与主 tray 抢）；dev 下菜单栏是否常驻可后续收紧，一期至少路径隔离 |
 | Agent lifecycle hooks | 用户级全局 hook 仍可能触发；事件打到**实际 exec 到的**那个 daemon（cwd 正确则进实例）。不在一期改 hook 安装布局 |
 | 自更新 | 仅主环境产品路径关心；dev bin 不走应用内 self-update 到生产目录 |
