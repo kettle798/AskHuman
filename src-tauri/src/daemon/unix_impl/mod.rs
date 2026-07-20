@@ -394,6 +394,7 @@ enum PickerKind {
     TaskWorkspace,
     TaskAgent,
     TaskPermission,
+    TaskInputSource,
     Watch,
     Status,
     Unwatch,
@@ -459,6 +460,29 @@ struct TaskPickerPayload {
     workspace: String,
     #[serde(default)]
     kind: String,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskInputSourcePayload {
+    task: TaskPickerPayload,
+    permission: crate::integrations::agent_launch::LaunchPermission,
+    project: String,
+    todos: Vec<crate::todos::TodoEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    overflow_note: Option<String>,
+}
+
+const TASK_MANUAL_ACTION_ID: &str = "start";
+const TASK_TODO_ACTION_PREFIX: &str = "todo:";
+
+fn task_todo_label(todo: &crate::todos::TodoEntry, lang: Lang) -> String {
+    format!(
+        "{}{}{}",
+        crate::i18n::tr(lang, "whatsNext.todoPrefix"),
+        if todo.auto { "⚡ " } else { "" },
+        todo.text
+    )
 }
 
 /// 单选卡台账治理上限：每渠道最多留存的活动单选卡数（超出丢最旧）。

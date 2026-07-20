@@ -44,6 +44,7 @@ pub enum SelectAction {
     TaskWorkspace,
     TaskAgent,
     TaskPermission,
+    TaskInputSource,
     Watch,
     Status,
     Unwatch,
@@ -76,6 +77,7 @@ impl SelectAction {
             SelectAction::TaskWorkspace => "select.btnChoose",
             SelectAction::TaskAgent => "select.btnChoose",
             SelectAction::TaskPermission => "select.btnChoose",
+            SelectAction::TaskInputSource => "select.btnChoose",
             SelectAction::Watch => "select.btnWatch",
             SelectAction::Status => "select.btnStatus",
             SelectAction::Unwatch => "select.btnUnwatch",
@@ -247,6 +249,14 @@ pub fn title_task_permission(lang: Lang) -> String {
     match lang {
         Lang::En => "Choose a permission mode",
         Lang::Zh => "选择权限模式",
+    }
+    .to_string()
+}
+
+pub fn title_task_input_source(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Choose a task source",
+        Lang::Zh => "选择任务来源",
     }
     .to_string()
 }

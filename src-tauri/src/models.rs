@@ -311,16 +311,47 @@ pub struct ConfirmChoice {
     pub role: crate::confirm::ActionRole,
 }
 
-/// Optional input shown only while one action is selected.
+/// Optional input attached to a structured choice form.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfirmInput {
     pub id: String,
     pub visible_when_action_id: String,
+    /// Keep the input visible for every action while still using
+    /// `visible_when_action_id` as the action that requires text.
+    #[serde(default)]
+    pub always_visible: bool,
+    /// Require non-empty input when `visible_when_action_id` is selected.
+    #[serde(default)]
+    pub required: bool,
+    /// Fixed task-prefix length for actions that append this input after existing text.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub prefix_chars_by_action_id: std::collections::BTreeMap<String, usize>,
     pub label: String,
     #[serde(default)]
     pub placeholder: String,
     pub max_chars: usize,
+}
+
+impl ConfirmInput {
+    /// Preserve the original long task-input contract for older serialized requests while
+    /// allowing an explicitly always-visible input to be optional for non-manual actions.
+    pub fn requires_value(&self) -> bool {
+        self.required || (!self.always_visible && self.max_chars > 1000)
+    }
+
+    pub fn max_value_chars_for(&self, action_id: &str) -> usize {
+        let prefix = self
+            .prefix_chars_by_action_id
+            .get(action_id)
+            .copied()
+            .unwrap_or(0);
+        if prefix == 0 {
+            self.max_chars
+        } else {
+            self.max_chars.saturating_sub(prefix.saturating_add(2))
+        }
+    }
 }
 
 /// Presentation contract for the first structured confirmation surface.
@@ -616,7 +647,11 @@ impl ConfirmRequest {
                 .position(|c| c.id == input.visible_when_action_id)
                 .map(|visible_when_index| ChoiceFormInput {
                     id: input.id.clone(),
-                    visibility: ChoiceFormInputVisibility::WhenIndex(visible_when_index),
+                    visibility: if input.always_visible {
+                        ChoiceFormInputVisibility::Always
+                    } else {
+                        ChoiceFormInputVisibility::WhenIndex(visible_when_index)
+                    },
                     label: input.label.clone(),
                     placeholder: input.placeholder.clone(),
                     max_chars: input.max_chars,
@@ -654,15 +689,28 @@ impl ConfirmRequest {
             .get(choice_index)
             .ok_or_else(|| "confirm choice index out of range".to_string())?;
         let comment = match self.presentation.input() {
-            Some(input) if input.visible_when_action_id == choice.id => {
+            Some(input) if input.always_visible || input.visible_when_action_id == choice.id => {
                 let value = comment.unwrap_or_default().trim().to_string();
-                if value.chars().count() > input.max_chars {
+                let prefix_chars = input
+                    .prefix_chars_by_action_id
+                    .get(&choice.id)
+                    .copied()
+                    .unwrap_or(0);
+                let combined_chars = prefix_chars.saturating_add(if value.is_empty() {
+                    0
+                } else {
+                    2usize.saturating_add(value.chars().count())
+                });
+                if combined_chars > input.max_chars {
                     return Err(format!(
                         "confirm input exceeds {} characters",
                         input.max_chars
                     ));
                 }
-                if input.max_chars > 1000 && value.is_empty() {
+                if input.requires_value()
+                    && input.visible_when_action_id == choice.id
+                    && value.is_empty()
+                {
                     return Err("confirm input is required".to_string());
                 }
                 (!value.is_empty()).then_some(value)
@@ -685,6 +733,13 @@ impl ConfirmRequest {
             .iter()
             .position(|choice| choice.id == self.dismiss_action_id)
             .expect("validated confirm request must contain dismiss action")
+    }
+
+    pub fn input_max_chars_for_choice(&self, choice_index: usize) -> Option<usize> {
+        let choice = self.choices.get(choice_index)?;
+        self.presentation
+            .input()
+            .map(|input| input.max_value_chars_for(&choice.id))
     }
 }
 
@@ -789,6 +844,9 @@ mod tests {
                 input: Some(ConfirmInput {
                     id: "reason".into(),
                     visible_when_action_id: "deny".into(),
+                    always_visible: false,
+                    required: false,
+                    prefix_chars_by_action_id: Default::default(),
                     label: "Reason".into(),
                     placeholder: String::new(),
                     max_chars: 1000,
@@ -895,6 +953,7 @@ mod tests {
                 let input = input.as_mut().unwrap();
                 input.visible_when_action_id = "approve_once".into();
                 input.max_chars = 3000;
+                input.required = true;
                 *default_action_id = Some("approve_once".into());
             }
         }
@@ -914,6 +973,53 @@ mod tests {
     }
 
     #[test]
+    fn always_visible_input_is_only_required_for_its_manual_action() {
+        let mut spec = confirm_spec();
+        spec.choices.insert(
+            1,
+            ConfirmChoice {
+                id: "todo:1".into(),
+                label: "Project TODO".into(),
+                description: String::new(),
+                role: crate::confirm::ActionRole::Default,
+            },
+        );
+        match &mut spec.presentation {
+            ConfirmPresentation::SingleSelectSubmit {
+                input,
+                default_action_id,
+                ..
+            } => {
+                let input = input.as_mut().unwrap();
+                input.visible_when_action_id = "approve_once".into();
+                input.always_visible = true;
+                input.required = true;
+                input.max_chars = 3000;
+                input
+                    .prefix_chars_by_action_id
+                    .insert("todo:1".into(), 2980);
+                *default_action_id = Some("approve_once".into());
+            }
+        }
+        let request = spec.into_request("task-2".into(), 1, 2).unwrap();
+        assert_eq!(
+            request.choice_form_view().input.unwrap().visibility,
+            ChoiceFormInputVisibility::Always
+        );
+        assert!(request.resolve_submission(0, None, "slack").is_err());
+        let todo = request
+            .resolve_submission(1, Some("  extra context  ".into()), "slack")
+            .unwrap();
+        assert_eq!(todo.action_id, "todo:1");
+        assert_eq!(todo.comment.as_deref(), Some("extra context"));
+        assert!(request.resolve_submission(1, None, "slack").is_ok());
+        assert_eq!(request.input_max_chars_for_choice(1), Some(18));
+        assert!(request
+            .resolve_submission(1, Some("x".repeat(19)), "slack")
+            .is_err());
+    }
+
+    #[test]
     fn confirm_wire_roundtrip_uses_camel_case() {
         let request = confirm_spec()
             .into_request("req-1".into(), 1_000, 2_000)
@@ -924,5 +1030,16 @@ mod tests {
         assert!(json.contains(r#""type":"singleSelectSubmit""#));
         let back: ConfirmRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back, request);
+    }
+
+    #[test]
+    fn legacy_long_confirm_input_remains_required() {
+        let input: ConfirmInput = serde_json::from_str(
+            r#"{"id":"task","visibleWhenActionId":"start","label":"Task","maxChars":3000}"#,
+        )
+        .unwrap();
+        assert!(!input.always_visible);
+        assert!(!input.required);
+        assert!(input.requires_value());
     }
 }

@@ -66,10 +66,38 @@ fn reason_label(lang: Lang) -> &'static str {
     }
 }
 
-fn is_task_input_form(request: &ConfirmRequest) -> bool {
+pub(crate) fn is_task_input_form(request: &ConfirmRequest) -> bool {
     request.presentation.input().is_some_and(|input| {
         input.max_chars > 1000 && request.presentation.default_action_id().is_some()
     })
+}
+
+/// Task forms hide their implementation-only start/cancel actions. When TODO choices are
+/// present, expose the manual action plus every non-destructive TODO action.
+pub(crate) fn task_choice_indices(request: &ConfirmRequest) -> Vec<usize> {
+    if !is_task_input_form(request) {
+        return (0..request.choices.len()).collect();
+    }
+    let indices: Vec<_> = request
+        .choices
+        .iter()
+        .enumerate()
+        .filter_map(|(index, choice)| (choice.role != ActionRole::Destructive).then_some(index))
+        .collect();
+    if indices.len() > 1 {
+        indices
+    } else {
+        Vec::new()
+    }
+}
+
+pub(crate) fn is_direct_task_confirmation(request: &ConfirmRequest) -> bool {
+    is_task_input_form(request)
+        && task_choice_indices(request).is_empty()
+        && request
+            .presentation
+            .input()
+            .is_some_and(|input| input.always_visible && !input.requires_value())
 }
 
 pub(crate) fn compact_tool_markdown(request: &ConfirmRequest, max: usize, lang: Lang) -> String {
@@ -109,10 +137,9 @@ fn input_for_selected(
     let selected_id = selected
         .and_then(|index| request.choices.get(index))
         .map(|choice| choice.id.as_str());
-    request
-        .presentation
-        .input()
-        .filter(|input| selected_id == Some(input.visible_when_action_id.as_str()))
+    request.presentation.input().filter(|input| {
+        input.always_visible || selected_id == Some(input.visible_when_action_id.as_str())
+    })
 }
 
 pub(crate) fn tool_name(request: &ConfirmRequest) -> &str {
@@ -153,13 +180,27 @@ fn feishu_tool_elements(request: &ConfirmRequest, lang: Lang) -> Vec<Value> {
     elements
 }
 
-fn feishu_choice_text(choice: &crate::models::ConfirmChoice) -> String {
-    if choice.description.trim().is_empty() {
+fn feishu_choice_text(choice: &crate::models::ConfirmChoice, lang: Lang) -> String {
+    let label = if choice.id.starts_with("todo:") {
+        let text_prefix = crate::i18n::tr(lang, "whatsNext.todoPrefix");
+        let text = choice
+            .label
+            .strip_prefix(text_prefix)
+            .unwrap_or(&choice.label);
+        format!(
+            "{}{}",
+            crate::i18n::tr(lang, "channel.feishuTodoPrefix"),
+            text
+        )
+    } else {
         choice.label.clone()
+    };
+    if choice.description.trim().is_empty() {
+        label
     } else {
         format!(
             "**{}**\n<font color='grey'>{}</font>",
-            choice.label, choice.description
+            label, choice.description
         )
     }
 }
@@ -172,8 +213,10 @@ pub fn feishu_card(
 ) -> Value {
     let mut elements = feishu_tool_elements(request, lang);
     elements.push(json!({ "tag": "hr", "margin": "0px 0px 0px 0px" }));
-    if !is_task_input_form(request) {
-        for (index, choice) in request.choices.iter().enumerate() {
+    let choice_indices = task_choice_indices(request);
+    if !is_task_input_form(request) || !choice_indices.is_empty() {
+        for index in choice_indices {
+            let choice = &request.choices[index];
             let checked = selected == Some(index);
             let color = if checked {
                 Some(if choice.role == ActionRole::Destructive {
@@ -186,7 +229,7 @@ pub fn feishu_card(
             };
             elements.push(crate::feishu::card::styled_checker(
                 &format!("confirm_choice_{index}"),
-                &feishu_choice_text(choice),
+                &feishu_choice_text(choice, lang),
                 checked,
                 false,
                 Some(json!({ "confirm": "select", "index": index })),
@@ -342,11 +385,11 @@ pub fn slack_blocks(
         }
     }
 
-    let options: Vec<Value> = request
-        .choices
+    let choice_indices = task_choice_indices(request);
+    let options: Vec<Value> = choice_indices
         .iter()
-        .enumerate()
-        .map(|(index, choice)| {
+        .map(|index| {
+            let choice = &request.choices[*index];
             let mut option = json!({
                 "text": { "type": "plain_text", "text": slack_control_text(&choice.label, 75) },
                 "value": index.to_string(),
@@ -365,10 +408,14 @@ pub fn slack_blocks(
         "action_id": "confirm_choice",
         "options": options,
     });
-    if let Some(index) = selected.filter(|index| *index < request.choices.len()) {
-        radio["initial_option"] = radio["options"][index].clone();
+    if let Some(position) = selected.and_then(|selected| {
+        choice_indices
+            .iter()
+            .position(|wire_index| *wire_index == selected)
+    }) {
+        radio["initial_option"] = radio["options"][position].clone();
     }
-    if !is_task_input_form(request) {
+    if !is_task_input_form(request) || !choice_indices.is_empty() {
         blocks.push(json!({
             "type": "input",
             "block_id": "confirm_choice_block",
@@ -557,8 +604,10 @@ pub fn telegram_html(
             .choices
             .iter()
             .any(|choice| !choice.description.trim().is_empty());
-    if show_choice_list && !is_task_input_form(request) {
-        for (index, choice) in request.choices.iter().enumerate() {
+    let choice_indices = task_choice_indices(request);
+    if show_choice_list && (!is_task_input_form(request) || !choice_indices.is_empty()) {
+        for index in choice_indices {
+            let choice = &request.choices[index];
             let marker = if full_labels {
                 "•".to_string()
             } else {
@@ -584,11 +633,19 @@ pub fn telegram_html(
         }
     }
     if status.is_none() && comment.trim().is_empty() && request.presentation.input().is_some() {
-        let hint = match (is_task_input_form(request), lang) {
-            (true, Lang::Zh) => "请直接回复本消息输入任务。",
-            (true, Lang::En) => "Reply directly to this message with the task.",
-            (false, Lang::Zh) => "如需说明拒绝原因，请先回复本消息，再选择“拒绝”并提交。",
-            (false, Lang::En) => {
+        let required = request
+            .presentation
+            .input()
+            .is_some_and(|input| input.requires_value());
+        let hint = match (is_task_input_form(request), required, lang) {
+            (true, true, Lang::Zh) => "请直接回复本消息输入任务。",
+            (true, true, Lang::En) => "Reply directly to this message with the task.",
+            (true, false, Lang::Zh) => "可直接启动；如需补充，请回复本消息后再点击“启动任务”。",
+            (true, false, Lang::En) => {
+                "Start directly, or reply with extra instructions before starting."
+            }
+            (false, _, Lang::Zh) => "如需说明拒绝原因，请先回复本消息，再选择“拒绝”并提交。",
+            (false, _, Lang::En) => {
                 "To include a denial reason, reply to this message before selecting Deny and submitting."
             }
         };
@@ -645,7 +702,7 @@ pub fn telegram_keyboard(request: &ConfirmRequest, selected: Option<usize>) -> V
         .collect::<Vec<_>>();
     // D14: taps only select; the submit row appears once a draft selection exists
     // (Telegram has no disabled buttons, so the row is hidden instead).
-    if selected.is_some() {
+    if selected.is_some() && !is_direct_task_confirmation(request) {
         rows.push(Value::Array(vec![json!({
             "text": request.presentation.submit_label(),
             "callback_data": "pc:submit",
@@ -702,6 +759,9 @@ mod tests {
                 input: Some(ConfirmInput {
                     id: "reason".into(),
                     visible_when_action_id: "deny".into(),
+                    always_visible: false,
+                    required: false,
+                    prefix_chars_by_action_id: Default::default(),
                     label: "Reason".into(),
                     placeholder: "Tell the Agent what it should do".into(),
                     max_chars: 1000,
@@ -722,6 +782,9 @@ mod tests {
             input: Some(ConfirmInput {
                 id: "task".into(),
                 visible_when_action_id: "approve_once".into(),
+                always_visible: false,
+                required: true,
+                prefix_chars_by_action_id: Default::default(),
                 label: "Task".into(),
                 placeholder: "Describe the task".into(),
                 max_chars: 3000,
@@ -746,6 +809,54 @@ mod tests {
         let telegram = telegram_html(&request, Some(0), "", None, Lang::En);
         assert!(!telegram.contains("full scope"));
         assert!(telegram.contains("Reply directly to this message with the task"));
+    }
+
+    #[test]
+    fn task_input_forms_show_manual_and_todo_choices_with_shared_input() {
+        let mut request = task_request();
+        request.choices.insert(
+            1,
+            ConfirmChoice {
+                id: "todo:1".into(),
+                label: "Run todo: ⚡ Project TODO".into(),
+                description: String::new(),
+                role: ActionRole::Default,
+            },
+        );
+        let input = match &mut request.presentation {
+            ConfirmPresentation::SingleSelectSubmit { input, .. } => input.as_mut().unwrap(),
+        };
+        input.always_visible = true;
+
+        let feishu = feishu_card(&request, Some(1), "extra", Lang::En).to_string();
+        assert!(feishu.contains("confirm_choice_0"));
+        assert!(feishu.contains("confirm_choice_1"));
+        assert!(!feishu.contains("confirm_choice_2"));
+        assert!(feishu.contains("【TODO】"));
+        assert!(!feishu.contains("Run todo:"));
+        assert!(feishu.contains("extra"));
+
+        let slack = slack_blocks(&request, Some(1), "extra", Lang::En).to_string();
+        assert!(slack.contains("radio_buttons"));
+        assert!(slack.contains("Run todo:"));
+        assert!(slack.contains("⚡ Project TODO"));
+        assert!(!slack.contains("Deny"));
+        assert!(slack.contains("extra"));
+    }
+
+    #[test]
+    fn telegram_optional_todo_confirmation_submits_choice_directly() {
+        let mut request = task_request();
+        let input = match &mut request.presentation {
+            ConfirmPresentation::SingleSelectSubmit { input, .. } => input.as_mut().unwrap(),
+        };
+        input.always_visible = true;
+        input.required = false;
+        let keyboard = telegram_keyboard(&request, Some(0)).to_string();
+        assert!(!keyboard.contains("pc:submit"));
+        assert!(keyboard.contains("pc:do:0"));
+        let html = telegram_html(&request, Some(0), "", None, Lang::En);
+        assert!(html.contains("reply with extra instructions"));
     }
 
     #[test]

@@ -21,7 +21,7 @@
 
 ## 命令地图
 
-- `/new`：macOS 上依次选择最近 workspace、三重就绪的 Agent 和权限，并通过渠道原生输入控件提交任务；Slack 显示为 `!new`。提交后新的 Terminal.app 窗口运行交互式 Agent，来源渠道默认自动 watch 新会话。
+- `/new`：macOS 上依次选择最近 workspace、三重就绪的 Agent 和权限，并通过渠道原生输入控件提交任务；Slack 显示为 `!new`。所选 workspace 对应项目有 TODO 时，飞书/钉钉/Slack 可在最终输入卡直接选择，Telegram 先选手动输入或 TODO；选择 TODO 后可附加补充文字。Terminal.app 成功打开后才把 TODO 记为已执行，来源渠道默认自动 watch 新会话。
 - `/help`、`/?`：按当前配置和是否有在途问题生成可用命令与作答提示。
 - `/here`：把当前 IM 设为活跃槽。
 - `/status [编号]`：无编号查看 Agent 列表；带编号查看最近助手文字和当前/最近工具活动。
@@ -61,9 +61,11 @@ Watch 规格见 `docs/specs/im-watch.md`。订阅持久化在 `~/.askhuman/state
 
 `/todo`、`/todo-rm`、`/todo-auto` 的项目选择、逐条删除与自动执行切换同样复用单选卡台账（`PickerKind::Todo/TodoRm/TodoRmEntry/TodoAuto/TodoAutoEntry/TodoManage`）；项目路径直接作为稳定选项 ID，待新增文本暂存在 picker payload。待办存储直读 `todos.json`，命令层实现在 `daemon/unix_impl/todo.rs`，能力边界见 `docs/specs/todo-whats-next.md`。
 
-`/new` 的 workspace / Agent / 权限步骤也复用单选卡；最终任务输入复用结构化 Confirm 的渠道原生
-输入能力，但只投放到命令来源渠道。启动参数不经过 shell：IM 数据进入一次性 `0600` LaunchRecord，
-Terminal shell 只接收 AskHuman 绝对路径和 UUID token。详细边界见 `docs/specs/im-agent-task-launch.md`。
+`/new` 的 workspace / Agent / 权限步骤也复用单选卡；Telegram 有项目 TODO 时再复用一张任务来源
+选择卡。最终任务输入复用结构化 Confirm 的渠道原生输入能力，但只投放到命令来源渠道；TODO 按所选
+workspace 的 git root 读取，任务卡保存文本快照，Terminal 成功打开后才 best-effort 出队。启动参数不经过
+shell：IM 数据进入一次性 `0600` LaunchRecord，Terminal shell 只接收 AskHuman 绝对路径和 UUID
+token。详细边界见 `docs/specs/im-agent-task-launch.md`。
 
 ## 主要代码入口
 

@@ -287,6 +287,9 @@ fn parse_permission(agent: Agent, input: &Value) -> Option<ParseOutcome> {
             input: Some(ConfirmInput {
                 id: "reason".into(),
                 visible_when_action_id: "deny".into(),
+                always_visible: false,
+                required: false,
+                prefix_chars_by_action_id: Default::default(),
                 label: if zh {
                     "拒绝原因（可选）"
                 } else {

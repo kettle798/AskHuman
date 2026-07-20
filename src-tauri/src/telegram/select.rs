@@ -65,6 +65,7 @@ pub fn inline_keyboard(view: &SelectView, lang: Lang) -> Value {
                     crate::select::SelectAction::TaskWorkspace
                         | crate::select::SelectAction::TaskAgent
                         | crate::select::SelectAction::TaskPermission
+                        | crate::select::SelectAction::TaskInputSource
                 ) && opt.id != crate::select::MORE_OPTION_ID =>
                 {
                     opt.primary.clone()

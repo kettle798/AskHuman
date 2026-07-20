@@ -282,6 +282,7 @@ pub(super) async fn send_agent_picker(
         PickerKind::TaskWorkspace => crate::select::SelectAction::TaskWorkspace,
         PickerKind::TaskAgent => crate::select::SelectAction::TaskAgent,
         PickerKind::TaskPermission => crate::select::SelectAction::TaskPermission,
+        PickerKind::TaskInputSource => crate::select::SelectAction::TaskInputSource,
         PickerKind::Watch => crate::select::SelectAction::Watch,
         PickerKind::Status => crate::select::SelectAction::Status,
         PickerKind::Unwatch => crate::select::SelectAction::Unwatch,
@@ -336,6 +337,7 @@ pub(super) async fn select_pick_task_flow(
         PickerKind::TaskWorkspace => crate::select::title_task_workspace(lang),
         PickerKind::TaskAgent => crate::select::title_task_agent(lang),
         PickerKind::TaskPermission => crate::select::title_task_permission(lang),
+        PickerKind::TaskInputSource => crate::select::title_task_input_source(lang),
         _ => String::new(),
     };
     let label = match picker.kind {
@@ -351,6 +353,7 @@ pub(super) async fn select_pick_task_flow(
         }
         .into(),
         PickerKind::TaskPermission => "YOLO".into(),
+        PickerKind::TaskInputSource => task_input_source_label(picker, selected_id, lang),
         _ => selected_id.to_string(),
     };
     if channel_id == "feishu" {
@@ -366,6 +369,26 @@ pub(super) async fn select_pick_task_flow(
     remove_picker(state, channel_id, mid);
     state.select.route_refresh.notify_one();
     continue_task_picker(state, channel_id, picker, selected_id, config, lang).await;
+}
+
+fn task_input_source_label(picker: &PickerEntry, selected_id: &str, lang: Lang) -> String {
+    if selected_id == TASK_MANUAL_ACTION_ID {
+        return match lang {
+            Lang::Zh => "输入新任务",
+            Lang::En => "Enter a new task",
+        }
+        .into();
+    }
+    let todo_id = selected_id
+        .strip_prefix(TASK_TODO_ACTION_PREFIX)
+        .unwrap_or_default();
+    picker
+        .payload
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<TaskInputSourcePayload>(value).ok())
+        .and_then(|payload| payload.todos.into_iter().find(|todo| todo.id == todo_id))
+        .map(|todo| task_todo_label(&todo, lang))
+        .unwrap_or_else(|| selected_id.to_string())
 }
 
 /// `/status` 详情（按 session_id 定位，避免 seq 漂移）。找不到 → notFound 提示。
@@ -944,7 +967,10 @@ pub(super) async fn handle_select_card_action(
         return;
     }
     match picker.kind {
-        PickerKind::TaskWorkspace | PickerKind::TaskAgent | PickerKind::TaskPermission => {
+        PickerKind::TaskWorkspace
+        | PickerKind::TaskAgent
+        | PickerKind::TaskPermission
+        | PickerKind::TaskInputSource => {
             select_pick_task_flow(
                 state,
                 channel_id,
@@ -1493,7 +1519,10 @@ pub(super) async fn handle_select_dd_action(state: &Arc<ServerState>, data: &ser
         return;
     }
     match picker.kind {
-        PickerKind::TaskWorkspace | PickerKind::TaskAgent | PickerKind::TaskPermission => {
+        PickerKind::TaskWorkspace
+        | PickerKind::TaskAgent
+        | PickerKind::TaskPermission
+        | PickerKind::TaskInputSource => {
             select_pick_task_flow(
                 state,
                 "dingding",
@@ -2208,7 +2237,10 @@ pub(super) async fn dispatch_select_pick(
         return;
     }
     match picker.kind {
-        PickerKind::TaskWorkspace | PickerKind::TaskAgent | PickerKind::TaskPermission => {
+        PickerKind::TaskWorkspace
+        | PickerKind::TaskAgent
+        | PickerKind::TaskPermission
+        | PickerKind::TaskInputSource => {
             select_pick_task_flow(
                 state,
                 channel_id,

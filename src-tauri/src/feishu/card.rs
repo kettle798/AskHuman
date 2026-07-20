@@ -639,6 +639,7 @@ fn select_button_type(action: crate::select::SelectAction) -> &'static str {
         | crate::select::SelectAction::TaskWorkspace
         | crate::select::SelectAction::TaskAgent
         | crate::select::SelectAction::TaskPermission
+        | crate::select::SelectAction::TaskInputSource
         | crate::select::SelectAction::Msg
         | crate::select::SelectAction::MsgTarget
         | crate::select::SelectAction::Stage

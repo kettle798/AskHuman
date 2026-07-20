@@ -777,6 +777,51 @@ pub(super) async fn continue_task_picker(
     config: &AppConfig,
     lang: Lang,
 ) {
+    if picker.kind == PickerKind::TaskInputSource {
+        let Some(source): Option<TaskInputSourcePayload> = picker
+            .payload
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok())
+        else {
+            return;
+        };
+        if selected_id == TASK_MANUAL_ACTION_ID {
+            start_task_input_form(
+                state,
+                channel_id,
+                source.task,
+                source.permission,
+                source.project,
+                Vec::new(),
+                None,
+                None,
+                config,
+                lang,
+            )
+            .await;
+            return;
+        }
+        let Some(todo_id) = selected_id.strip_prefix(TASK_TODO_ACTION_PREFIX) else {
+            return;
+        };
+        let Some(todo) = source.todos.iter().find(|todo| todo.id == todo_id).cloned() else {
+            return;
+        };
+        start_task_input_form(
+            state,
+            channel_id,
+            source.task,
+            source.permission,
+            source.project,
+            Vec::new(),
+            None,
+            Some(todo),
+            config,
+            lang,
+        )
+        .await;
+        return;
+    }
     let mut payload: TaskPickerPayload = picker
         .payload
         .as_deref()
@@ -944,6 +989,7 @@ pub(super) async fn continue_task_picker(
             };
             start_task_input(state, channel_id, payload, permission, config, lang).await;
         }
+        PickerKind::TaskInputSource => {}
         _ => {}
     }
 }
@@ -956,6 +1002,101 @@ pub(super) async fn start_task_input(
     config: &AppConfig,
     lang: Lang,
 ) {
+    let project = crate::project::detect_from(std::path::Path::new(&payload.workspace));
+    let mut todos = crate::todos::list(&project);
+    let overflow_note = crate::todos::overflow_note(todos.len(), lang);
+    todos.truncate(crate::todos::MAX_OPTION_TODOS);
+    if channel_id == "telegram" && !todos.is_empty() {
+        let mut options = Vec::with_capacity(todos.len() + 1);
+        options.push(crate::select::SelectOption {
+            id: TASK_MANUAL_ACTION_ID.into(),
+            dot: None,
+            seq: None,
+            primary: match lang {
+                Lang::Zh => "输入新任务",
+                Lang::En => "Enter a new task",
+            }
+            .into(),
+            badge: None,
+            elapsed: None,
+            secondary: Some(
+                match lang {
+                    Lang::Zh => "回复 ForceReply 输入任务",
+                    Lang::En => "Reply to a ForceReply prompt",
+                }
+                .into(),
+            ),
+        });
+        options.extend(
+            todos
+                .iter()
+                .enumerate()
+                .map(|(index, todo)| crate::select::SelectOption {
+                    id: format!("{TASK_TODO_ACTION_PREFIX}{}", todo.id),
+                    dot: None,
+                    seq: Some((index + 1) as u64),
+                    primary: task_todo_label(todo, lang),
+                    badge: None,
+                    elapsed: None,
+                    secondary: None,
+                }),
+        );
+        let title = match overflow_note.as_deref() {
+            Some(note) => format!("{} · {note}", crate::select::title_task_input_source(lang)),
+            None => crate::select::title_task_input_source(lang),
+        };
+        let source = TaskInputSourcePayload {
+            task: payload,
+            permission,
+            project,
+            todos,
+            overflow_note,
+        };
+        let sent = send_agent_picker(
+            state,
+            channel_id,
+            config,
+            PickerKind::TaskInputSource,
+            title,
+            options,
+            Some(serde_json::to_string(&source).unwrap_or_default()),
+            lang,
+        )
+        .await;
+        if !sent {
+            let _ =
+                reply_channel_text(channel_id, config, "Failed to send task source picker").await;
+        }
+        return;
+    }
+    start_task_input_form(
+        state,
+        channel_id,
+        payload,
+        permission,
+        project,
+        todos,
+        overflow_note,
+        None,
+        config,
+        lang,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_task_input_form(
+    state: &Arc<ServerState>,
+    channel_id: &str,
+    payload: TaskPickerPayload,
+    permission: crate::integrations::agent_launch::LaunchPermission,
+    todo_project: String,
+    todos: Vec<crate::todos::TodoEntry>,
+    overflow_note: Option<String>,
+    selected_todo: Option<crate::todos::TodoEntry>,
+    config: &AppConfig,
+    lang: Lang,
+) {
     use crate::models::{
         ConfirmChoice, ConfirmDetail, ConfirmField, ConfirmFieldKind, ConfirmInput,
         ConfirmPresentation, ConfirmSpec,
@@ -963,6 +1104,8 @@ pub(super) async fn start_task_input(
     let Some(kind) = AgentKind::parse(&payload.kind) else {
         return;
     };
+    let todo_confirmation = selected_todo.is_some();
+    let has_todo_choices = !todos.is_empty();
     let permission_label = match permission {
         crate::integrations::agent_launch::LaunchPermission::AgentDefault => match lang {
             Lang::Zh => "Agent 默认",
@@ -970,22 +1113,86 @@ pub(super) async fn start_task_input(
         },
         crate::integrations::agent_launch::LaunchPermission::Yolo => "YOLO",
     };
-    let title = match lang {
-        Lang::Zh => "输入新任务",
-        Lang::En => "Enter the new task",
+    let title = match (todo_confirmation, lang) {
+        (true, Lang::Zh) => "确认 TODO 任务",
+        (true, Lang::En) => "Confirm the TODO task",
+        (false, Lang::Zh) => "输入新任务",
+        (false, Lang::En) => "Enter the new task",
     };
     let workspace_label = crate::autochannel::project_name(&payload.workspace)
         .unwrap_or_else(|| payload.workspace.clone());
-    let task_prompt = match lang {
-        Lang::Zh => format!(
-            "**请输入需要 Agent 执行的任务。**\n\n- **Agent：** {}\n- **工作目录：** {}\n- **权限模式：** {}\n\n提交后将在 Mac 上通过新 Terminal 窗口启动 Agent。",
+    let mut task_prompt = match (selected_todo.as_ref(), lang) {
+        (Some(todo), Lang::Zh) => format!(
+            "**将启动以下 TODO；可直接启动，或回复本卡补充说明。**\n\n{}{}\n\n- **Agent：** {}\n- **工作目录：** {}\n- **权限模式：** {}\n\n提交后将在 Mac 上通过新 Terminal 窗口启动 Agent。",
+            if todo.auto { "⚡ " } else { "" },
+            todo.text,
+            kind.label(),
+            workspace_label,
+            permission_label
+        ),
+        (Some(todo), Lang::En) => format!(
+            "**Start this TODO directly, or reply with extra instructions first.**\n\n{}{}\n\n- **Agent:** {}\n- **Workspace:** {}\n- **Permission mode:** {}\n\nSubmitting starts the Agent on your Mac in a new Terminal window.",
+            if todo.auto { "⚡ " } else { "" },
+            todo.text,
+            kind.label(),
+            workspace_label,
+            permission_label
+        ),
+        (None, Lang::Zh) => format!(
+            "**{}**\n\n- **Agent：** {}\n- **工作目录：** {}\n- **权限模式：** {}\n\n提交后将在 Mac 上通过新 Terminal 窗口启动 Agent。",
+            if has_todo_choices {
+                "请输入需要 Agent 执行的任务，或选择一个项目 TODO。"
+            } else {
+                "请输入需要 Agent 执行的任务。"
+            },
             kind.label(), workspace_label, permission_label
         ),
-        Lang::En => format!(
-            "**Enter the task for the Agent to perform.**\n\n- **Agent:** {}\n- **Workspace:** {}\n- **Permission mode:** {}\n\nSubmitting starts the Agent on your Mac in a new Terminal window.",
+        (None, Lang::En) => format!(
+            "**{}**\n\n- **Agent:** {}\n- **Workspace:** {}\n- **Permission mode:** {}\n\nSubmitting starts the Agent on your Mac in a new Terminal window.",
+            if has_todo_choices {
+                "Enter a task for the Agent, or select a project TODO."
+            } else {
+                "Enter the task for the Agent to perform."
+            },
             kind.label(), workspace_label, permission_label
         ),
     };
+    if !todo_confirmation {
+        if let Some(note) = overflow_note.as_deref() {
+            task_prompt.push_str("\n\n");
+            task_prompt.push_str(note);
+        }
+    }
+    let mut choices = vec![ConfirmChoice {
+        id: TASK_MANUAL_ACTION_ID.into(),
+        label: match (has_todo_choices, lang) {
+            (true, Lang::Zh) => "直接输入新任务",
+            (true, Lang::En) => "Enter a new task",
+            (false, Lang::Zh) => "启动任务",
+            (false, Lang::En) => "Start task",
+        }
+        .into(),
+        description: String::new(),
+        role: crate::confirm::ActionRole::Primary,
+    }];
+    if !todo_confirmation {
+        choices.extend(todos.iter().map(|todo| ConfirmChoice {
+            id: format!("{TASK_TODO_ACTION_PREFIX}{}", todo.id),
+            label: task_todo_label(todo, lang),
+            description: String::new(),
+            role: crate::confirm::ActionRole::Default,
+        }));
+    }
+    choices.push(ConfirmChoice {
+        id: "cancel".into(),
+        label: match lang {
+            Lang::Zh => "取消",
+            Lang::En => "Cancel",
+        }
+        .into(),
+        description: String::new(),
+        role: crate::confirm::ActionRole::Destructive,
+    });
     let spec = ConfirmSpec {
         title: title.into(),
         context: vec![
@@ -1020,40 +1227,42 @@ pub(super) async fn start_task_input(
             summary: task_prompt,
             body_md: String::new(),
         },
-        choices: vec![
-            ConfirmChoice {
-                id: "start".into(),
-                label: match lang {
-                    Lang::Zh => "启动任务",
-                    Lang::En => "Start task",
-                }
-                .into(),
-                description: String::new(),
-                role: crate::confirm::ActionRole::Primary,
-            },
-            ConfirmChoice {
-                id: "cancel".into(),
-                label: match lang {
-                    Lang::Zh => "取消",
-                    Lang::En => "Cancel",
-                }
-                .into(),
-                description: String::new(),
-                role: crate::confirm::ActionRole::Destructive,
-            },
-        ],
+        choices,
         presentation: ConfirmPresentation::SingleSelectSubmit {
             input: Some(ConfirmInput {
                 id: "task".into(),
-                visible_when_action_id: "start".into(),
-                label: match lang {
-                    Lang::Zh => "任务描述",
-                    Lang::En => "Task",
+                visible_when_action_id: TASK_MANUAL_ACTION_ID.into(),
+                always_visible: todo_confirmation || has_todo_choices,
+                required: !todo_confirmation,
+                prefix_chars_by_action_id: todos
+                    .iter()
+                    .map(|todo| {
+                        (
+                            format!("{TASK_TODO_ACTION_PREFIX}{}", todo.id),
+                            todo.text.trim().chars().count(),
+                        )
+                    })
+                    .chain(selected_todo.iter().map(|todo| {
+                        (
+                            TASK_MANUAL_ACTION_ID.to_string(),
+                            todo.text.trim().chars().count(),
+                        )
+                    }))
+                    .collect(),
+                label: match (todo_confirmation || has_todo_choices, lang) {
+                    (true, Lang::Zh) => "任务描述或补充说明",
+                    (true, Lang::En) => "Task or extra instructions",
+                    (false, Lang::Zh) => "任务描述",
+                    (false, Lang::En) => "Task",
                 }
                 .into(),
-                placeholder: match lang {
-                    Lang::Zh => "描述要 Agent 完成的工作（最多 3000 字）",
-                    Lang::En => "Describe the work for the Agent (up to 3000 characters)",
+                placeholder: match (todo_confirmation, lang) {
+                    (true, Lang::Zh) => "可选：补充对该 TODO 的要求",
+                    (true, Lang::En) => "Optional: add instructions for this TODO",
+                    (false, Lang::Zh) => "输入新任务，或选择 TODO 后补充要求（最多 3000 字）",
+                    (false, Lang::En) => {
+                        "Enter a task, or add instructions after selecting a TODO (up to 3000 characters)"
+                    }
                 }
                 .into(),
                 max_chars: 3000,
@@ -1063,7 +1272,7 @@ pub(super) async fn start_task_input(
                 Lang::En => "Start task",
             }
             .into(),
-            default_action_id: Some("start".into()),
+            default_action_id: Some(TASK_MANUAL_ACTION_ID.into()),
         },
         dismiss_action_id: "cancel".into(),
     };
@@ -1136,11 +1345,21 @@ pub(super) async fn start_task_input(
         let Some(ConfirmOutcome::Final(result)) = outcome.recv().await else {
             return;
         };
-        if result.action_id != "start" {
+        if result.action_id == "cancel" {
             return;
         }
-        let Some(task) = result.comment.filter(|value| !value.trim().is_empty()) else {
-            return;
+        let todo = selected_todo.or_else(|| {
+            result
+                .action_id
+                .strip_prefix(TASK_TODO_ACTION_PREFIX)
+                .and_then(|todo_id| todos.iter().find(|todo| todo.id == todo_id).cloned())
+        });
+        let task = match resolve_task_input(todo.as_ref(), result.comment.as_deref()) {
+            Ok(task) => task,
+            Err(error) => {
+                let _ = reply_channel_text(&channel, &config, &error).await;
+                return;
+            }
         };
         let source = crate::integrations::agent_launch::LaunchSource {
             channel: channel.clone(),
@@ -1156,7 +1375,13 @@ pub(super) async fn start_task_input(
             Ok(record) => {
                 register_pending_launch_watch(&state, &record, &channel, &config, lang);
                 match crate::integrations::agent_launch::open_terminal(&record) {
-                    Ok(()) => Ok(record),
+                    Ok(()) => {
+                        if let Some(todo) = todo.as_ref() {
+                            let _ =
+                                crate::todos::take(&todo_project, std::slice::from_ref(&todo.id));
+                        }
+                        Ok(record)
+                    }
                     Err(error) => {
                         state
                             .pending_launches
@@ -1180,6 +1405,28 @@ pub(super) async fn start_task_input(
         let _ = reply_channel_text(&channel, &config, &text).await;
         state.watch.notify.notify_one();
     });
+}
+
+fn resolve_task_input(
+    todo: Option<&crate::todos::TodoEntry>,
+    input: Option<&str>,
+) -> Result<String, String> {
+    let input = input.unwrap_or_default().trim();
+    let task = match todo {
+        Some(todo) if input.is_empty() => todo.text.trim().to_string(),
+        Some(todo) => format!("{}\n\n{input}", todo.text.trim()),
+        None => input.to_string(),
+    };
+    if task.is_empty() {
+        return Err("Task must not be empty".into());
+    }
+    if task.contains('\0') {
+        return Err("Task must not contain NUL characters".into());
+    }
+    if task.chars().count() > 3000 {
+        return Err("Task exceeds 3000 characters".into());
+    }
+    Ok(task)
 }
 
 pub(super) fn task_source_target(config: &AppConfig, channel_id: &str) -> String {
@@ -2172,4 +2419,51 @@ pub(super) fn fs_text_and_sender(event: &serde_json::Value) -> Option<(String, S
     let content: serde_json::Value = serde_json::from_str(content_str).ok()?;
     let text = content.get("text").and_then(|v| v.as_str())?.to_string();
     Some((open_id, text))
+}
+
+#[cfg(test)]
+mod task_input_tests {
+    use super::*;
+
+    fn todo(text: &str) -> crate::todos::TodoEntry {
+        crate::todos::TodoEntry {
+            id: "todo-1".into(),
+            text: text.into(),
+            created_at_ms: 1,
+            agent_kind: None,
+            auto: false,
+        }
+    }
+
+    #[test]
+    fn task_input_uses_manual_text_or_todo_snapshot_with_supplement() {
+        assert_eq!(
+            resolve_task_input(None, Some("  do work  ")).unwrap(),
+            "do work"
+        );
+        assert_eq!(
+            resolve_task_input(Some(&todo("fix login")), None).unwrap(),
+            "fix login"
+        );
+        assert_eq!(
+            resolve_task_input(Some(&todo("fix login")), Some("  add regression test  ")).unwrap(),
+            "fix login\n\nadd regression test"
+        );
+    }
+
+    #[test]
+    fn task_input_validates_the_final_combined_task() {
+        assert!(resolve_task_input(None, Some("  ")).is_err());
+        assert!(resolve_task_input(None, Some("bad\0task")).is_err());
+        let long = "x".repeat(2999);
+        assert!(resolve_task_input(Some(&todo(&long)), Some("more")).is_err());
+    }
+
+    #[test]
+    fn task_todo_choices_share_the_whats_next_prefix() {
+        let mut entry = todo("fix login");
+        assert_eq!(task_todo_label(&entry, Lang::En), "Run todo: fix login");
+        entry.auto = true;
+        assert_eq!(task_todo_label(&entry, Lang::Zh), "执行待办：⚡ fix login");
+    }
 }
