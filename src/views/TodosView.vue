@@ -5,6 +5,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { applyTheme } from "../lib/theme";
 import { applyLanguage } from "../i18n";
 import {
+  openNewTask,
   todosAdd,
   todosClear,
   todosComplete,
@@ -41,6 +42,18 @@ const submitKeyLabel = computed(() =>
 function applyPopupSubmitKey(value: unknown): void {
   if (value === "enter" || value === "cmdEnter") {
     popupSubmitKey.value = value;
+  }
+}
+
+// 「创建任务」入口（spec gui-agent-task-launch G1）：仅 macOS 且 Terminal.app 存在时显示。
+const newTaskSupported = ref(false);
+
+async function createTaskFrom(e: TodoEntry): Promise<void> {
+  if (!selected.value) return;
+  try {
+    await openNewTask(selected.value, e.id);
+  } catch (err) {
+    console.warn("open new task failed", err);
   }
 }
 
@@ -588,6 +601,7 @@ onMounted(async () => {
     applyTheme(init.theme);
     applyLanguage(init.lang);
     applyPopupSubmitKey(init.popupSubmitKey);
+    newTaskSupported.value = init.newTaskSupported === true;
   } catch {
     /* 读取失败：保持兜底外观 */
   }
@@ -920,6 +934,26 @@ onBeforeUnmount(() => {
                     stroke="currentColor"
                     stroke-width="1.2"
                     stroke-linecap="round"
+                  />
+                </svg>
+              </button>
+              <!-- 创建 Agent 任务（spec gui-agent-task-launch G12）：带该项目 + 该待办打开新建任务窗口。 -->
+              <button
+                v-if="newTaskSupported"
+                type="button"
+                class="td-newtask"
+                :title="t('todosWin.newTask')"
+                :aria-label="t('todosWin.newTask')"
+                :disabled="isCompleting(e.id)"
+                @click.stop="createTaskFrom(e)"
+              >
+                <svg viewBox="0 0 12 12" aria-hidden="true">
+                  <path
+                    d="M3.2 1.8 L9.8 6 L3.2 10.2 Z"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                    stroke-linejoin="round"
                   />
                 </svg>
               </button>
@@ -1430,6 +1464,42 @@ onBeforeUnmount(() => {
   opacity: 0.3;
 }
 .td-edit-btn svg {
+  width: 12px;
+  height: 12px;
+}
+/* 创建 Agent 任务 ▶：编辑右侧，同 hover-only 交互；绿色 tint 区分「执行」语义。 */
+.td-newtask {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  opacity: 0;
+  cursor: pointer;
+}
+.td-row:hover .td-newtask {
+  opacity: 0.75;
+}
+.td-newtask:hover:not(:disabled),
+.td-newtask:focus-visible:not(:disabled) {
+  opacity: 1;
+  color: #30d158;
+  background: color-mix(in srgb, #30d158 14%, transparent);
+}
+.td-newtask:disabled {
+  opacity: 0;
+  cursor: default;
+}
+.td-row:hover .td-newtask:disabled {
+  opacity: 0.3;
+}
+.td-newtask svg {
   width: 12px;
   height: 12px;
 }

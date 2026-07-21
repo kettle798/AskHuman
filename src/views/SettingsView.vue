@@ -91,8 +91,9 @@ onMounted(async () => {
     }
   );
   // 窗口已开时的定位请求（托盘「渠道异常」行等）：新开窗走 URL ?tab=，已开窗走本事件。
+  // payload 支持 `tab#elementId` 锚点后缀（跨窗口定位，spec gui-agent-task-launch G5）。
   unlistenGotoTab = await listen<string>("settings-goto-tab", (e) => {
-    if (TABS.includes(e.payload as Tab)) activeTab.value = e.payload as Tab;
+    gotoTabTarget(e.payload);
   });
   await ctx.initIntegration();
   await ctx.initGeneral();
@@ -101,7 +102,20 @@ onMounted(async () => {
   // 只读已持久化的工作目录索引；冷扫描延迟到打开「管理工作目录」面板时。
   if (isMac) await refreshAgentTaskSettings(false);
   await ctx.initAbout();
+  // 初始 URL 带锚点（?tab=advanced#lifecycle-claude）：tab 段已在 parseInitialTab 生效，
+  // 此处等各 tab 数据就绪后再滚动定位 + 高亮。
+  const rawTab = new URLSearchParams(window.location.search).get("tab");
+  if (rawTab?.includes("#")) gotoTabTarget(rawTab);
 });
+
+/** 解析 `tab[#elementId]` 并切 tab + 可选滚动定位（settings-goto-tab / 初始 URL 共用）。 */
+function gotoTabTarget(raw: string) {
+  const [tab, target] = raw.split("#");
+  if (!TABS.includes(tab as Tab)) return;
+  activeTab.value = tab as Tab;
+  if (tab === "experimental" && isMac) void refreshAgentTaskSettings(false);
+  if (target) void ctx.gotoSettingsTarget(target);
+}
 </script>
 
 <template>

@@ -403,6 +403,8 @@ pub struct TodosInit {
     lang: String,
     /// 与弹窗一致的提交快捷键：`cmdEnter`（⌘/Ctrl+Enter）或 `enter`（裸 Enter）。
     popup_submit_key: String,
+    /// 「创建任务」入口是否可用（spec gui-agent-task-launch G1）：macOS 且 Terminal.app 存在。
+    new_task_supported: bool,
 }
 
 #[tauri::command]
@@ -416,6 +418,7 @@ pub fn todos_init() -> TodosInit {
             .code()
             .to_string(),
         popup_submit_key: config.general.popup_submit_key.as_str().to_string(),
+        new_task_supported: crate::integrations::agent_launch::terminal_available(),
     }
 }
 
@@ -604,12 +607,40 @@ pub fn open_todos(app: AppHandle, dir: Option<String>) -> Result<(), String> {
             false,
             project,
             None,
+            None,
         );
         Ok(())
     }
     #[cfg(not(unix))]
     {
         let _ = (app, dir);
+        Err("unsupported".to_string())
+    }
+}
+
+/// 打开（或聚焦）「新建 Agent 任务」窗口（spec gui-agent-task-launch）：经统一宿主路由
+/// （全局单窗）。`project` 为预选项目 key、`todo` 为预选待办 id（待办行入口传入；均可空）。
+#[tauri::command]
+pub fn open_new_task(
+    app: AppHandle,
+    project: Option<String>,
+    todo: Option<String>,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        route_open_window(
+            app,
+            crate::gui_host::WindowKind::NewTask,
+            false,
+            project.filter(|p| !p.trim().is_empty()),
+            None,
+            todo.filter(|t| !t.trim().is_empty()),
+        );
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (app, project, todo);
         Err("unsupported".to_string())
     }
 }
@@ -902,10 +933,13 @@ fn route_open_window(
     all: bool,
     project: Option<String>,
     target: Option<crate::gui_host::InterjectTarget>,
+    todo: Option<String>,
 ) {
     use crate::gui_host::WindowKind;
     std::thread::spawn(move || {
-        if crate::gui_host::host_open(kind, all, project.clone(), target.clone()).is_ok() {
+        if crate::gui_host::host_open(kind, all, project.clone(), target.clone(), todo.clone())
+            .is_ok()
+        {
             return;
         }
         let fallback = app.clone();
@@ -930,6 +964,14 @@ fn route_open_window(
                 WindowKind::Todos => {
                     crate::app::create_todos_window(&fallback, &cfg, project.as_deref(), pin)
                 }
+                // `project` = 预选项目 key、`todo` = 预选待办 id（spec gui-agent-task-launch）。
+                WindowKind::NewTask => crate::app::create_new_task_window(
+                    &fallback,
+                    &cfg,
+                    project.as_deref(),
+                    todo.as_deref(),
+                    pin,
+                ),
             };
         });
     });
@@ -964,6 +1006,7 @@ pub fn open_history(app: AppHandle, state: State<AppState>) -> Result<(), String
             crate::gui_host::WindowKind::History,
             false,
             Some(project),
+            None,
             None,
         );
         Ok(())
@@ -1239,6 +1282,174 @@ end tell"#;
     Err("Terminal.app test is only available on macOS".to_string())
 }
 
+// ===== 「新建 Agent 任务」窗口（spec gui-agent-task-launch）=====
+
+/// 新建任务窗口初始化负载。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewTaskInit {
+    theme: String,
+    lang: String,
+    /// 与弹窗一致的提交快捷键（⌘↵ 启动任务）。
+    popup_submit_key: String,
+    /// `agentTasks.permissionPrompt`：`ask` / `agent-default` / `yolo`（G6）。
+    permission_prompt: String,
+}
+
+#[tauri::command]
+pub fn new_task_init() -> NewTaskInit {
+    // 现读配置（同 `todos_init`，避免常驻宿主的过期快照）。
+    let config = AppConfig::load_without_secrets();
+    let permission_prompt = match config.agent_tasks.permission_prompt {
+        crate::config::AgentTaskPermission::Ask => "ask",
+        crate::config::AgentTaskPermission::AgentDefault => "agent-default",
+        crate::config::AgentTaskPermission::Yolo => "yolo",
+    };
+    NewTaskInit {
+        theme: theme_str(config.general.theme),
+        lang: crate::i18n::Lang::resolve(&config.general.language)
+            .code()
+            .to_string(),
+        popup_submit_key: config.general.popup_submit_key.as_str().to_string(),
+        permission_prompt: permission_prompt.to_string(),
+    }
+}
+
+/// 新建任务窗口的项目下拉候选。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewTaskProject {
+    /// workspace 路径（canonical cwd，保留子目录/worktree 语义）或待办项目 git 根。
+    pub path: String,
+    /// 显示名（basename）。
+    pub label: String,
+    /// 置顶 workspace（排序已体现；前端加 ★ 前缀）。
+    pub pinned: bool,
+    /// `workspace`（最近 workspace 索引）或 `todos`（仅存在于待办存储）。
+    pub source: String,
+}
+
+/// workspace 索引（refresh/list 已按 pinned → last_used 排序）在前，仅存在于待办存储的
+/// git 根在后（spec §4）；按路径去重、过滤 hidden 与不存在目录。
+fn build_new_task_projects(
+    workspaces: Vec<crate::agents::workspaces::Workspace>,
+    todo_projects: Vec<String>,
+) -> Vec<NewTaskProject> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for workspace in workspaces {
+        if workspace.hidden || !std::path::Path::new(&workspace.path).is_dir() {
+            continue;
+        }
+        if seen.insert(workspace.path.clone()) {
+            out.push(NewTaskProject {
+                label: workspace.label,
+                pinned: workspace.pinned,
+                source: "workspace".into(),
+                path: workspace.path,
+            });
+        }
+    }
+    let mut todo_keys: Vec<String> = todo_projects
+        .into_iter()
+        .filter(|key| std::path::Path::new(key).is_dir() && !seen.contains(key))
+        .collect();
+    todo_keys.sort();
+    todo_keys.dedup();
+    for key in todo_keys {
+        out.push(NewTaskProject {
+            label: crate::project::display_name(&key),
+            pinned: false,
+            source: "todos".into(),
+            path: key,
+        });
+    }
+    out
+}
+
+/// 当前有待办的项目 key（git 根）。
+fn todo_project_keys() -> Vec<String> {
+    crate::todos::all()
+        .into_iter()
+        .filter(|(_, entries)| !entries.is_empty())
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// 项目候选（本地快路径）：workspace 索引 + 待办项目，供首屏即时填充。
+#[tauri::command]
+pub fn new_task_projects() -> Vec<NewTaskProject> {
+    build_new_task_projects(crate::agents::workspaces::list(), todo_project_keys())
+}
+
+/// 项目候选（含四家有界冷扫描合并，与 IM `/new` 的 `workspaces::refresh()` 同源）。
+/// 前端首屏后后台调用，完成后无感刷新下拉。
+#[tauri::command]
+pub async fn new_task_projects_refreshed() -> Vec<NewTaskProject> {
+    let workspaces = tokio::task::spawn_blocking(crate::agents::workspaces::refresh)
+        .await
+        .unwrap_or_default();
+    build_new_task_projects(workspaces, todo_project_keys())
+}
+
+/// 目录 → 项目 key（git 根，回退自身）。新建任务窗口按所选 workspace 读取所属项目待办。
+#[tauri::command]
+pub fn project_key_of(dir: String) -> String {
+    crate::project::detect_from(std::path::Path::new(&dir))
+}
+
+/// 启动新任务（spec gui-agent-task-launch §2.5）：复用 IM 的 LaunchRecord + Terminal.app 链路。
+/// `task` 由前端拼装（选待办时 = 待办原文快照 + 空行 + 补充）；`todo_project`/`todo_id` 非空时
+/// Terminal 成功打开后 best-effort 出队（G7）。成功后 best-effort 把活跃槽切到 popup（G11）。
+#[tauri::command]
+pub async fn new_task_launch(
+    workspace: String,
+    kind: String,
+    permission: String,
+    task: String,
+    todo_project: Option<String>,
+    todo_id: Option<String>,
+) -> Result<(), String> {
+    let kind = crate::agents::AgentKind::parse(&kind).ok_or("unknown agent kind")?;
+    let permission = match permission.as_str() {
+        "agent-default" => crate::integrations::agent_launch::LaunchPermission::AgentDefault,
+        "yolo" => crate::integrations::agent_launch::LaunchPermission::Yolo,
+        _ => return Err("permission choice is required".to_string()),
+    };
+    if task.contains('\0') {
+        return Err("Task must not contain NUL characters".to_string());
+    }
+    // create_record 内部含 login-shell readiness 复检（≤2s 阻塞探测），放 blocking 线程。
+    tokio::task::spawn_blocking(move || {
+        let source = crate::integrations::agent_launch::LaunchSource {
+            channel: "gui".to_string(),
+            target: String::new(),
+        };
+        let record = crate::integrations::agent_launch::create_record(
+            source,
+            std::path::Path::new(&workspace),
+            kind,
+            permission,
+            &task,
+        )
+        .map_err(|e| format!("{e:#}"))?;
+        crate::integrations::agent_launch::open_terminal(&record).map_err(|e| format!("{e:#}"))?;
+        // 成功后才出队（G7）；并发删除不报错（take 为 best-effort）。
+        if let (Some(project), Some(id)) = (todo_project.as_deref(), todo_id.as_deref()) {
+            if !project.is_empty() && !id.is_empty() {
+                let _ = crate::todos::take(project, std::slice::from_ref(&id.to_string()));
+            }
+        }
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    // 活跃槽切 popup（G11）：人在电脑旁，新 Agent 的提问默认弹窗。即发即走，不影响启动结果。
+    #[cfg(unix)]
+    tokio::spawn(crate::client::activate_popup_slot());
+    Ok(())
+}
+
 /// Apply one secret's edit intent to the in-memory config field before persisting.
 fn apply_secret_action(field: &mut String, account: &str, action: SecretAction) {
     match action {
@@ -1413,7 +1624,14 @@ pub fn open_settings(app: AppHandle, tab: Option<String>) -> Result<(), String> 
     #[cfg(unix)]
     {
         // 路由到统一宿主（全局单窗）；宿主不可用时回退到本进程内建窗。
-        route_open_window(app, crate::gui_host::WindowKind::Settings, false, tab, None);
+        route_open_window(
+            app,
+            crate::gui_host::WindowKind::Settings,
+            false,
+            tab,
+            None,
+            None,
+        );
         Ok(())
     }
     #[cfg(not(unix))]
@@ -1897,6 +2115,7 @@ pub fn open_interject(
             false,
             None,
             Some(target),
+            None,
         );
         Ok(())
     }
@@ -2687,4 +2906,76 @@ pub fn restart_settings(app: AppHandle) -> Result<(), String> {
         .map_err(|e| crate::i18n::tr(lang, "cmd.openFailed").replace("{e}", &e.to_string()))?;
     app.exit(0);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workspace(path: &str, pinned: bool, hidden: bool) -> crate::agents::workspaces::Workspace {
+        crate::agents::workspaces::Workspace {
+            path: path.to_string(),
+            label: path.rsplit('/').next().unwrap_or(path).to_string(),
+            last_used_at: 0,
+            agents: Vec::new(),
+            pinned,
+            hidden,
+        }
+    }
+
+    /// spec gui-agent-task-launch §4：workspace 顺序保持索引序在前，待办独有项目排后；
+    /// 按路径去重；hidden 与不存在目录被过滤。
+    #[test]
+    fn new_task_projects_order_dedup_and_filters() {
+        let root = tempfile::tempdir().unwrap();
+        let make = |name: &str| {
+            let dir = root.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir.to_string_lossy().to_string()
+        };
+        let a = make("a");
+        let b = make("b");
+        let c = make("c");
+        let gone = root.path().join("gone").to_string_lossy().to_string();
+
+        let out = build_new_task_projects(
+            vec![
+                workspace(&b, true, false),
+                workspace(&a, false, false),
+                workspace(&c, false, true),     // hidden → 不列
+                workspace(&gone, false, false), // 不存在 → 不列
+            ],
+            vec![a.clone(), c.clone(), gone.clone(), c.clone()],
+        );
+        let paths: Vec<_> = out.iter().map(|p| p.path.as_str()).collect();
+        // workspace 段保持传入顺序（b 置顶在前来自索引排序）；a 在待办段去重；
+        // c 虽为 hidden workspace，但有待办 → 以待办项目身份列出（且 dedup 一次）。
+        assert_eq!(paths, vec![b.as_str(), a.as_str(), c.as_str()]);
+        assert_eq!(out[0].source, "workspace");
+        assert!(out[0].pinned);
+        assert_eq!(out[2].source, "todos");
+    }
+
+    /// spec gui-agent-task-launch §2.5：非法入参（未知 agent / 未消解权限 / NUL）在任何
+    /// 副作用（record 落盘 / Terminal / 出队 / 活跃槽）之前拒绝。
+    #[tokio::test]
+    async fn new_task_launch_rejects_invalid_input_before_side_effects() {
+        let launch = |kind: &str, permission: &str, task: &str| {
+            new_task_launch(
+                "/tmp".to_string(),
+                kind.to_string(),
+                permission.to_string(),
+                task.to_string(),
+                None,
+                None,
+            )
+        };
+        let err = launch("nope", "yolo", "task").await.unwrap_err();
+        assert!(err.contains("unknown agent kind"));
+        // 前端 ask 模式未选择时不应提交；后端仍兜底拒绝空/未知权限。
+        let err = launch("claude", "ask", "task").await.unwrap_err();
+        assert!(err.contains("permission"));
+        let err = launch("claude", "yolo", "bad\0task").await.unwrap_err();
+        assert!(err.contains("NUL"));
+    }
 }

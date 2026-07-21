@@ -1134,6 +1134,12 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::todos_projects,
             crate::commands::todos_projects_enriched,
             crate::commands::open_todos,
+            crate::commands::open_new_task,
+            crate::commands::new_task_init,
+            crate::commands::new_task_projects,
+            crate::commands::new_task_projects_refreshed,
+            crate::commands::project_key_of,
+            crate::commands::new_task_launch,
         ])
         .on_window_event(|window, event| {
             match window.label() {
@@ -2109,9 +2115,10 @@ where
     let theme = window_theme(config);
     let lang = Lang::resolve(&config.general.language);
     let window_bg = background_for(resolved_theme(config));
-    // 新开窗：目标 tab 进初始 URL（无监听时序问题）。tab 值是内部常量（如 "channel"），无需转义。
+    // 新开窗：目标 tab 进初始 URL（无监听时序问题）。tab 值可带 `#elementId` 锚点后缀
+    // （spec gui-agent-task-launch G5），必须转义避免 `#` 被当作 URL fragment 吞掉后续参数。
     let mut url = match initial_tab {
-        Some(tab) => format!("index.html?view=settings&tab={}", tab),
+        Some(tab) => format!("index.html?view=settings&tab={}", urlencode(tab)),
         None => "index.html?view=settings".to_string(),
     };
     let window_effect = config.general.window_effect;
@@ -2382,6 +2389,67 @@ fn watch_todos_file<R: tauri::Runtime>(window: tauri::WebviewWindow<R>) {
             }
         }
     });
+}
+
+/// 创建（或聚焦已存在的）「新建 Agent 任务」窗口（spec gui-agent-task-launch）：全局唯一
+/// （label `newtask`）。`project_override` / `todo_override` 为预选项目 key 与待办 id（经 URL
+/// 参数传递）；已开窗时经 `newtask-goto` 事件更新预选。`todos.json` 变化经 `todos-updated`
+/// 事件驱动前端重载所选项目待办（复用 `watch_todos_file`）。
+#[cfg(unix)]
+pub(crate) fn create_new_task_window<R, M>(
+    manager: &M,
+    config: &AppConfig,
+    project_override: Option<&str>,
+    todo_override: Option<&str>,
+    pin_above_popup: bool,
+) -> tauri::Result<()>
+where
+    R: tauri::Runtime,
+    M: Manager<R>,
+{
+    if let Some(w) = manager.get_webview_window("newtask") {
+        let _ = w.set_focus();
+        // 已开窗时带新预选打开 → 通知前端整体重置到新预选（与待办窗口 goto-project 同模式）。
+        if project_override.is_some() || todo_override.is_some() {
+            use tauri::Emitter;
+            let _ = w.emit(
+                "newtask-goto",
+                serde_json::json!({
+                    "project": project_override,
+                    "todo": todo_override,
+                }),
+            );
+        }
+        return Ok(());
+    }
+    let theme = window_theme(config);
+    let lang = Lang::resolve(&config.general.language);
+    let window_bg = background_for(resolved_theme(config));
+    let mut url = String::from("index.html?view=newtask");
+    if let Some(key) = project_override {
+        url.push_str("&project=");
+        url.push_str(&urlencode(key));
+    }
+    if let Some(id) = todo_override {
+        url.push_str("&todo=");
+        url.push_str(&urlencode(id));
+    }
+    let window_effect = config.general.window_effect;
+    let effective_window_effect = effective_window_effect(window_effect);
+    append_window_effect_query(&mut url, effective_window_effect);
+    let builder = WebviewWindowBuilder::new(manager, "newtask", WebviewUrl::App(url.into()))
+        .title(i18n::tr(lang, "title.newTask"))
+        .inner_size(520.0, 640.0)
+        .min_inner_size(440.0, 520.0)
+        .center()
+        .always_on_top(pin_above_popup)
+        .theme(theme);
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    let win = apply_surface(builder, window_bg, effective_window_effect).build()?;
+    #[cfg(target_os = "macos")]
+    set_runtime_window_effect_with_bg(&win, window_effect, window_bg);
+    watch_todos_file(win);
+    Ok(())
 }
 
 /// 创建（或聚焦已存在的）插话 composer 窗口（spec agent-interject D7）：**每 session 全局唯一**

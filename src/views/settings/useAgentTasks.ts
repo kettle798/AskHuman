@@ -15,6 +15,14 @@ import {
 import type { AgentKind, AgentTaskReadiness, AgentTaskWorkspace } from "../../lib/types";
 import type { SettingsCore } from "./context";
 
+/** 四家 Agent 官方安装文档（readiness「CLI ×」跳转；新建任务窗口复用）。 */
+export const AGENT_INSTALL_DOCS: Record<AgentKind, string> = {
+  claude: "https://docs.anthropic.com/en/docs/claude-code/getting-started",
+  codex: "https://developers.openai.com/codex/cli/",
+  cursor: "https://cursor.com/docs/cli/installation",
+  grok: "https://docs.x.ai/build/overview",
+};
+
 export function useAgentTasks(core: SettingsCore) {
   const { t } = useI18n();
   const { config, activeTab, persist } = core;
@@ -136,21 +144,10 @@ export function useAgentTasks(core: SettingsCore) {
   type ReadinessIssue = "binary" | "lifecycle" | "integration";
   const settingsTargetHighlight = ref("");
   let settingsTargetTimer: number | undefined;
-  const AGENT_INSTALL_DOCS: Record<AgentKind, string> = {
-    claude: "https://docs.anthropic.com/en/docs/claude-code/getting-started",
-    codex: "https://developers.openai.com/codex/cli/",
-    cursor: "https://cursor.com/docs/cli/installation",
-    grok: "https://docs.x.ai/build/overview",
-  };
 
-  async function openReadinessIssue(kind: AgentKind, issue: ReadinessIssue) {
-    if (issue === "binary") {
-      await openPath(AGENT_INSTALL_DOCS[kind]);
-      return;
-    }
-
-    const target = `${issue}-${kind}`;
-    activeTab.value = issue === "lifecycle" ? "advanced" : "integration";
+  /** 滚动定位 + 短暂高亮当前 tab 内的目标元素（须已切到目标 tab）。跨窗口锚点跳转
+   *（`open_settings` 的 `tab#elementId`，spec gui-agent-task-launch G5）也复用本函数。 */
+  async function gotoSettingsTarget(target: string) {
     await nextTick();
     settingsTargetHighlight.value = target;
     document.getElementById(target)?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -159,6 +156,15 @@ export function useAgentTasks(core: SettingsCore) {
       settingsTargetHighlight.value = "";
       settingsTargetTimer = undefined;
     }, 2200);
+  }
+
+  async function openReadinessIssue(kind: AgentKind, issue: ReadinessIssue) {
+    if (issue === "binary") {
+      await openPath(AGENT_INSTALL_DOCS[kind]);
+      return;
+    }
+    activeTab.value = issue === "lifecycle" ? "advanced" : "integration";
+    await gotoSettingsTarget(`${issue}-${kind}`);
   }
 
   onBeforeUnmount(() => {
@@ -194,6 +200,7 @@ export function useAgentTasks(core: SettingsCore) {
     workspaceAgents,
     workspaceLastUsed,
     settingsTargetHighlight,
+    gotoSettingsTarget,
     openReadinessIssue,
     testAgentTaskTerminal,
   };

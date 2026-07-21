@@ -224,6 +224,30 @@ export interface TodosInit {
   lang: string;
   /** 与弹窗一致的提交快捷键（添加待办）。 */
   popupSubmitKey: PopupSubmitKey;
+  /** 「创建任务」入口是否可用（spec gui-agent-task-launch G1）：macOS 且 Terminal.app 存在。 */
+  newTaskSupported: boolean;
+}
+
+/** 新建任务窗口 init 负载（spec gui-agent-task-launch）。 */
+export interface NewTaskInit {
+  theme: ThemeMode;
+  lang: string;
+  /** 与弹窗一致的提交快捷键（⌘↵ 启动任务）。 */
+  popupSubmitKey: PopupSubmitKey;
+  /** `agentTasks.permissionPrompt`（G6）。 */
+  permissionPrompt: "ask" | "agent-default" | "yolo" | string;
+}
+
+/** 新建任务窗口的项目下拉候选。 */
+export interface NewTaskProject {
+  /** workspace 路径（canonical cwd）或待办项目 git 根。 */
+  path: string;
+  /** 显示名（basename）。 */
+  label: string;
+  /** 置顶 workspace（列表已按置顶排序；展示加 ★）。 */
+  pinned: boolean;
+  /** `workspace`（最近 workspace 索引）或 `todos`（仅存在于待办存储）。 */
+  source: "workspace" | "todos" | string;
 }
 
 export interface Question {

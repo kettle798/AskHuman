@@ -490,6 +490,9 @@ pub enum ClientMsg {
     InterjectQuery { session_id: String },
     /// 权限授权管理面板操作（设置进程，§6.3）。回一帧 `PermissionRules`。
     PermissionRules { op: PermissionRulesOp },
+    /// GUI 启动新任务后把活跃槽切到 popup（spec gui-agent-task-launch G11）：人在电脑旁，
+    /// 新 Agent 的提问默认弹窗。即发即走，无回包；旧 daemon 解析失败断连无副作用。
+    ActivatePopupSlot,
 }
 
 /// 一次工具调用的实时上报（随 `AgentEvent` 的 activity 事件携带）。跨进程只传**原始工具名**与

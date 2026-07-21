@@ -21,6 +21,8 @@ import type {
   HookStatus,
   InterjectInit,
   LifecycleStatus,
+  NewTaskInit,
+  NewTaskProject,
   PopupInit,
   PermissionDiffModel,
   PopupSoundSupport,
@@ -420,3 +422,42 @@ export const todosProjectsEnriched = () =>
 /** 打开（或聚焦）项目待办窗口（经统一宿主路由，全局单窗）；`dir` 为预选项目定位目录。 */
 export const openTodos = (dir: string | null) =>
   invoke<void>("open_todos", { dir });
+
+// ===== 「新建 Agent 任务」窗口（spec gui-agent-task-launch）=====
+
+/** 打开（或聚焦）新建任务窗口；可带预选项目 key 与待办 id（待办行入口）。 */
+export const openNewTask = (project?: string | null, todo?: string | null) =>
+  invoke<void>("open_new_task", { project: project ?? null, todo: todo ?? null });
+
+/** 新建任务窗口初始化：主题 + 语言 + 提交快捷键 + 权限选择方式。 */
+export const newTaskInit = () => invoke<NewTaskInit>("new_task_init");
+
+/** 项目候选（本地快路径：workspace 索引 + 待办项目）。 */
+export const newTaskProjects = () =>
+  invoke<NewTaskProject[]>("new_task_projects");
+
+/** 项目候选（含四家有界冷扫描合并）；首屏后后台调用。 */
+export const newTaskProjectsRefreshed = () =>
+  invoke<NewTaskProject[]>("new_task_projects_refreshed");
+
+/** 目录 → 项目 key（git 根，回退自身）；按所选 workspace 读取所属项目待办。 */
+export const projectKeyOf = (dir: string) =>
+  invoke<string>("project_key_of", { dir });
+
+/** 启动新任务（LaunchRecord + Terminal.app 链路）；成功后所选待办按快照出队。 */
+export const newTaskLaunch = (payload: {
+  workspace: string;
+  kind: string;
+  permission: "agent-default" | "yolo";
+  task: string;
+  todoProject?: string | null;
+  todoId?: string | null;
+}) =>
+  invoke<void>("new_task_launch", {
+    workspace: payload.workspace,
+    kind: payload.kind,
+    permission: payload.permission,
+    task: payload.task,
+    todoProject: payload.todoProject ?? null,
+    todoId: payload.todoId ?? null,
+  });

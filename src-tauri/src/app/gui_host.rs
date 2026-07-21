@@ -33,7 +33,10 @@ const QUICK_ASK_INTERJECT: &str =
 /// 某 label 是否为宿主统一承载的窗口（用于窗口计数 / 续命判定）。
 /// 插话 composer 窗口每 session 一个，label 动态（`interject-<hash>`），按前缀识别。
 pub fn is_hosted_label(label: &str) -> bool {
-    matches!(label, "settings" | "history" | "agents" | "todos") || label.starts_with("interject-")
+    matches!(
+        label,
+        "settings" | "history" | "agents" | "todos" | "newtask"
+    ) || label.starts_with("interject-")
 }
 
 // ===== 内嵌图标资源（三态；统一单色模板图）=====
@@ -784,6 +787,15 @@ fn build_specs(
         i18n::tr(lang, "tray.openTodos").to_string(),
         true,
     ));
+    // 「新建 Agent 任务」（spec gui-agent-task-launch G1/G12）：仅 macOS 且 Terminal.app 可用时
+    // 显示；不要求开启 agentTasks 实验功能。
+    if crate::integrations::agent_launch::terminal_available() {
+        nodes.push(Node::item(
+            "open_new_task",
+            i18n::tr(lang, "tray.newTask").to_string(),
+            true,
+        ));
+    }
     // 「Agent 状态」入口仅在开启了生命周期追踪时显示——否则窗口必为空，徒增困惑。
     // 忙闲数量直接并入标题（合并了原状态区的只读忙闲行）。
     // 有活动 agent（daemon 下发摘要）时父项变**子菜单**（spec agent-interject D7）：
@@ -1022,6 +1034,7 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
                     agent: Some(a.kind),
                     cwd: a.cwd,
                 }),
+                None,
             );
         }
         return;
@@ -1068,7 +1081,7 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
         let project = cwd
             .map(|c| crate::project::detect_from(std::path::Path::new(&c)))
             .filter(|k| !k.is_empty());
-        open_window(app, WindowKind::Todos, false, project, None);
+        open_window(app, WindowKind::Todos, false, project, None, None);
         return;
     }
     // Agent 子菜单「聚焦终端」：AppleScript 可能阻塞（授权弹窗等），放后台线程。
@@ -1090,12 +1103,14 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
         return;
     }
     match id {
-        "open_settings" => open_window(app, WindowKind::Settings, false, None, None),
+        "open_settings" => open_window(app, WindowKind::Settings, false, None, None, None),
         // 托盘「历史」无调用方项目上下文 → 默认展示全部项目。
-        "open_history" => open_window(app, WindowKind::History, true, None, None),
-        "open_agents" => open_window(app, WindowKind::Agents, false, None, None),
+        "open_history" => open_window(app, WindowKind::History, true, None, None, None),
+        "open_agents" => open_window(app, WindowKind::Agents, false, None, None, None),
         // 托盘「待办」无项目上下文 → 由前端自选默认项目。
-        "open_todos" => open_window(app, WindowKind::Todos, false, None, None),
+        "open_todos" => open_window(app, WindowKind::Todos, false, None, None, None),
+        // 托盘「新建 Agent 任务」（spec gui-agent-task-launch）：无预选打开通用表单。
+        "open_new_task" => open_window(app, WindowKind::NewTask, false, None, None, None),
         "check_update" => {
             let Some(state) = app.try_state::<HostState>() else {
                 return;
@@ -1189,14 +1204,15 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
 
 /// 在宿主进程内打开（或聚焦）指定窗口，并刷新窗口计数 / 续命。须在主线程调用。
 /// `param` 按窗口类型复用：历史窗口 = 调用方项目 key（默认过滤到该项目，None 用宿主自身项目）；
-/// 设置窗口 = 初始定位 tab（如 "channel"，None 用默认 tab）。
-/// `target` 仅插话窗口使用（session 必填；缺失则忽略本次请求）。
+/// 设置窗口 = 初始定位 tab（如 "channel"，None 用默认 tab）；待办/新建任务窗口 = 预选项目 key。
+/// `target` 仅插话窗口使用（session 必填；缺失则忽略本次请求）；`todo` 仅新建任务窗口使用。
 pub(crate) fn open_window(
     app: &AppHandle,
     kind: WindowKind,
     all: bool,
     param: Option<String>,
     target: Option<crate::gui_host::InterjectTarget>,
+    todo: Option<String>,
 ) {
     let cfg = AppConfig::load_without_secrets();
     // 弹窗在「另一个进程」（daemon 拉起的助手），宿主无 popup 窗口可探测；改据 daemon 在途请求数
@@ -1222,6 +1238,14 @@ pub(crate) fn open_window(
         WindowKind::Todos => {
             crate::app::create_todos_window(app, &cfg, param.as_deref(), pin_above_popup)
         }
+        // `param` = 预选项目 key、`todo` = 预选待办 id（spec gui-agent-task-launch）。
+        WindowKind::NewTask => crate::app::create_new_task_window(
+            app,
+            &cfg,
+            param.as_deref(),
+            todo.as_deref(),
+            pin_above_popup,
+        ),
     };
     if r.is_ok() {
         // 宿主是 accessory app（不自动激活）：新建窗口需显式聚焦，才能前置到置顶弹窗之上并接收键盘。
@@ -1230,6 +1254,7 @@ pub(crate) fn open_window(
             WindowKind::History => "history".to_string(),
             WindowKind::Agents => "agents".to_string(),
             WindowKind::Todos => "todos".to_string(),
+            WindowKind::NewTask => "newtask".to_string(),
             WindowKind::Interject => target
                 .as_ref()
                 .map(|t| crate::gui_host::interject_label(&t.session))
@@ -1253,6 +1278,7 @@ fn open_window_settings_tab(app: &AppHandle, tab: &str) {
         WindowKind::Settings,
         false,
         Some(tab.to_string()),
+        None,
         None,
     );
 }
@@ -1406,6 +1432,7 @@ async fn handle_host_conn(stream: tokio::net::UnixStream, app: AppHandle) {
                 session,
                 agent,
                 cwd,
+                todo,
             } => {
                 // 回执（让客户端确认已受理），再到主线程开窗。
                 let _ = ipc::write_msg(&mut w, &HostMsg::Ping).await;
@@ -1415,8 +1442,9 @@ async fn handle_host_conn(stream: tokio::net::UnixStream, app: AppHandle) {
                     cwd,
                 });
                 let app2 = app.clone();
-                let _ =
-                    app.run_on_main_thread(move || open_window(&app2, kind, all, project, target));
+                let _ = app.run_on_main_thread(move || {
+                    open_window(&app2, kind, all, project, target, todo)
+                });
             }
             HostMsg::Ping => {
                 let _ = ipc::write_msg(&mut w, &HostMsg::Ping).await;

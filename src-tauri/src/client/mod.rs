@@ -136,6 +136,23 @@ pub async fn notify_update_state_changed() {
     let _ = ipc::write_msg(&mut writer, &ClientMsg::RefreshUpdateState).await;
 }
 
+/// GUI 启动新任务后把活跃槽切到 popup（spec gui-agent-task-launch G11）。best-effort、不拉起
+/// daemon：daemon 在跑经 IPC 切（含旧渠道反激活回执 / auto-end-watch）；未运行则直接写
+/// `auto-channel.json`（daemon 启动时 `load_active` 读回）。
+pub async fn activate_popup_slot() {
+    match connect_split().await {
+        Ok((_reader, mut writer)) => {
+            if ipc::write_msg(&mut writer, &ClientMsg::ActivatePopupSlot)
+                .await
+                .is_err()
+            {
+                crate::autochannel::save_active(Some("popup"));
+            }
+        }
+        Err(_) => crate::autochannel::save_active(Some("popup")),
+    }
+}
+
 /// 请求停止（force=false 为 graceful：有在途请求时 Daemon 排空后退出）；
 /// 收到 Stopping 回应返回 true，未运行返回 false。
 pub async fn request_stop(force: bool) -> bool {

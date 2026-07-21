@@ -101,6 +101,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "title.agents" => pick(lang, "AskHuman Agents", "AskHuman Agent 状态"),
         "title.interject" => pick(lang, "Message to Agent", "给 Agent 发消息"),
         "title.todos" => pick(lang, "AskHuman Todos", "AskHuman 待办"),
+        "title.newTask" => pick(lang, "New Agent Task", "新建 Agent 任务"),
 
         // —— macOS 附件右键菜单 ——
         "menu.open" => pick(lang, "Open", "打开"),
@@ -1211,6 +1212,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "tray.openSettings" => pick(lang, "Settings", "设置"),
         "tray.openHistory" => pick(lang, "History", "历史记录"),
         "tray.openTodos" => pick(lang, "Todos", "待办"),
+        "tray.newTask" => pick(lang, "New Agent Task", "新建 Agent 任务"),
         "tray.openAgents" => pick(lang, "Agent Status", "Agent 状态"),
         "tray.openAgentsCounts" => pick(
             lang,

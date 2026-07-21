@@ -1381,6 +1381,11 @@ async fn control_loop(
             // 菜单栏宿主订阅：接管连接持续推送 TrayState（非保活）。
             ClientMsg::TraySubscribe => return Control::TraySub,
             ClientMsg::RefreshUpdateState => refresh_update_snapshot(state),
+            // GUI 启动新任务后切活跃槽到 popup（spec gui-agent-task-launch G11）：走统一
+            // set_active_channel（自然获得旧 IM 反激活回执与 auto-end-watch 语义），无回包。
+            ClientMsg::ActivatePopupSlot => {
+                let _ = set_active_channel(state, "popup").await;
+            }
             // 托盘「待答」子菜单点击：聚焦/闪烁对应请求的弹窗（即发即走，无回包）。
             ClientMsg::FocusRequest { request_id } => {
                 update_popup_focus(state, |focus| focus.claim_and_focus(&request_id));

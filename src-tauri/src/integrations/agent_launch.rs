@@ -483,6 +483,50 @@ mod tests {
         assert_eq!(shell_quote("/tmp/it's"), "'/tmp/it'\\''s'");
     }
 
+    /// Task boundary validation happens before any filesystem/readiness side effect
+    /// (spec gui-agent-task-launch §2.5 shares this path with IM /new).
+    #[test]
+    fn create_record_validates_task_boundaries_first() {
+        let source = || LaunchSource {
+            channel: "test".to_string(),
+            target: String::new(),
+        };
+        let cwd = Path::new("/nonexistent-askhuman-test-dir");
+        let err = create_record(
+            source(),
+            cwd,
+            AgentKind::Claude,
+            LaunchPermission::AgentDefault,
+            "   ",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+
+        let over = "a".repeat(MAX_TASK_CHARS + 1);
+        let err = create_record(
+            source(),
+            cwd,
+            AgentKind::Claude,
+            LaunchPermission::AgentDefault,
+            &over,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("exceeds"));
+
+        // Exactly at the limit passes length validation: with a nonexistent cwd the
+        // next check (workspace resolution) fails instead, with no record written.
+        let exact = "a".repeat(MAX_TASK_CHARS);
+        let err = create_record(
+            source(),
+            cwd,
+            AgentKind::Claude,
+            LaunchPermission::AgentDefault,
+            &exact,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("workspace"));
+    }
+
     #[test]
     fn task_hash_is_stable() {
         assert_eq!(

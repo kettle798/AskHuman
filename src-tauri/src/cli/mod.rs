@@ -79,6 +79,7 @@ pub fn dispatch() {
                     false,
                     None,
                     None,
+                    None,
                 )
                 .is_ok()
                 {
@@ -98,6 +99,7 @@ pub fn dispatch() {
                     crate::gui_host::WindowKind::History,
                     all,
                     Some(project),
+                    None,
                     None,
                 )
                 .is_ok()
@@ -120,6 +122,7 @@ pub fn dispatch() {
                     crate::gui_host::WindowKind::Todos,
                     false,
                     Some(project.clone()),
+                    None,
                     None,
                 )
                 .is_ok()
