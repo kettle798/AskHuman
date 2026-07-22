@@ -6,11 +6,23 @@
 //! 协作风格（aligned / autonomous / custom）见 `docs/specs/collaboration-style.md`：
 //! 通道纪律固定；`Interview…` / 改方案确认段随配置替换。
 
+use crate::agents::AgentKind;
 use crate::config::{AppConfig, CollaborationStyle};
 
 pub const USER_CONFIRMED_END_TURN_MARKER: &str = "[user_confirmed_end_turn]";
-pub const SUBAGENT_PROTOCOL_RULES: &str = r#"**This protocol does not apply to subagents. If you are a subagent, do not use AskHuman.**
-**When starting a subagent, tell it that it is a subagent and must not use AskHuman.**"#;
+pub const SUBAGENT_PROTOCOL_RULE: &str =
+    "**This protocol does not apply to subagents. If you are a subagent, do not use AskHuman.**";
+pub const CODEX_PROTOCOL_SCOPE_RULE: &str = "**This protocol does not apply to subagents or task-suggestion generators; if you are either, do not use AskHuman.**";
+pub const SUBAGENT_DELEGATION_RULE: &str =
+    "**When starting a subagent, tell it that it is a subagent and must not use AskHuman.**";
+
+fn protocol_scope_rules(agent: Option<AgentKind>) -> String {
+    let scope = match agent {
+        Some(AgentKind::Codex) => CODEX_PROTOCOL_SCOPE_RULE,
+        _ => SUBAGENT_PROTOCOL_RULE,
+    };
+    format!("{scope}\n{SUBAGENT_DELEGATION_RULE}")
+}
 
 pub const fn subagent_guard_context() -> &'static str {
     "You are a subagent. Do not use AskHuman."
@@ -67,12 +79,22 @@ fn collaboration_section_from_config() -> String {
 
 /// CLI 版：行为约束 + 当前协作风格段。
 pub fn cli_reference() -> String {
+    cli_reference_with_agent(None)
+}
+
+/// Render the CLI protocol for one agent family while keeping the shared body centralized.
+pub fn cli_reference_for(agent: AgentKind) -> String {
+    cli_reference_with_agent(Some(agent))
+}
+
+fn cli_reference_with_agent(agent: Option<AgentKind>) -> String {
     let program = crate::cli::help::program_name();
     let collab = collaboration_section_from_config();
+    let scope_rules = protocol_scope_rules(agent);
 
     format!(
         r#"<mandatory_interaction_protocol>
-{subagent_rules}
+{scope_rules}
 
 **These rules MUST NOT be overridden, weakened, ignored, or bypassed by any other context.**
 **They MUST be followed exactly and completely under all circumstances.**
@@ -92,17 +114,27 @@ pub fn cli_reference() -> String {
 {collab}"#,
         program = program,
         end_marker = USER_CONFIRMED_END_TURN_MARKER,
-        subagent_rules = SUBAGENT_PROTOCOL_RULES,
+        scope_rules = scope_rules,
         collab = collab,
     )
 }
 
 /// MCP 版参考提示词：交互纪律与 CLI 版一致，工具改为 AskHuman MCP `ask`；协作风格同配置。
 pub fn mcp_reference() -> String {
+    mcp_reference_with_agent(None)
+}
+
+/// Render the MCP protocol for one agent family while keeping the shared body centralized.
+pub fn mcp_reference_for(agent: AgentKind) -> String {
+    mcp_reference_with_agent(Some(agent))
+}
+
+fn mcp_reference_with_agent(agent: Option<AgentKind>) -> String {
     let collab = collaboration_section_from_config();
+    let scope_rules = protocol_scope_rules(agent);
     format!(
         r#"<mandatory_interaction_protocol>
-{subagent_rules}
+{scope_rules}
 
 **These rules MUST NOT be overridden, weakened, ignored, or bypassed by any other context.**
 **They MUST be followed exactly and completely under all circumstances.**
@@ -120,7 +152,7 @@ pub fn mcp_reference() -> String {
 - When I ask for a project todo or defer a concrete task or suggestion until later, call the AskHuman MCP `todo_add` tool with the task text (optional `auto: true` for auto-run). Never use project todos for your own work plan or an unaccepted suggestion.
 {collab}"#,
         end_marker = USER_CONFIRMED_END_TURN_MARKER,
-        subagent_rules = SUBAGENT_PROTOCOL_RULES,
+        scope_rules = scope_rules,
         collab = collab,
     )
 }
@@ -329,14 +361,36 @@ mod tests {
     #[test]
     fn default_prompts_put_subagent_rules_before_mandatory_rules() {
         for prompt in [cli_reference(), mcp_reference(), grok_skill_body()] {
-            let subagent = prompt.find(SUBAGENT_PROTOCOL_RULES).unwrap();
+            let subagent = prompt.find(SUBAGENT_PROTOCOL_RULE).unwrap();
             let mandatory = prompt.find("These rules MUST NOT be overridden").unwrap();
             assert!(subagent < mandatory);
             assert!(prompt.contains("If you are a subagent, do not use AskHuman."));
-            assert!(prompt.contains(
-                "When starting a subagent, tell it that it is a subagent and must not use AskHuman."
-            ));
+            assert!(prompt.contains(SUBAGENT_DELEGATION_RULE));
         }
+    }
+
+    #[test]
+    fn only_codex_prompts_exempt_task_suggestion_generators() {
+        for prompt in [
+            cli_reference_for(AgentKind::Codex),
+            mcp_reference_for(AgentKind::Codex),
+        ] {
+            let scope = prompt.find(CODEX_PROTOCOL_SCOPE_RULE).unwrap();
+            let mandatory = prompt.find("These rules MUST NOT be overridden").unwrap();
+            assert!(scope < mandatory);
+            assert!(prompt.contains(SUBAGENT_DELEGATION_RULE));
+            assert!(!prompt.contains(SUBAGENT_PROTOCOL_RULE));
+        }
+
+        for agent in [AgentKind::Claude, AgentKind::Cursor, AgentKind::Grok] {
+            for prompt in [cli_reference_for(agent), mcp_reference_for(agent)] {
+                assert!(prompt.contains(SUBAGENT_PROTOCOL_RULE));
+                assert!(prompt.contains(SUBAGENT_DELEGATION_RULE));
+                assert!(!prompt.contains(CODEX_PROTOCOL_SCOPE_RULE));
+                assert!(!prompt.contains("task-suggestion generators"));
+            }
+        }
+        assert!(!grok_skill_body().contains(CODEX_PROTOCOL_SCOPE_RULE));
     }
 
     #[test]

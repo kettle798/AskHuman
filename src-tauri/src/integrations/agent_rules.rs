@@ -1,7 +1,7 @@
 //! Agent 全局提示词（Rules）安装/卸载/更新/状态：Cursor / Claude Code / Codex。
 //!
-//! 三者共用同一份提示词正文（`prompts::cli_reference()`），均以自有 `begin/end` 托管区块写入，
-//! 区块外的用户内容一律保留；落点不同：
+//! Agent families share one prompt template. Rendering may add a target-specific scope rule before
+//! writing the owned `begin/end` block; content outside the block is always preserved. Targets:
 //! - Cursor：`~/.cursor/rules/askhuman.mdc`（`alwaysApply` frontmatter + 托管区块）。
 //! - Claude Code：`~/.claude/CLAUDE.md` 内的托管区块。
 //! - Codex：`~/.codex/AGENTS.md` 内的托管区块。
@@ -34,11 +34,11 @@ pub enum Variant {
 }
 
 impl Variant {
-    /// 该变体对应的最新内置提示词正文。
-    pub fn body(self) -> String {
+    /// Render the latest built-in body for this variant and agent target.
+    pub fn body(self, agent: AgentTarget) -> String {
         match self {
-            Variant::Cli => crate::prompts::cli_reference(),
-            Variant::Mcp => crate::prompts::mcp_reference(),
+            Variant::Cli => crate::prompts::cli_reference_for(agent.kind()),
+            Variant::Mcp => crate::prompts::mcp_reference_for(agent.kind()),
         }
     }
 }
@@ -87,6 +87,15 @@ impl AgentTarget {
     /// 是否为「独占文件」模式（Cursor 为整文件拥有；其余为共享文件托管区块）。
     fn is_owned_file(self) -> bool {
         matches!(self, AgentTarget::Cursor)
+    }
+
+    fn kind(self) -> crate::agents::AgentKind {
+        match self {
+            AgentTarget::Cursor => crate::agents::AgentKind::Cursor,
+            AgentTarget::ClaudeCode => crate::agents::AgentKind::Claude,
+            AgentTarget::Codex => crate::agents::AgentKind::Codex,
+            AgentTarget::Grok => crate::agents::AgentKind::Grok,
+        }
     }
 }
 
@@ -240,13 +249,13 @@ pub fn needs_update_variant(agent: AgentTarget, variant: Variant) -> bool {
     };
     if has_block(&text) {
         return block_body(&text)
-            .map(|b| b != variant.body())
+            .map(|b| b != variant.body(agent))
             .unwrap_or(true);
     }
     agent.is_owned_file() && is_managed_cursor_file(&text)
 }
 
-/// 已安装规则的变体：区块正文精确匹配 `mcp_reference()`/`cli_reference()` 即判定对应变体；
+/// 已安装规则的变体：区块正文精确匹配目标 Agent 的 MCP / CLI reference 即判定对应变体；
 /// 漂移（旧版本提示词）时用结构性信号兜底（见 [`classify_body`]）。未安装返回 None。
 pub fn installed_variant(agent: AgentTarget) -> Option<Variant> {
     if agent.is_grok_skill() {
@@ -255,7 +264,7 @@ pub fn installed_variant(agent: AgentTarget) -> Option<Variant> {
     }
     let text = std::fs::read_to_string(agent.file()).ok()?;
     if let Some(body) = block_body(&text) {
-        return Some(classify_body(&body));
+        return Some(classify_body(&body, agent));
     }
     if agent.is_owned_file() && is_managed_cursor_file(&text) {
         return Some(Variant::Cli);
@@ -268,11 +277,11 @@ pub fn installed_variant(agent: AgentTarget) -> Option<Variant> {
 /// 精确匹配当前内置正文优先；**漂移**（已装的是旧版本提示词、与当前正文不等）时改用结构性信号：
 /// CLI 版必然指引「经 Shell/Bash 工具调用」，MCP 版只提工具调用、从不出现 `Shell/Bash`。
 /// 这样即便内置提示词改版，已装规则仍能稳定归类，不会在更新后被错分模式。
-pub fn classify_body(body: &str) -> Variant {
-    if body == crate::prompts::mcp_reference() {
+pub fn classify_body(body: &str, agent: AgentTarget) -> Variant {
+    if body == crate::prompts::mcp_reference_for(agent.kind()) {
         return Variant::Mcp;
     }
-    if body == crate::prompts::cli_reference() {
+    if body == crate::prompts::cli_reference_for(agent.kind()) {
         return Variant::Cli;
     }
     if body.contains("Shell/Bash") {
@@ -321,7 +330,7 @@ pub fn install_variant(agent: AgentTarget, variant: Variant) -> Result<String> {
     if agent.is_grok_skill() {
         return crate::integrations::grok_skill::install();
     }
-    write_rule(agent, &variant.body())?;
+    write_rule(agent, &variant.body(agent))?;
     Ok(crate::i18n::tr(crate::i18n::Lang::current(), "cmd.ruleInstalled").to_string())
 }
 
@@ -330,7 +339,7 @@ pub fn update_variant(agent: AgentTarget, variant: Variant) -> Result<String> {
     if agent.is_grok_skill() {
         return crate::integrations::grok_skill::update();
     }
-    write_rule(agent, &variant.body())?;
+    write_rule(agent, &variant.body(agent))?;
     Ok(crate::i18n::tr(crate::i18n::Lang::current(), "cmd.ruleUpdated").to_string())
 }
 
@@ -564,22 +573,52 @@ mod tests {
     fn classify_body_exact_and_drift() {
         // 精确匹配当前内置正文。
         assert_eq!(
-            classify_body(&crate::prompts::cli_reference()),
+            classify_body(
+                &crate::prompts::cli_reference_for(crate::agents::AgentKind::Codex),
+                AgentTarget::Codex,
+            ),
             Variant::Cli
         );
         assert_eq!(
-            classify_body(&crate::prompts::mcp_reference()),
+            classify_body(
+                &crate::prompts::mcp_reference_for(crate::agents::AgentKind::Codex),
+                AgentTarget::Codex,
+            ),
             Variant::Mcp
         );
         // 漂移（旧版本提示词）：CLI 必含 Shell/Bash 指引 → Cli；MCP 从不提 Shell → Mcp。
         assert_eq!(
-            classify_body("... invoke via the Shell/Bash tool ... (older wording)"),
+            classify_body(
+                "... invoke via the Shell/Bash tool ... (older wording)",
+                AgentTarget::Codex,
+            ),
             Variant::Cli
         );
         assert_eq!(
-            classify_body("... call the AskHuman `ask` tool ... (older wording)"),
+            classify_body(
+                "... call the AskHuman `ask` tool ... (older wording)",
+                AgentTarget::Codex,
+            ),
             Variant::Mcp
         );
+    }
+
+    #[test]
+    fn variant_body_adds_the_scope_exception_only_for_codex() {
+        for variant in [Variant::Cli, Variant::Mcp] {
+            assert!(variant
+                .body(AgentTarget::Codex)
+                .contains(crate::prompts::CODEX_PROTOCOL_SCOPE_RULE));
+            for target in [
+                AgentTarget::ClaudeCode,
+                AgentTarget::Cursor,
+                AgentTarget::Grok,
+            ] {
+                assert!(!variant
+                    .body(target)
+                    .contains(crate::prompts::CODEX_PROTOCOL_SCOPE_RULE));
+            }
+        }
     }
 
     #[test]

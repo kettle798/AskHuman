@@ -18,8 +18,11 @@
 use base64::Engine;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
-use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
+use rmcp::model::{
+    CallToolResult, ContentBlock, Implementation, Meta, ServerCapabilities, ServerInfo,
+};
+use rmcp::service::RequestContext;
+use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,6 +30,41 @@ use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
+
+const CODEX_TURN_METADATA_KEY: &str = "x-codex-turn-metadata";
+const CODEX_THREAD_SOURCE_KEY: &str = "thread_source";
+const CODEX_SYSTEM_THREAD_SOURCE: &str = "system";
+const CODEX_SYSTEM_THREAD_BLOCK_MESSAGE: &str =
+    "AskHuman is disabled for this Codex system-generated background thread.\n\
+Do not retry or contact the human; finish the host-requested non-interactive output directly.";
+
+fn has_system_thread_source(value: &Value) -> bool {
+    value
+        .as_object()
+        .and_then(|object| object.get(CODEX_THREAD_SOURCE_KEY))
+        .and_then(Value::as_str)
+        == Some(CODEX_SYSTEM_THREAD_SOURCE)
+}
+
+/// Codex attaches trusted per-turn context under this namespaced `_meta` entry for every MCP call.
+/// Older versions may encode the inner value as JSON text, so both representations are accepted.
+fn is_codex_system_thread(meta: &Meta) -> bool {
+    let Some(turn_metadata) = meta.0.get(CODEX_TURN_METADATA_KEY) else {
+        return false;
+    };
+    match turn_metadata {
+        Value::Object(_) => has_system_thread_source(turn_metadata),
+        Value::String(encoded) => serde_json::from_str::<Value>(encoded)
+            .map(|parsed| has_system_thread_source(&parsed))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn codex_system_thread_block(meta: &Meta) -> Option<CallToolResult> {
+    is_codex_system_thread(meta)
+        .then(|| CallToolResult::error(vec![ContentBlock::text(CODEX_SYSTEM_THREAD_BLOCK_MESSAGE)]))
+}
 
 // `ask` 工具的入参（MCP 入参 schema 由 schemars 从本结构派生）。结构体级注释用 `//` 以免泄漏进对外
 // schema 的 description；字段级 `///` 才是给 agent 读的描述，须为英文。
@@ -188,10 +226,14 @@ structured content; any images the human attaches are returned as image content.
     async fn ask(
         &self,
         Parameters(params): Parameters<AskParams>,
+        context: RequestContext<RoleServer>,
         // rmcp extracts the per-request token; cancelled when the client sends
         // `notifications/cancelled` (timeout / user stop / host abort). Not human dismiss.
         cancel: CancellationToken,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(blocked) = codex_system_thread_block(&context.meta) {
+            return Ok(blocked);
+        }
         let has_questions = params
             .questions
             .as_ref()
@@ -298,8 +340,12 @@ approves ending the turn — only then may you end it.",
     async fn whats_next(
         &self,
         Parameters(params): Parameters<WhatsNextParams>,
+        context: RequestContext<RoleServer>,
         cancel: CancellationToken,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(blocked) = codex_system_thread_block(&context.meta) {
+            return Ok(blocked);
+        }
         let argv = build_whats_next_argv(&params);
         let exe = std::env::current_exe().map_err(|e| {
             McpError::internal_error(format!("cannot locate AskHuman executable: {e}"), None)
@@ -353,7 +399,11 @@ cwd (git root). Returns the 1-based index and stored text on success.",
     async fn todo_add(
         &self,
         Parameters(params): Parameters<TodoAddParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(blocked) = codex_system_thread_block(&context.meta) {
+            return Ok(blocked);
+        }
         let text = params.text.trim();
         if text.is_empty() {
             return Err(McpError::invalid_params(
@@ -584,9 +634,10 @@ fn image_mime(path: &Path) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::ServiceExt;
     use serde_json::json;
+    use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-    #[cfg(unix)]
     use std::time::Duration;
 
     fn contains_ref(value: &Value) -> bool {
@@ -601,6 +652,177 @@ mod tests {
 
     fn params(json: Value) -> AskParams {
         serde_json::from_value(json).unwrap()
+    }
+
+    fn meta(json: Value) -> Meta {
+        Meta(json.as_object().unwrap().clone())
+    }
+
+    fn codex_meta(turn_metadata: Value) -> Meta {
+        meta(json!({ CODEX_TURN_METADATA_KEY: turn_metadata }))
+    }
+
+    async fn send_json(writer: &mut (impl AsyncWrite + Unpin), value: Value) {
+        writer
+            .write_all(value.to_string().as_bytes())
+            .await
+            .unwrap();
+        writer.write_all(b"\n").await.unwrap();
+        writer.flush().await.unwrap();
+    }
+
+    async fn read_response(reader: &mut (impl AsyncBufRead + Unpin), id: i64) -> Value {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut line = String::new();
+                let bytes = reader.read_line(&mut line).await.unwrap();
+                assert!(bytes > 0, "MCP stream closed before response {id}");
+                let value: Value = serde_json::from_str(&line).unwrap();
+                if value.get("id") == Some(&json!(id)) {
+                    break value;
+                }
+            }
+        })
+        .await
+        .expect("MCP response timeout")
+    }
+
+    #[test]
+    fn codex_system_thread_detection_is_namespaced_exact_and_compatible() {
+        assert!(is_codex_system_thread(&codex_meta(json!({
+            "thread_source": "system"
+        }))));
+        assert!(is_codex_system_thread(&codex_meta(json!(
+            r#"{"thread_source":"system"}"#
+        ))));
+
+        for metadata in [
+            codex_meta(json!({ "thread_source": "user" })),
+            codex_meta(json!({ "thread_source": "automation" })),
+            codex_meta(json!({ "thread_source": "System" })),
+            codex_meta(json!({})),
+            codex_meta(json!("not json")),
+            meta(json!({ "thread_source": "system" })),
+            Meta::default(),
+        ] {
+            assert!(!is_codex_system_thread(&metadata), "{metadata:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn system_thread_metadata_blocks_all_tools_through_rmcp_routing() -> anyhow::Result<()> {
+        let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+        let server_task = tokio::spawn(async move {
+            AskServer::new()
+                .serve(server_transport)
+                .await?
+                .waiting()
+                .await?;
+            anyhow::Ok(())
+        });
+        let (read, mut write) = tokio::io::split(client_transport);
+        let mut reader = BufReader::new(read);
+
+        send_json(
+            &mut write,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "askhuman-test", "version": "0" }
+                }
+            }),
+        )
+        .await;
+        let initialized = read_response(&mut reader, 1).await;
+        assert!(initialized.get("result").is_some());
+        send_json(
+            &mut write,
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        )
+        .await;
+
+        for (offset, (name, arguments)) in [
+            ("ask", json!({ "message": "must not spawn" })),
+            ("whats_next", json!({})),
+            // Whitespace is valid at schema decoding time but would fail handler validation.
+            // Receiving the system-thread result proves the guard ran before any todo write.
+            ("todo_add", json!({ "text": " " })),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = offset as i64 + 2;
+            send_json(
+                &mut write,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "tools/call",
+                    "params": {
+                        "_meta": {
+                            CODEX_TURN_METADATA_KEY: { "thread_source": "system" }
+                        },
+                        "name": name,
+                        "arguments": arguments
+                    }
+                }),
+            )
+            .await;
+            let response = read_response(&mut reader, id).await;
+            assert_eq!(
+                response.pointer("/result/isError"),
+                Some(&json!(true)),
+                "{name}"
+            );
+            assert_eq!(
+                response.pointer("/result/content/0/text"),
+                Some(&json!(CODEX_SYSTEM_THREAD_BLOCK_MESSAGE)),
+                "{name}"
+            );
+        }
+
+        for (id, meta) in [
+            (
+                5,
+                Some(json!({
+                    CODEX_TURN_METADATA_KEY: { "thread_source": "user" }
+                })),
+            ),
+            (6, None),
+        ] {
+            let mut params = json!({ "name": "ask", "arguments": {} });
+            if let Some(meta) = meta {
+                params
+                    .as_object_mut()
+                    .expect("tools/call params")
+                    .insert("_meta".into(), meta);
+            }
+            send_json(
+                &mut write,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "tools/call",
+                    "params": params
+                }),
+            )
+            .await;
+            let response = read_response(&mut reader, id).await;
+            assert_eq!(response.pointer("/error/code"), Some(&json!(-32602)));
+            assert_ne!(
+                response.pointer("/error/message"),
+                Some(&json!(CODEX_SYSTEM_THREAD_BLOCK_MESSAGE))
+            );
+        }
+
+        drop(write);
+        drop(reader);
+        server_task.await??;
+        Ok(())
     }
 
     #[cfg(unix)]

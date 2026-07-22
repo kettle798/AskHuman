@@ -9,6 +9,11 @@
 > caller pid 上送 Daemon；Daemon 进程树探测只按 pid 刷新**已有** lifecycle session，绝不新建会话。
 > rmcp cancellation 会终止子 CLI，socket EOF 再取消 Daemon 请求。Codex 配置还把 `mcp__askhuman`
 > 最小加入 Code Mode `direct_only_tool_namespaces`，确保 ask 在顶层阻塞；所有权记录防止卸载用户原有项。
+>
+> **实现期补充（2026-07-23）**：Codex 桌面版 Suggested prompts 使用
+> `thread_source=system` 的内部 thread。AskHuman 对 Codex 每次 `tools/call._meta` 做前置检查，命中
+> `x-codex-turn-metadata.thread_source == "system"` 时在任何子进程、daemon 或 todo 副作用前本地拒绝
+> `ask`、`whats_next`、`todo_add`；其它来源与缺失 / 异常 metadata 保持 fail-open。
 
 ## 1. 背景与动机
 
@@ -36,7 +41,7 @@
 | 编号 | 决策项 | 结论 |
 |---|---|---|
 | D1 | 模式互斥 | 每个 agent 三态「CLI / MCP / 未集成」，互斥。同一 agent 不同时安装 CLI 与 MCP 产物（避免双触发/冲突） |
-| D2 | MCP server 形态 | **薄壳**：不自带提问/弹窗/IM 逻辑；每次 `ask` 调用 spawn 现有 `AskHuman --output json …` 子进程复用全流程。MCP 专属新代码仅三块：①入参 Schema↔argv 映射；②解析子进程 JSON；③图片文件→`ImageContent` |
+| D2 | MCP server 形态 | **薄壳**：不自带提问/弹窗/IM 逻辑；正常 `ask` 调用 spawn 现有 `AskHuman --output json …` 子进程复用全流程。Codex `system` thread 在 spawn 前本地拒绝 |
 | D3 | 启动方式 | 新增 busybox 角色子命令 `AskHuman mcp`（与 `daemon`/`--popup`/`__agent-hook` 并列），用 `rmcp` 跑 STDIO server |
 | D4 | 工具与 Schema | 单工具 `ask`，精简入参：`message`（**渲染为 Markdown**）、`questions[{question, options[{text, recommended}]}]`、`files[]`（见 §5）。`markdown`/`single`/`selectOnly` 三个开关**不在 MCP 暴露**：`markdown` 恒为 on，`single`/`selectOnly` 属脚本/纯文本场景，不适合 MCP 模型自助。`questions` / `options` 的 item schema 必须直接内联，`ask.inputSchema` 不得依赖本地 `$ref`，避免部分客户端 / Code Mode 把嵌套数组退化为 `Array<unknown>` |
 | D5 | 输出（结构化 + 图片直返）| `ask` 工具**声明 output schema** 并返回**结构化 JSON**（`action`/`channel`/`status?`/`answers[{questionIndex, selectedOptions, userInput?, files[]}]`）：内部子进程以 `--output json` 调用、解析后规整为 `structuredContent`（**剔除仅供脚本用的 `selectedIndices`**），并按 MCP 规范在 `content` 里附一段序列化 JSON 文本（向后兼容）。**取消时（`action:"cancel"`）顶层带 `status` 引导文案**（必须重新确认直到用户明确答复，不得当作放行），该字段同时落进 CLI `--output json`（见 §5）。人类回复中的图片读出后以 `ImageContent`(base64+mimeType) 一并放入 `content` 数组直返模型；非图片文件以路径出现在 JSON `files` 中 |
@@ -59,6 +64,7 @@
   └─ 按配置 spawn: <AskHuman 绝对路径> mcp        （STDIO，session 期常驻）
        └─ rmcp STDIO server，暴露工具 `ask`
             └─ 收到 ask 调用：
+                 0. 检查 Codex turn metadata；system thread 直接返回 terminal error
                  1. 入参 Schema → argv（message / -q / -o / -o! / -f / --output json）
                  2. spawn 子进程: <AskHuman 绝对路径> <argv...>
                       · Unix：瘦客户端 → daemon（弹窗/IM/抢答/历史/落盘/排空重连全复用）
@@ -71,6 +77,24 @@
 - **不改 daemon IPC**：子进程就是普通的一次 CLI ask，daemon 视角与现状完全一致。
 - **并发**：客户端若并发调用 `ask`，各自 spawn 独立子进程，daemon 已支持并发请求（每请求独立 Coordinator）。
 - **环境透传**：子进程继承 MCP server 的 env（agent 探测变量、`ASKHUMAN_ENV_SOURCE_NAME`）与 cwd（项目归类按 cwd 向上找 .git，行为同现状）。
+
+### Codex system thread 前置边界
+
+Codex 把 per-turn metadata 放在请求 `_meta["x-codex-turn-metadata"]`；AskHuman 兼容该值为 JSON
+object 或 JSON 字符串，只对其中精确小写的 `thread_source: "system"` 命中。不得信任顶层任意同名
+`thread_source`。字段缺失、格式错误、`user`、`automation` 或未知值均 fail-open，避免误伤旧 Codex
+与其它 MCP 客户端。
+
+命中后 `ask`、`whats_next`、`todo_add` 返回 `isError: true`，固定文本为：
+
+```text
+AskHuman is disabled for this Codex system-generated background thread.
+Do not retry or contact the human; finish the host-requested non-interactive output directly.
+```
+
+该返回不伪造 human answer 或结束批准；三个 handler 都在参数业务校验、spawn 子 CLI、项目检测与 todo
+落盘前执行同一 guard。因此 Suggested prompts 即使不遵守 Codex 专属 Rule，也不会触发 popup、IM 或
+项目 todo。
 
 ## 5. `ask` 工具 Schema（草案）
 
@@ -156,6 +180,8 @@ argv 映射：`message`→首个位置参数（或经 `-q` 拆分）；每个 qu
 9. 三家 MCP 配置写入为最小化编辑：保留用户其它条目/注释；重复安装幂等；卸载只移除自有条目；解析失败不破坏文件（单测覆盖）。
 10. Windows：`AskHuman mcp` 经子进程单进程弹窗回退完成提问（无 daemon）。
 11. 既有 CLI 模式（Rule/Hook）与所有现有功能回归正常。
+12. raw `tools/call` 携带 Codex `thread_source=system` 时三个工具均返回固定 terminal error 且无副作用；
+    `user`、`automation`、缺失和异常 metadata 不命中。
 
 ## 10. 待实现期复核 / 开放细节
 
