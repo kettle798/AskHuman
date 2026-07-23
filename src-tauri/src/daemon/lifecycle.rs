@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 可执行文件指纹：用 size + 内容哈希判定「盘上二进制内容是否变化」。
 ///
@@ -24,20 +24,29 @@ pub struct Fingerprint {
 /// 按 (路径, mtime, size) 做持久缓存（`~/.askhuman/binhash.json`）：命中即复用已算哈希，
 /// 把稳态开销降到一次。缓存仅为加速，任何缺失/损坏都会回退到重新计算。
 pub fn current_fingerprint() -> Fingerprint {
-    let zero = Fingerprint { size: 0, hash: 0 };
     let Ok(path) = std::env::current_exe() else {
-        return zero;
+        return Fingerprint { size: 0, hash: 0 };
     };
-    let Ok(meta) = std::fs::metadata(&path) else {
+    fingerprint_at(&path)
+}
+
+/// Compute the content fingerprint at a stable executable path.
+///
+/// GUI Host caches its launch path before an in-place update. On Linux, `current_exe()` may resolve
+/// to a non-existent `... (deleted)` path after the running inode is replaced, so update detection
+/// and re-exec must keep using the pre-update disk path instead.
+pub fn fingerprint_at(path: &Path) -> Fingerprint {
+    let zero = Fingerprint { size: 0, hash: 0 };
+    let Ok(meta) = std::fs::metadata(path) else {
         return zero;
     };
     let size = meta.len();
     let mtime_ms = mtime_ms_of(&meta);
-    if let Some(hash) = cached_hash(&path, size, mtime_ms) {
+    if let Some(hash) = cached_hash(path, size, mtime_ms) {
         return Fingerprint { size, hash };
     }
-    let hash = hash_file(&path).unwrap_or(0);
-    store_cached_hash(&path, size, mtime_ms, hash);
+    let hash = hash_file(path).unwrap_or(0);
+    store_cached_hash(path, size, mtime_ms, hash);
     Fingerprint { size, hash }
 }
 
@@ -150,6 +159,125 @@ pub fn log_path() -> PathBuf {
     crate::paths::config_dir().join("daemon.log")
 }
 
+/// Privacy-safe audit context for a guard that rejected an interaction before side effects.
+///
+/// Keep this deliberately identifier-only: prompts, answers, transcript paths, and arbitrary
+/// metadata must never enter the daemon log through this interface.
+#[derive(Debug, Clone, Copy)]
+pub struct SuppressionAudit<'a> {
+    pub component: &'a str,
+    pub reason: &'a str,
+    pub tool: Option<&'a str>,
+    pub agent: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    pub thread_id: Option<&'a str>,
+    pub turn_id: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SuppressionAuditLine<'a> {
+    timestamp_ms: u64,
+    pid: u32,
+    event: &'static str,
+    component: &'a str,
+    action: &'static str,
+    reason: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn_id: Option<&'a str>,
+}
+
+fn suppression_audit_line_at(
+    audit: SuppressionAudit<'_>,
+    timestamp_ms: u64,
+    pid: u32,
+) -> Option<String> {
+    serde_json::to_string(&SuppressionAuditLine {
+        timestamp_ms,
+        pid,
+        event: "askhuman_guard",
+        component: audit.component,
+        action: "suppressed",
+        reason: audit.reason,
+        tool: audit.tool,
+        agent: audit.agent,
+        session_id: audit.session_id,
+        thread_id: audit.thread_id,
+        turn_id: audit.turn_id,
+    })
+    .ok()
+}
+
+/// Append one structured guard decision to `daemon.log` (best-effort).
+///
+/// The write is disabled in unit-test builds so handler tests never touch the user's real log.
+pub fn log_suppression_audit(audit: SuppressionAudit<'_>) {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let Some(mut line) = suppression_audit_line_at(audit, timestamp_ms, std::process::id()) else {
+        return;
+    };
+    line.push('\n');
+
+    #[cfg(not(test))]
+    {
+        use std::io::Write;
+
+        let path = log_path();
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+
+    #[cfg(test)]
+    let _ = line;
+}
+
+/// daemon.log 轮转阈值：超过即把现有内容挪到 `daemon.log.1`（覆盖上一代）并清空当前文件。
+/// 上限约束为「两代 × 5MB」，正常运行量级下够追溯数周。
+const LOG_ROTATE_LIMIT: u64 = 5 * 1024 * 1024;
+
+/// 超限则轮转 daemon.log（copy → truncate）。daemon 启动时与周期任务里调用。
+///
+/// 必须「copy 到 .1 再原地 truncate」而非 rename：daemon / spawn 的 stderr fd 以 O_APPEND
+/// 长期指着当前 inode，rename 后写入会跟着旧 inode 进 .1；truncate 保住 inode，
+/// O_APPEND 写自动从新 EOF（0）继续。竞态无虞：写者只 append，daemon 单实例（flock）。
+pub fn rotate_log_if_needed() {
+    let path = log_path();
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return;
+    };
+    if meta.len() <= LOG_ROTATE_LIMIT {
+        return;
+    }
+    let old = path.with_extension("log.1");
+    if std::fs::copy(&path, &old).is_ok() {
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&path) {
+            let _ = f.set_len(0);
+        }
+    }
+}
+
 /// Daemon 运行元信息（落 daemon.json，供调试/排查）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -259,6 +387,29 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_at_tracks_atomic_replacement() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AskHuman");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(b"old binary")
+            .unwrap();
+        let old = fingerprint_at(&path);
+
+        let staged = dir.path().join(".AskHuman.new");
+        std::fs::File::create(&staged)
+            .unwrap()
+            .write_all(b"new binary with different bytes")
+            .unwrap();
+        std::fs::rename(staged, &path).unwrap();
+
+        let new = fingerprint_at(&path);
+        assert_ne!(old, new);
+        assert_eq!(new.size, 31);
+    }
+
+    #[test]
     fn meta_round_trip() {
         let meta = DaemonMeta {
             pid: 1,
@@ -274,5 +425,37 @@ mod tests {
         assert_eq!(back.version, "9.9.9");
         assert_eq!(back.fingerprint.size, 6);
         assert_eq!(back.fingerprint.hash, 5);
+    }
+
+    #[test]
+    fn suppression_audit_is_structured_and_omits_missing_or_sensitive_fields() {
+        let line = suppression_audit_line_at(
+            SuppressionAudit {
+                component: "mcp_tool",
+                reason: "codex_system_thread",
+                tool: Some("whats_next"),
+                agent: Some("codex"),
+                session_id: Some("session-1"),
+                thread_id: Some("thread-1"),
+                turn_id: None,
+            },
+            123,
+            456,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["timestampMs"], 123);
+        assert_eq!(value["pid"], 456);
+        assert_eq!(value["event"], "askhuman_guard");
+        assert_eq!(value["component"], "mcp_tool");
+        assert_eq!(value["action"], "suppressed");
+        assert_eq!(value["reason"], "codex_system_thread");
+        assert_eq!(value["tool"], "whats_next");
+        assert_eq!(value["agent"], "codex");
+        assert_eq!(value["sessionId"], "session-1");
+        assert_eq!(value["threadId"], "thread-1");
+        assert!(value.get("turnId").is_none());
+        assert!(!line.contains("prompt"));
+        assert!(!line.contains("transcript"));
     }
 }

@@ -38,8 +38,8 @@ pub struct RequestEntry {
     pub coordinator: Arc<Coordinator>,
     /// 给 GUI Helper 的题目下发负载。
     pub show: ShowPayload,
-    /// 调用方 agent 会话 ID（CLI 从 env 探测、`TaskRequest.agent_session_id` 透传；MCP `env_clear`
-    /// 时为 None）。供 daemon「在途 AskHuman 豁免」按 session_id 刷新——覆盖无 pid 的 agent
+    /// 调用方 agent 会话 ID（CLI 从 env 探测；MCP 仅在每次调用取得可信绑定时透传）。
+    /// 供 daemon「在途 AskHuman 豁免」按 session_id 刷新——覆盖无 pid 的 agent
     /// （Codex 共享 app-server / Claude 被 scrub），使其等待人类回答期间不被「工作中兜底超时」降级。
     pub agent_session_id: Option<String>,
     /// GUI 发送端槽位（adapter 与连接处理器共享）。
@@ -48,6 +48,8 @@ pub struct RequestEntry {
     pub resolved_agent: Arc<Mutex<Option<ResolvedAgent>>>,
     /// GUI Helper 是否已连上（用于看门狗判定弹窗是否成功拉起）。
     pub gui_connected: AtomicBool,
+    /// GUI content and its hidden native window reached the presentation handshake.
+    pub gui_ready: AtomicBool,
     /// CLI 断开 / 请求结束时通知 GUI 连接处理器收尾。
     pub cancel: Arc<Notify>,
     /// 渲染结果发送端（协调器 finish 与看门狗共用；连接处理器从对应 rx 取）。
@@ -84,6 +86,9 @@ pub struct ConfirmEntry {
     pub gui: GuiSlot,
     pub gui_connected: AtomicBool,
     pub cancel: Arc<Notify>,
+    /// Set when the winning remember choice could not be persisted and the decision was
+    /// degraded to allow-once (spec codex-permission-remember D25); surfaces append a note.
+    pub memory_save_failed: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -104,6 +109,13 @@ impl InteractionEntry {
         match self {
             Self::Ask(entry) => &entry.token,
             Self::Confirm(entry) => &entry.token,
+        }
+    }
+
+    pub fn seq(&self) -> u64 {
+        match self {
+            Self::Ask(entry) => entry.seq,
+            Self::Confirm(entry) => entry.seq,
         }
     }
 
@@ -217,6 +229,7 @@ pub fn create_internal_confirm(
     let show = ShowPayload {
         request_id: request_id.clone(),
         interaction: InteractionRequest::Confirm((*request).clone()),
+        popup_edit: None,
         source: source_channel.to_string(),
         lang: lang.to_string(),
         project: project.to_string(),
@@ -244,9 +257,77 @@ pub fn create_internal_confirm(
         gui: Arc::new(Mutex::new(None)),
         gui_connected: AtomicBool::new(false),
         cancel: Arc::new(Notify::new()),
+        memory_save_failed: Arc::new(AtomicBool::new(false)),
     });
     entry.start_delivery(source_channel);
     Ok((entry, final_rx))
+}
+
+/// Build the two-phase commit finalizer for a permission memory task (spec
+/// codex-permission-remember §5.6/D25/D26): when the winning choice is a remember action,
+/// persist its rules before any surface may render a final state; on failure degrade the
+/// decision to `approve_once` and flag the entry so surfaces report the unsaved grant.
+fn memory_finalizer(
+    memory: Option<&crate::permission_rules::PermissionMemory>,
+    session_id: &str,
+    save_failed: Arc<AtomicBool>,
+) -> Option<crate::app::confirm_coordinator::ConfirmFinalizer> {
+    let saves = memory
+        .map(|memory| memory.saves.clone())
+        .filter(|saves| !saves.is_empty())?;
+    let session_id = session_id.to_string();
+    Some(Arc::new(move |mut result: crate::models::ConfirmResult| {
+        let Some(save) = saves.iter().find(|save| save.action_id == result.action_id) else {
+            return result;
+        };
+        // Native config write first: it is the durable promise of an "always allow"
+        // choice, so its failure degrades the whole decision (D25).
+        if let Some(write) = &save.native {
+            if let Err(error) = crate::permission_rules::apply_native_write(write) {
+                eprintln!(
+                    "[askhuman-daemon] native permission write failed ({error}); degrading {} to approve_once",
+                    save.action_id
+                );
+                save_failed.store(true, Ordering::SeqCst);
+                result.action_id = "approve_once".to_string();
+                return result;
+            }
+            eprintln!(
+                "[askhuman-daemon] native permission write applied for {}",
+                save.action_id
+            );
+        }
+        if save.rules.is_empty() {
+            return result;
+        }
+        match crate::permission_rules::save_rules(&session_id, save.namespace, &save.rules) {
+            Ok(()) => {
+                eprintln!(
+                    "[askhuman-daemon] permission memory saved: session={} action={} rules={}",
+                    session_id,
+                    save.action_id,
+                    save.rules.len()
+                );
+            }
+            Err(error) if save.native.is_some() => {
+                // The durable native write already succeeded; a failed session bridge only
+                // means this conversation may be asked again. Keep the chosen action.
+                eprintln!(
+                    "[askhuman-daemon] session bridge save failed ({error:?}) after native write for {}",
+                    save.action_id
+                );
+            }
+            Err(error) => {
+                eprintln!(
+                    "[askhuman-daemon] permission memory save failed ({error:?}); degrading {} to approve_once",
+                    save.action_id
+                );
+                save_failed.store(true, Ordering::SeqCst);
+                result.action_id = "approve_once".to_string();
+            }
+        }
+        result
+    }))
 }
 
 #[derive(Default)]
@@ -292,6 +373,7 @@ impl RequestRegistry {
         request.select_only = task.select_only;
         request.single = task.single;
         request.output_format = task.output_format;
+        request.whats_next = task.whats_next;
 
         let (final_tx, final_rx) = tokio::sync::mpsc::unbounded_channel();
         let coordinator = Coordinator::new_ipc(
@@ -300,7 +382,11 @@ impl RequestRegistry {
             final_tx.clone(),
             task.project.clone(),
             task.source.clone(),
-            task.agent_kind.clone(),
+            crate::app::coordinator::HistoryBinding {
+                agent_kind: task.agent_kind.clone(),
+                agent_session_id: task.agent_session_id.clone(),
+                mcp_instance_id: task.mcp_instance_id.clone(),
+            },
             task.record_history,
         );
 
@@ -313,6 +399,7 @@ impl RequestRegistry {
         let show = ShowPayload {
             request_id: request_id.clone(),
             interaction: InteractionRequest::Ask(request),
+            popup_edit: None,
             source: task.source,
             lang: task.lang,
             project: task.project,
@@ -335,6 +422,7 @@ impl RequestRegistry {
             gui,
             resolved_agent: Arc::new(Mutex::new(None)),
             gui_connected: AtomicBool::new(false),
+            gui_ready: AtomicBool::new(false),
             cancel: Arc::new(Notify::new()),
             final_tx,
         });
@@ -371,6 +459,21 @@ impl RequestRegistry {
         if task.agent_session_id.trim().is_empty() {
             return Err("confirm requires an agent session id".to_string());
         }
+        if let Some(intent) = task.popup_edit.as_ref() {
+            crate::permission_diff::validate_intent(intent, &task.agent_kind, &task.project)?;
+        }
+        if let Some(memory) = task.memory.as_ref() {
+            if task.agent_kind != "codex" {
+                return Err("permission memory is supported for codex only".to_string());
+            }
+            let choice_ids: Vec<&str> = task
+                .spec
+                .choices
+                .iter()
+                .map(|choice| choice.id.as_str())
+                .collect();
+            memory.validate(&choice_ids)?;
+        }
         let request_id = uuid::Uuid::new_v4().to_string();
         let token = uuid::Uuid::new_v4().to_string();
         let created_at_ms = crate::perf::now_ms() as u64;
@@ -382,10 +485,17 @@ impl RequestRegistry {
             expires_at_ms,
         )?);
         let (final_tx, final_rx) = tokio::sync::mpsc::unbounded_channel();
-        let coordinator = ConfirmCoordinator::new(request.clone(), final_tx);
+        let memory_save_failed = Arc::new(AtomicBool::new(false));
+        let finalizer = memory_finalizer(
+            task.memory.as_ref(),
+            &task.agent_session_id,
+            memory_save_failed.clone(),
+        );
+        let coordinator = ConfirmCoordinator::with_finalizer(request.clone(), final_tx, finalizer);
         let show = ShowPayload {
             request_id: request_id.clone(),
             interaction: InteractionRequest::Confirm((*request).clone()),
+            popup_edit: task.popup_edit.clone(),
             source: task.source.clone(),
             lang: task.lang.clone(),
             project: task.project.clone(),
@@ -413,6 +523,7 @@ impl RequestRegistry {
             gui: Arc::new(Mutex::new(None)),
             gui_connected: AtomicBool::new(false),
             cancel: Arc::new(Notify::new()),
+            memory_save_failed,
         });
         let mut inner = self.inner.lock().unwrap();
         inner.confirm_by_id.insert(request_id, entry.clone());
@@ -556,8 +667,8 @@ impl RequestRegistry {
         entries.into_iter().map(|(_, info)| info).collect()
     }
 
-    /// 聚焦某请求的弹窗：向其 GUI 连接下发 `FocusPopup`。返回是否成功投递（无弹窗连接则 false）。
-    pub fn focus_popup(&self, request_id: &str) -> bool {
+    /// Send one message to a request's live popup helper.
+    pub fn send_to_gui(&self, request_id: &str, msg: ServerMsg) -> bool {
         let inner = self.inner.lock().unwrap();
         let gui = if let Some(entry) = inner.by_id.get(request_id) {
             &entry.gui
@@ -570,11 +681,7 @@ impl RequestRegistry {
             return false;
         };
         match slot.as_ref() {
-            Some(tx) => tx
-                .send(ServerMsg::FocusPopup {
-                    request_id: request_id.to_string(),
-                })
-                .is_ok(),
+            Some(tx) => tx.send(msg).is_ok(),
             None => false,
         }
     }
@@ -680,6 +787,8 @@ mod tests {
         ConfirmChoice, ConfirmDetail, ConfirmField, ConfirmFieldKind, ConfirmPresentation,
         ConfirmSpec,
     };
+    use crate::permission_diff::adapters::{normalize_permission_edit, AdapterOutcome};
+    use serde_json::json;
 
     fn confirm_task() -> ConfirmTask {
         let context = [
@@ -727,13 +836,43 @@ mod tests {
                 },
                 dismiss_action_id: "deny".into(),
             },
+            popup_edit: None,
             source: "Claude Code".into(),
             lang: "en".into(),
             project: "/tmp/project".into(),
             agent_kind: "claude".into(),
             agent_session_id: "session-1".into(),
             caller_pid: 42,
+            memory: None,
         }
+    }
+
+    #[test]
+    fn ask_registry_propagates_exact_recovery_binding_into_coordinator() {
+        let task: TaskRequest = serde_json::from_value(json!({
+            "message": {"text": "context", "files": []},
+            "questions": [{"message": "continue?", "predefinedOptions": []}],
+            "isMarkdown": true,
+            "source": "Cursor",
+            "lang": "en",
+            "project": "/tmp/project",
+            "agentKind": "cursor",
+            "agentSessionId": "conversation-1",
+            "mcpInstanceId": "instance-1",
+            "fromMcp": true
+        }))
+        .unwrap();
+        let registry = RequestRegistry::new();
+        let (entry, _rx) = registry.create(task);
+        assert_eq!(
+            entry.coordinator.recovery_binding(),
+            (
+                Some("cursor".into()),
+                Some("conversation-1".into()),
+                Some("instance-1".into())
+            )
+        );
+        assert_eq!(entry.agent_session_id.as_deref(), Some("conversation-1"));
     }
 
     #[test]
@@ -763,6 +902,51 @@ mod tests {
             registry.attach_gui(&entry.token),
             Some(InteractionEntry::Confirm(_))
         ));
+    }
+
+    #[test]
+    fn popup_edit_is_forwarded_only_in_show_payload() {
+        let mut task = confirm_task();
+        let AdapterOutcome::Intent(intent) = normalize_permission_edit(
+            "claude",
+            "Edit",
+            &json!({
+                "file_path": "/tmp/project/a.txt",
+                "old_string": "old",
+                "new_string": "new"
+            }),
+            "/tmp/project",
+        ) else {
+            panic!("expected intent");
+        };
+        task.popup_edit = Some(intent);
+        let registry = RequestRegistry::new();
+        let (entry, _rx) = registry.create_confirm(task).unwrap();
+        assert!(entry.show.popup_edit.is_some());
+        let request_json = serde_json::to_string(&entry.request).unwrap();
+        assert!(!request_json.contains("popupEdit"));
+        assert!(!request_json.contains("oldText"));
+    }
+
+    #[test]
+    fn mismatched_popup_edit_is_rejected() {
+        let mut task = confirm_task();
+        let AdapterOutcome::Intent(mut intent) = normalize_permission_edit(
+            "claude",
+            "Edit",
+            &json!({
+                "file_path": "/tmp/project/a.txt",
+                "old_string": "old",
+                "new_string": "new"
+            }),
+            "/tmp/project",
+        ) else {
+            panic!("expected intent");
+        };
+        intent.agent_kind = "codex".into();
+        task.popup_edit = Some(intent);
+        let registry = RequestRegistry::new();
+        assert!(registry.create_confirm(task).is_err());
     }
 
     #[test]

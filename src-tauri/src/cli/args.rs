@@ -25,7 +25,7 @@ pub struct AskArgs {
     pub message_text: String,
     /// `-f`/`--file` 给出的原始路径（按出现顺序，归 Message，未做解析/校验）。
     pub message_files: Vec<String>,
-    /// 问题列表（解析+归一化后恒 ≥1）。
+    /// 问题列表（解析+归一化后恒 ≥1；`whats_next` 时恒空，由调用层生成固定问题）。
     pub questions: Vec<QuestionArgs>,
     /// 严格选择：禁用自由文本 / 回复附件，只能勾选预设项（全局）。
     pub select_only: bool,
@@ -33,6 +33,11 @@ pub struct AskArgs {
     pub single: bool,
     /// 结果输出格式（全局）。
     pub output_format: crate::models::OutputFormat,
+    /// whats-next request (spec todo-whats-next D2): Message is an optional completion report;
+    /// the question is fixed, while `-o`/`-o!` supply optional suggested tasks before todos.
+    pub whats_next: bool,
+    /// Suggested whats-next tasks from `-o`/`-o!`; always empty for ordinary asks.
+    pub whats_next_options: Vec<OptArg>,
 }
 
 /// 解析 `AskHuman <Message> [-f <path>] [-q <text> [-o <opt>] ...]`。
@@ -64,6 +69,7 @@ pub fn parse_ask(
     let mut select_only = false;
     let mut single = false;
     let mut output_format = crate::models::OutputFormat::Text;
+    let mut whats_next = false;
 
     let mut seen_positional = false;
     let mut seen_question_flag = false;
@@ -146,6 +152,10 @@ pub fn parse_ask(
                 seen_positional = true;
                 i += 1;
             }
+            "--whats-next" => {
+                whats_next = true;
+                i += 1;
+            }
             a if a.starts_with('-') => {
                 return Err(tr(lang, "cli.unknownOptionColon").replace("{opt}", a));
             }
@@ -159,6 +169,35 @@ pub fn parse_ask(
                 i += 1;
             }
         }
+    }
+
+    // whats-next fixes the question but accepts `-o`/`-o!` suggestions. Other question-shaping
+    // flags remain incompatible (spec D2). Message may be empty, so skip ordinary normalization.
+    if whats_next {
+        let conflict = if seen_question_flag {
+            Some("-q")
+        } else if select_only {
+            Some("--select-only")
+        } else if single {
+            Some("--single")
+        } else if output_format != crate::models::OutputFormat::Text {
+            Some("--output")
+        } else {
+            None
+        };
+        if let Some(opt) = conflict {
+            return Err(tr(lang, "cli.whatsNextConflict").replace("{opt}", opt));
+        }
+        return Ok(AskArgs {
+            message_text,
+            message_files,
+            questions: Vec::new(),
+            select_only: false,
+            single: true,
+            output_format: crate::models::OutputFormat::Text,
+            whats_next: true,
+            whats_next_options: lead_options,
+        });
     }
 
     // 有效性校验（归一化前）：至少有 Message 文本 / 一个 -q / 一个 -f；仅 -o 不算有效。
@@ -186,6 +225,8 @@ pub fn parse_ask(
         select_only,
         single,
         output_format,
+        whats_next: false,
+        whats_next_options: Vec::new(),
     })
 }
 
@@ -573,5 +614,66 @@ mod tests {
         assert!(pa(&v(&["X", "--select-only"])).is_err());
         let p = pa(&v(&["X", "-o", "A", "--select-only"])).unwrap();
         assert!(p.select_only);
+    }
+
+    // ===== --whats-next（spec todo-whats-next D2）=====
+
+    #[test]
+    fn whats_next_bare_is_valid_without_content() {
+        // Message 可空（完成报告可选）；问题由调用层生成，解析结果 questions 恒空。
+        let p = pa(&v(&["--whats-next"])).unwrap();
+        assert!(p.whats_next);
+        assert_eq!(p.message_text, "");
+        assert!(p.questions.is_empty());
+        assert!(p.single); // 单选逐条派发
+        assert!(!p.select_only);
+        assert!(p.whats_next_options.is_empty());
+    }
+
+    #[test]
+    fn whats_next_keeps_message_and_files() {
+        // 位置参数 Message 不被提升为问题（与普通提问不同）。
+        let p = pa(&v(&["--whats-next", "done report", "-f", "r.md"])).unwrap();
+        assert!(p.whats_next);
+        assert_eq!(p.message_text, "done report");
+        assert_eq!(p.message_files, v(&["r.md"]));
+        assert!(p.questions.is_empty());
+    }
+
+    #[test]
+    fn whats_next_with_stdin_message() {
+        let p = pas(&v(&["--whats-next", "--stdin"]), "report body").unwrap();
+        assert!(p.whats_next);
+        assert_eq!(p.message_text, "report body");
+        assert!(p.questions.is_empty());
+    }
+
+    #[test]
+    fn whats_next_accepts_suggested_options_and_rejects_other_question_flags() {
+        assert!(pa(&v(&["--whats-next", "-q", "Q1"])).is_err());
+        let p = pa(&v(&[
+            "--whats-next",
+            "M",
+            "-o",
+            "Write docs",
+            "-o!",
+            "Add tests",
+        ]))
+        .unwrap();
+        assert_eq!(p.whats_next_options.len(), 2);
+        assert_eq!(p.whats_next_options[0].text, "Write docs");
+        assert!(!p.whats_next_options[0].recommended);
+        assert_eq!(p.whats_next_options[1].text, "Add tests");
+        assert!(p.whats_next_options[1].recommended);
+        assert!(pa(&v(&["--whats-next", "--select-only"])).is_err());
+        assert!(pa(&v(&["--whats-next", "--single"])).is_err());
+        assert!(pa(&v(&["--whats-next", "--output", "json"])).is_err());
+    }
+
+    #[test]
+    fn whats_next_flag_position_is_free() {
+        let p = pa(&v(&["report", "--whats-next"])).unwrap();
+        assert!(p.whats_next);
+        assert_eq!(p.message_text, "report");
     }
 }

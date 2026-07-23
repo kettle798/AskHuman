@@ -278,23 +278,17 @@ fn grok_backfill_times(session_dir: Option<&Path>, events: &mut [TranscriptEvent
     let mut ti = 0usize;
     for ev in events.iter_mut() {
         match ev {
-            TranscriptEvent::UserText { at, .. } if at.is_none() => {
-                if ui < user_ts.len() {
-                    *at = Some(user_ts[ui]);
-                    ui += 1;
-                }
+            TranscriptEvent::UserText { at, .. } if at.is_none() && ui < user_ts.len() => {
+                *at = Some(user_ts[ui]);
+                ui += 1;
             }
-            TranscriptEvent::AssistantText { at, .. } if at.is_none() => {
-                if ai < asst_ts.len() {
-                    *at = Some(asst_ts[ai]);
-                    ai += 1;
-                }
+            TranscriptEvent::AssistantText { at, .. } if at.is_none() && ai < asst_ts.len() => {
+                *at = Some(asst_ts[ai]);
+                ai += 1;
             }
-            TranscriptEvent::ToolCall { at, .. } if at.is_none() => {
-                if ti < tool_ts.len() {
-                    *at = Some(tool_ts[ti]);
-                    ti += 1;
-                }
+            TranscriptEvent::ToolCall { at, .. } if at.is_none() && ti < tool_ts.len() => {
+                *at = Some(tool_ts[ti]);
+                ti += 1;
             }
             _ => {}
         }
@@ -883,8 +877,8 @@ fn clean_user(text: &str) -> (String, Option<String>) {
 
 fn is_injected_or_system_blob(t: &str) -> bool {
     let head = t.chars().take(200).collect::<String>().to_ascii_lowercase();
-    if t.starts_with('<') {
-        if t.starts_with("<environment_context>")
+    if t.starts_with('<')
+        && (t.starts_with("<environment_context>")
             || t.starts_with("<user_info>")
             || t.starts_with("<git_status>")
             || t.starts_with("<INSTRUCTIONS>")
@@ -893,10 +887,9 @@ fn is_injected_or_system_blob(t: &str) -> bool {
             || t.starts_with("<agent_skills>")
             || t.starts_with("<available_skills>")
             || t.starts_with("<mcp_")
-            || t.starts_with("<functions>")
-        {
-            return true;
-        }
+            || t.starts_with("<functions>"))
+    {
+        return true;
     }
     // Common rule-file dumps / CLI system prompts.
     if head.contains("# agents.md")
@@ -929,8 +922,6 @@ fn is_noise_assistant(t: &str) -> bool {
         || head == "understood."
 }
 
-/// Strip trailing/leading system-reminder blocks while keeping the real ask.
-
 /// Cursor embeds wall-clock labels inside user text:
 /// `<timestamp>Monday, May 25, 2026, 7:57 AM (UTC+8)</timestamp>`
 fn extract_cursor_timestamp(text: &str) -> (String, Option<String>) {
@@ -952,6 +943,7 @@ fn extract_cursor_timestamp(text: &str) -> (String, Option<String>) {
     }
 }
 
+/// Strip trailing/leading system-reminder blocks while keeping the real ask.
 fn strip_system_reminders(t: &str) -> String {
     let mut s = t.to_string();
     // Remove <system-reminder>…</system-reminder> chunks.
@@ -1100,11 +1092,11 @@ mod tests {
                 if let Ok(rd) = std::fs::read_dir(e.path()) {
                     for f in rd.flatten() {
                         let path = f.path();
-                        if path.extension().and_then(|x| x.to_str()) == Some("jsonl") {
-                            if path.metadata().map(|m| m.len()).unwrap_or(0) > 5000 {
-                                found = Some(path);
-                                break;
-                            }
+                        if path.extension().and_then(|x| x.to_str()) == Some("jsonl")
+                            && path.metadata().map(|m| m.len()).unwrap_or(0) > 5000
+                        {
+                            found = Some(path);
+                            break;
                         }
                     }
                 }

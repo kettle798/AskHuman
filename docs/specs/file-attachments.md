@@ -1,6 +1,6 @@
 # 需求：AskHuman 提问附带文件（`-f` 文件附件）
 
-> 状态：已确认（待按计划实现）
+> 状态：已实现
 > 关联计划：`docs/plans/file-attachments.md`
 
 ## 1. 背景
@@ -73,5 +73,14 @@ AskHuman "请看看这个文档有没有问题？" -f ~/Documents/some_file.md -
   - **拖出**到其它应用（引入 `tauri-plugin-drag`，拖到 Dock/应用图标用其打开）；拖拽预览用 `NSWorkspace` 取的真实文件图标（光栅化到 64×64）。拖回窗口内的 `-f` 附件按路径匹配忽略，不计入回复。
   - **右键菜单**（原生 `NSMenu`，Finder 风格）：打开 / 打开方式▸（应用列表+图标、其他…）/ 快速查看 / 在访达中显示 / 拷贝文件 / 拷贝路径。
 - **新增「回复文件」方向（人→AI）**：弹窗支持拖入非图片文件，作为回复文件附件（输入框下方胶囊、可移除），提交后在 stdout 新增 `[文件]` 区块输出其绝对路径（不复制）。注意这与 D1 不冲突：D1 约束的是 `-f` 提问附件（AI→人）不进 stdout；`[文件]` 属于回复方向，与 `[图片]` 同类。
-- **来源名定制**：新增环境变量 `ASKHUMAN_ENV_SOURCE_NAME`，定制弹窗标题与 Telegram 消息头「Question from {名称}」，缺省回退「the Loop」。
+- **来源名定制**：环境变量 `ASKHUMAN_ENV_SOURCE_NAME` 定制弹窗与普通 IM Message / Question 标题的
+  source；缺省优先显示探测到的 Agent，再回退「the Loop」。IM 标题的 Agent / 项目组合规则见
+  `docs/specs/im-request-origin.md`。
 - 因引入 `tauri-plugin-drag`，相应放宽「不引入新 Tauri 插件」约束（仅限该拖出能力）；其余打开/预览/读取缩略图仍为自定义命令。
+
+### 2026-07（Quick Look 与作答并行）
+
+- Quick Look 打开后，Popup 内点击、选择 Message、编辑答案、操作编辑器按钮和切题都不主动关闭面板；附件选中高亮继续保留。
+- 用户回到 Popup 后，面板稍后手动关闭不得把焦点从 textarea / 当前控件抢回附件；若用户始终在 Quick Look 内操作并关闭，仍可恢复附件焦点。
+- 焦点不在 textarea / input 时，选中附件后空格在“打开 / 关闭预览”间切换；输入框内空格始终输入字符。Esc 和面板关闭按钮沿用原生手动关闭。
+- 提交、取消或 Popup 销毁时主动关闭预览；仅切题不关闭。

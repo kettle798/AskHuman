@@ -11,10 +11,10 @@
 //! 若 env 探测出的「真实运行家族」与意图家族不一致，则**跳过**本次上报，避免重复登记。
 
 use std::collections::HashMap;
-use std::io::Read;
-use std::sync::mpsc;
-use std::time::Duration;
+use std::io::{BufReader, Cursor, IsTerminal, Read};
 
+use serde::de::IgnoredAny;
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -22,7 +22,8 @@ use super::detect;
 use super::AgentKind;
 use crate::ipc::{ClientMsg, ToolPhase, ToolReport};
 
-const MAX_HOOK_STDIN_BYTES: u64 = 1024 * 1024;
+const MAX_HOOK_STDIN_BYTES: usize = 10 * 1024 * 1024;
+const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 
 /// 入口：`args` 为 `__agent-hook` 之后的参数（`[<agent>, <event>]`）。失败一律静默退出。
 pub fn run(args: &[String]) {
@@ -78,7 +79,7 @@ pub fn run(args: &[String]) {
     // 读回一帧裁决；PostToolUse 与其余事件保持即发即走。
     let interject_poll = matches!(event, super::LifecycleEvent::Activity)
         && intended != AgentKind::Grok
-        && stdin.as_ref().and_then(|v| detect_phase(v)) == Some(ToolPhase::Pre);
+        && stdin.as_ref().and_then(detect_phase) == Some(ToolPhase::Pre);
 
     let msg = ClientMsg::AgentEvent {
         agent: intended.as_str().to_string(),
@@ -242,7 +243,7 @@ fn detect_phase(v: &Value) -> Option<ToolPhase> {
 }
 
 /// 取工具名（各家字段兼容）。
-fn tool_name(v: &Value) -> Option<String> {
+pub(super) fn tool_name(v: &Value) -> Option<String> {
     for k in ["tool_name", "toolName", "tool"] {
         if let Some(s) = v.get(k).and_then(|x| x.as_str()) {
             let s = s.trim();
@@ -255,7 +256,7 @@ fn tool_name(v: &Value) -> Option<String> {
 }
 
 /// 取工具输入（对象或原始 JSON 字符串，`classify_tool` 内部再 `parse_args`）。
-fn tool_input(v: &Value) -> Option<Value> {
+pub(super) fn tool_input(v: &Value) -> Option<Value> {
     for k in ["tool_input", "toolInput", "input", "arguments"] {
         if let Some(x) = v.get(k) {
             if !x.is_null() {
@@ -296,7 +297,7 @@ pub(super) fn resolve_session_id(
 }
 
 /// 解析工作目录：stdin JSON `cwd` → env 工程目录 → 当前目录。
-pub(super) fn resolve_cwd(env: &HashMap<String, String>, stdin: Option<&Value>) -> Option<String> {
+pub(crate) fn resolve_cwd(env: &HashMap<String, String>, stdin: Option<&Value>) -> Option<String> {
     if let Some(v) = stdin {
         if let Some(s) = v.get("cwd").and_then(|x| x.as_str()) {
             if !s.trim().is_empty() {
@@ -320,29 +321,50 @@ pub(super) fn resolve_cwd(env: &HashMap<String, String>, stdin: Option<&Value>) 
         .map(|p| p.display().to_string())
 }
 
-/// Read JSON delivered to a hook over stdin. Input is time- and size-bounded so malformed hook
-/// callers cannot leave the reporter hanging or allocate an unbounded buffer.
+/// Read JSON delivered to a hook over stdin.
+///
+/// Inputs up to 10 MiB keep the original full-JSON behavior. Larger inputs are replayed through a
+/// streaming summary parser that retains only lifecycle metadata and ignores large tool bodies.
+/// Both paths consume stdin through EOF so the hook caller never sees a broken pipe merely because
+/// its payload exceeded our in-memory full-JSON limit.
 pub(super) fn read_stdin_json() -> Option<Value> {
-    use std::io::IsTerminal;
-    if std::io::stdin().is_terminal() {
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
         return None;
     }
-    // Hook callers normally write and close stdin immediately. Keep the blocking read isolated.
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let parsed = std::io::stdin()
-            .take(MAX_HOOK_STDIN_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .ok()
-            .and_then(|_| parse_stdin_bytes(&bytes));
-        let _ = tx.send(parsed);
-    });
-    rx.recv_timeout(Duration::from_millis(500)).ok()?
+    let mut locked = stdin.lock();
+    read_stdin_json_from(&mut locked, MAX_HOOK_STDIN_BYTES)
 }
 
-fn parse_stdin_bytes(bytes: &[u8]) -> Option<Value> {
-    if bytes.len() as u64 > MAX_HOOK_STDIN_BYTES {
+fn read_stdin_json_from<R: Read>(reader: &mut R, max_bytes: usize) -> Option<Value> {
+    let mut prefix = Vec::new();
+    let prefix_result = reader
+        .by_ref()
+        .take(max_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut prefix);
+    if prefix_result.is_err() {
+        let _ = std::io::copy(reader, &mut std::io::sink());
+        return None;
+    }
+
+    if prefix.len() <= max_bytes {
+        return parse_stdin_bytes(&prefix, max_bytes);
+    }
+
+    // Replay the retained prefix, then continue directly from stdin. `IgnoredAny` makes
+    // serde_json validate and skip large response/input values without materializing their base64
+    // strings or nested JSON in memory. BufReader avoids byte-at-a-time reads from the pipe.
+    let replay = Cursor::new(prefix).chain(reader.by_ref());
+    let mut replay = BufReader::with_capacity(STREAM_BUFFER_BYTES, replay);
+    let summary = serde_json::from_reader::<_, HookInputSummary>(&mut replay).ok();
+    // A malformed document may make serde_json return before EOF. Drain whatever remains so the
+    // writer still cannot receive SIGPIPE from our size/error handling path.
+    let _ = std::io::copy(&mut replay, &mut std::io::sink());
+    summary.map(HookInputSummary::into_value)
+}
+
+fn parse_stdin_bytes(bytes: &[u8], max_bytes: usize) -> Option<Value> {
+    if bytes.len() > max_bytes {
         return None;
     }
     let trimmed = std::str::from_utf8(bytes).ok()?.trim();
@@ -352,6 +374,144 @@ fn parse_stdin_bytes(bytes: &[u8]) -> Option<Value> {
     serde_json::from_str(trimmed).ok()
 }
 
+/// Minimal metadata retained when a hook payload is too large for full in-memory parsing.
+///
+/// Potentially large values use `IgnoredAny`, whose serde_json implementation skips strings and
+/// containers in place. The reconstructed `Value` intentionally contains only fields consumed by
+/// lifecycle reporting; tool input details and response bodies are not needed to close a
+/// PostToolUse activity.
+#[derive(Default, Deserialize)]
+struct HookInputSummary {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default, rename = "sessionId")]
+    session_id_camel: Option<String>,
+    #[serde(default)]
+    conversation_id: Option<String>,
+    #[serde(default, rename = "conversationId")]
+    conversation_id_camel: Option<String>,
+    #[serde(default)]
+    thread_id: Option<String>,
+    #[serde(default, rename = "threadId")]
+    thread_id_camel: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    hook_event_name: Option<String>,
+    #[serde(default, rename = "hookEventName")]
+    hook_event_name_camel: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    tool_name: Option<String>,
+    #[serde(default, rename = "toolName")]
+    tool_name_camel: Option<String>,
+    #[serde(default)]
+    tool: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    transcript_path: Option<String>,
+    #[serde(default, rename = "transcriptPath")]
+    transcript_path_camel: Option<String>,
+
+    #[serde(default)]
+    tool_input: Option<IgnoredAny>,
+    #[serde(default, rename = "toolInput")]
+    tool_input_camel: Option<IgnoredAny>,
+    #[serde(default)]
+    input: Option<IgnoredAny>,
+    #[serde(default)]
+    arguments: Option<IgnoredAny>,
+    #[serde(default)]
+    tool_calls: Option<IgnoredAny>,
+
+    #[serde(default)]
+    tool_response: Option<IgnoredAny>,
+    #[serde(default)]
+    tool_result: Option<IgnoredAny>,
+    #[serde(default)]
+    tool_output: Option<IgnoredAny>,
+    #[serde(default)]
+    function_call_output: Option<IgnoredAny>,
+    #[serde(default)]
+    response: Option<IgnoredAny>,
+    #[serde(default)]
+    output: Option<IgnoredAny>,
+}
+
+impl HookInputSummary {
+    fn into_value(self) -> Value {
+        let mut map = serde_json::Map::new();
+
+        let session_id = self
+            .session_id
+            .or(self.session_id_camel)
+            .or(self.conversation_id)
+            .or(self.conversation_id_camel)
+            .or(self.thread_id)
+            .or(self.thread_id_camel);
+        insert_summary_string(&mut map, "session_id", session_id);
+        insert_summary_string(&mut map, "cwd", self.cwd);
+        insert_summary_string(
+            &mut map,
+            "hook_event_name",
+            self.hook_event_name.or(self.hook_event_name_camel),
+        );
+        insert_summary_string(&mut map, "source", self.source);
+        insert_summary_string(
+            &mut map,
+            "tool_name",
+            self.tool_name.or(self.tool_name_camel).or(self.tool),
+        );
+        insert_summary_string(&mut map, "status", self.status);
+        insert_summary_string(
+            &mut map,
+            "transcript_path",
+            self.transcript_path.or(self.transcript_path_camel),
+        );
+
+        if [
+            self.tool_input,
+            self.tool_input_camel,
+            self.input,
+            self.arguments,
+            self.tool_calls,
+        ]
+        .into_iter()
+        .any(|field| field.is_some())
+        {
+            map.insert("tool_input".to_string(), Value::Object(Default::default()));
+            map.insert("toolInputTruncated".to_string(), Value::Bool(true));
+        }
+        if [
+            self.tool_response,
+            self.tool_result,
+            self.tool_output,
+            self.function_call_output,
+            self.response,
+            self.output,
+        ]
+        .into_iter()
+        .any(|field| field.is_some())
+        {
+            map.insert("tool_response".to_string(), Value::Bool(true));
+        }
+
+        Value::Object(map)
+    }
+}
+
+fn insert_summary_string(
+    map: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<String>,
+) {
+    if let Some(value) = value {
+        map.insert(key.to_string(), Value::String(value));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,14 +519,91 @@ mod tests {
 
     #[test]
     fn hook_stdin_parser_rejects_empty_malformed_invalid_utf8_and_oversize() {
-        assert!(parse_stdin_bytes(b"").is_none());
-        assert!(parse_stdin_bytes(b"not json").is_none());
-        assert!(parse_stdin_bytes(&[0xff]).is_none());
-        assert!(parse_stdin_bytes(&vec![b' '; MAX_HOOK_STDIN_BYTES as usize + 1]).is_none());
+        assert!(parse_stdin_bytes(b"", 64).is_none());
+        assert!(parse_stdin_bytes(b"not json", 64).is_none());
+        assert!(parse_stdin_bytes(&[0xff], 64).is_none());
+        assert!(parse_stdin_bytes(&[b' '; 65], 64).is_none());
         assert_eq!(
-            parse_stdin_bytes(br#" {"session_id":"s1"} "#).unwrap()["session_id"],
+            parse_stdin_bytes(br#" {"session_id":"s1"} "#, 64).unwrap()["session_id"],
             "s1"
         );
+    }
+
+    #[test]
+    fn oversized_post_tool_input_is_drained_and_summarized() {
+        let payload = serde_json::to_vec(&json!({
+            "session_id": "session-large",
+            "cwd": "/tmp/project",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "view_image",
+            "tool_input": {"path": "/tmp/large.png"},
+            "tool_response": format!("data:image/png;base64,{}", "A".repeat(4_096)),
+            "tool_use_id": "call-1"
+        }))
+        .unwrap();
+        let mut reader = Cursor::new(payload.as_slice());
+
+        let parsed = read_stdin_json_from(&mut reader, 128).unwrap();
+
+        assert_eq!(reader.position(), payload.len() as u64);
+        assert_eq!(parsed["session_id"], "session-large");
+        assert_eq!(parsed["cwd"], "/tmp/project");
+        assert_eq!(parsed["hook_event_name"], "PostToolUse");
+        let tool = extract_tool(Some(&parsed)).unwrap();
+        assert_eq!(tool.name, "view_image");
+        assert_eq!(tool.phase, ToolPhase::Post);
+        assert_eq!(tool.object, None);
+    }
+
+    #[test]
+    fn small_hook_input_preserves_full_tool_details() {
+        let payload = serde_json::to_vec(&json!({
+            "session_id": "session-small",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Shell",
+            "tool_input": {"command": "cargo test"}
+        }))
+        .unwrap();
+        let mut reader = Cursor::new(payload.as_slice());
+
+        let parsed = read_stdin_json_from(&mut reader, 1_024).unwrap();
+        let tool = extract_tool(Some(&parsed)).unwrap();
+
+        assert_eq!(tool.phase, ToolPhase::Pre);
+        assert_eq!(tool.object.as_deref(), Some("cargo test"));
+    }
+
+    #[test]
+    fn oversized_summary_preserves_heuristic_phase_markers() {
+        for (field, expected) in [
+            ("tool_input", ToolPhase::Pre),
+            ("tool_response", ToolPhase::Post),
+        ] {
+            let payload = serde_json::to_vec(&json!({
+                "session_id": "session-phase",
+                "tool_name": "custom_tool",
+                (field): "A".repeat(4_096)
+            }))
+            .unwrap();
+            let mut reader = Cursor::new(payload.as_slice());
+
+            let parsed = read_stdin_json_from(&mut reader, 128).unwrap();
+            assert_eq!(extract_tool(Some(&parsed)).unwrap().phase, expected);
+        }
+    }
+
+    #[test]
+    fn malformed_oversized_input_is_still_drained() {
+        let payload = format!("{{not-json:{}", "x".repeat(4_096));
+        let mut reader = Cursor::new(payload.as_bytes());
+
+        assert!(read_stdin_json_from(&mut reader, 64).is_none());
+        assert_eq!(reader.position(), payload.len() as u64);
+    }
+
+    #[test]
+    fn full_json_limit_is_ten_mib() {
+        assert_eq!(MAX_HOOK_STDIN_BYTES, 10 * 1024 * 1024);
     }
 
     #[test]

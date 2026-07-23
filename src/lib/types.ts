@@ -11,6 +11,8 @@ export interface AskRequest {
   single: boolean;
   /** 结果输出格式（全局；仅影响 CLI 输出，弹窗不关心）。 */
   outputFormat: OutputFormat;
+  /** whats-next 提问（spec todo-whats-next D2/D7）：待办已是问题选项，折叠待办区只留增删。 */
+  whatsNext?: boolean;
 }
 
 export type ConfirmFieldKind = "text" | "path" | "timestamp";
@@ -62,6 +64,106 @@ export interface ConfirmRequest {
   expiresAtMs: number;
 }
 
+export type SnapshotStatus =
+  | "payload_only"
+  | "snapshot_ready"
+  | "new_file"
+  | "protected_path"
+  | "timeout"
+  | "too_large"
+  | "too_many_files"
+  | "non_utf8"
+  | "not_regular_file"
+  | "unreadable"
+  | "source_mismatch"
+  | "unsupported";
+
+export type PermissionFileChangeKind =
+  | "added"
+  | "modified"
+  | "deleted"
+  | "moved"
+  | "proposed";
+
+export type PermissionDiffLineKind = "context" | "add" | "delete" | "meta";
+
+export interface PermissionDiffLine {
+  kind: PermissionDiffLineKind;
+  oldLine?: number | null;
+  newLine?: number | null;
+  text: string;
+}
+
+export interface PermissionDiffHunk {
+  oldStart?: number | null;
+  newStart?: number | null;
+  header: string;
+  lines: PermissionDiffLine[];
+}
+
+export interface PermissionDiffFile {
+  changeKind: PermissionFileChangeKind;
+  oldPath?: string | null;
+  newPath: string;
+  snapshotStatus: SnapshotStatus;
+  hunks: PermissionDiffHunk[];
+  additions: number;
+  deletions: number;
+  omittedHunks: number;
+  omittedLines: number;
+}
+
+export interface PermissionDiffModel {
+  requestId: string;
+  snapshotStatus: SnapshotStatus;
+  snapshotAtMs?: number | null;
+  files: PermissionDiffFile[];
+  totalFiles: number;
+  additions: number;
+  deletions: number;
+  omittedFiles: number;
+  omittedHunks: number;
+  omittedLines: number;
+  truncated: boolean;
+}
+
+export interface PatchLine {
+  kind: PermissionDiffLineKind;
+  text: string;
+}
+
+export interface PatchHunk {
+  header: string;
+  lines: PatchLine[];
+}
+
+export interface PatchFile {
+  kind: "add" | "update" | "delete" | "move";
+  oldPath?: string | null;
+  newPath: string;
+  hunks: PatchHunk[];
+}
+
+export type PermissionEditOperation =
+  | {
+      type: "textReplace";
+      path: string;
+      oldText: string;
+      newText: string;
+      replaceAll: boolean;
+    }
+  | { type: "wholeFileWrite"; path: string; content: string }
+  | { type: "patchSet"; files: PatchFile[] }
+  | { type: "unsupported"; reason: "notebook_edit" | "invalid_payload" };
+
+export interface PermissionEditIntent {
+  agentKind: string;
+  nativeTool: string;
+  workspace: string;
+  operation: PermissionEditOperation;
+  initialDiff?: PermissionDiffModel | null;
+}
+
 export type InteractionRequest =
   | { type: "ask"; request: AskRequest }
   | { type: "confirm"; request: ConfirmRequest };
@@ -75,6 +177,77 @@ export interface MessagePrompt {
 export interface OptionItem {
   text: string;
   recommended: boolean;
+  /** whats-next / Stop 卡待办 chip 对应的待办条目 id（spec todo-whats-next D2/D5）。 */
+  todoId?: string | null;
+}
+
+/** 项目级待办条目（spec todo-whats-next D1）。 */
+export interface TodoEntry {
+  id: string;
+  text: string;
+  createdAtMs: number;
+  /** Agent family that added the todo through the CLI; absent for human-created and legacy rows. */
+  agentKind?: string | null;
+  /** 自动执行：whats-next 时不提问直接派发（后端 auto=false 时省略该字段）。 */
+  auto?: boolean;
+}
+
+/** 已执行的历史待办（仅执行出队进历史）。 */
+export interface TodoDoneEntry {
+  id: string;
+  text: string;
+  createdAtMs: number;
+  /** Preserved Agent origin from the pending todo. */
+  agentKind?: string | null;
+  doneAtMs: number;
+}
+
+/** 待办窗口项目选择器候选（spec todo-whats-next D9）。 */
+export interface TodoProjectInfo {
+  /** 项目 key（git 根路径）。 */
+  key: string;
+  /** 显示名（basename）。 */
+  name: string;
+  /** 该项目当前待办条数。 */
+  count: number;
+  /**
+   * 选择器分组：
+   * - `withTodos`：当前有待办的项目
+   * - `recent`：最近工作过的项目（活跃 Agent / workspace；不含已在 withTodos 出现的 key）
+   */
+  section: "withTodos" | "recent" | string;
+}
+
+/** 待办窗口 init 负载。 */
+export interface TodosInit {
+  theme: ThemeMode;
+  lang: string;
+  /** 与弹窗一致的提交快捷键（添加待办）。 */
+  popupSubmitKey: PopupSubmitKey;
+  /** 「创建任务」入口是否可用（spec gui-agent-task-launch G1）：macOS 且 Terminal.app 存在。 */
+  newTaskSupported: boolean;
+}
+
+/** 新建任务窗口 init 负载（spec gui-agent-task-launch）。 */
+export interface NewTaskInit {
+  theme: ThemeMode;
+  lang: string;
+  /** 与弹窗一致的提交快捷键（⌘↵ 启动任务）。 */
+  popupSubmitKey: PopupSubmitKey;
+  /** `agentTasks.permissionPrompt`（G6）。 */
+  permissionPrompt: "ask" | "agent-default" | "yolo" | string;
+}
+
+/** 新建任务窗口的项目下拉候选。 */
+export interface NewTaskProject {
+  /** workspace 路径（canonical cwd）或待办项目 git 根。 */
+  path: string;
+  /** 显示名（basename）。 */
+  label: string;
+  /** 置顶 workspace（列表已按置顶排序；展示加 ★）。 */
+  pinned: boolean;
+  /** `workspace`（最近 workspace 索引）或 `todos`（仅存在于待办存储）。 */
+  source: "workspace" | "todos" | string;
 }
 
 export interface Question {
@@ -99,11 +272,13 @@ export type ThemeMode = "system" | "light" | "dark";
 
 export type PopupAnimation = "none" | "document" | "alert";
 
-export type WindowEffect = "glass" | "blur";
+export type WindowEffect = "glass" | "blur" | "solid";
 
 export interface PopupInit {
   /** Current interaction. A prewarmed popup returns null until assigned. */
   interaction: InteractionRequest | null;
+  /** Local-popup-only native edit intent for permission confirmations. */
+  popupEdit?: PermissionEditIntent | null;
   theme: ThemeMode;
   alwaysOnTop: boolean;
   sourceName: string;
@@ -121,13 +296,15 @@ export interface PopupInit {
   speechLanguage?: string;
   /** 语音输入快捷键（规范串如 cmd+d；空串=关闭）。 */
   speechShortcut?: string;
+  /** 提交快捷键：cmdEnter（默认）或 enter。 */
+  popupSubmitKey?: PopupSubmitKey;
   /** 实验：多问题弹窗纵向同时显示所有问题（默认关 = 旧版一次一题）。 */
   verticalQuestions?: boolean;
   /** 性能埋点是否开启（helper 收到 ASKHUMAN_PERF_ID）；前端据此决定是否上报 perf 标记。 */
   perf?: boolean;
   /** 性能测试：画完首帧后自动取消弹窗（仅 harness 用）。 */
   perfAutodismiss?: boolean;
-  /** 方案6：本进程是否为预热弹窗（窗口起始隐藏）。为真时前端在内容绘制完成后调 `popup_show_window` 上屏。 */
+  /** Whether this helper started as a hidden prewarmed popup before it adopted the interaction. */
   warm?: boolean;
   /** 提问创建时刻（epoch 毫秒）：弹窗据此显示相对时间（几秒/分钟/小时前），超过一天显示绝对时间。0=未知。 */
   createdAtMs?: number;
@@ -138,6 +315,8 @@ export interface QuestionAnswer {
   userInput: string;
   images: ImageAttachment[];
   files: string[];
+  /** 折叠待办区选中的待办条目 id（spec todo-whats-next D7）：文本已并入 userInput，id 供后端出队。 */
+  todoIds?: string[];
 }
 
 export interface PopupSubmission {
@@ -240,6 +419,12 @@ export interface InterjectInit {
 
 export type UiLanguage = "auto" | "en" | "zh";
 
+/** Popup/Confirm submit key mode (mirrors Rust `PopupSubmitKey`). */
+export type PopupSubmitKey = "cmdEnter" | "enter";
+
+/** Global collaboration style for agent prompts (mirrors Rust `CollaborationStyle`). */
+export type CollaborationStyle = "aligned" | "autonomous" | "custom";
+
 export interface GeneralConfig {
   theme: ThemeMode;
   /** 界面语言：auto（跟随系统）/ en / zh。回退英文。 */
@@ -251,8 +436,20 @@ export interface GeneralConfig {
   speechLanguage: string;
   /** 语音输入快捷键（弹窗内）。规范串如 "cmd+d"；空串表示关闭。 */
   speechShortcut: string;
+  /**
+   * Popup/Confirm submit shortcut:
+   * - `cmdEnter`: ⌘/Ctrl+Enter submits (default); bare Enter newlines
+   * - `enter`: bare Enter submits; any modifier+Enter newlines
+   */
+  popupSubmitKey: PopupSubmitKey;
+  /** 协作风格：对齐 / 自主 / 自定义。 */
+  collaborationStyle: CollaborationStyle;
+  /** 自定义协作风格正文；空则回退对齐默认。 */
+  collaborationStyleCustomText: string;
   /** 回复历史保留条数上限。默认 200；0 = 停止新增记录（但保留旧记录）。 */
   historyLimit: number;
+  /** 待办执行历史保留条数（每项目）。默认 20；0 = 停止新增记录（保留旧历史）。 */
+  todoHistoryLimit: number;
   /** Built-in popup sound. Empty disables it; macOS stores a name, Linux uses a toggle. */
   popupSound: string;
   /** Menu bar / tray status icon mode (off/active/always). Desktop only (macOS/Linux). */
@@ -386,6 +583,68 @@ export interface SettingsPayload {
   secretsPresent: SecretsPresent;
 }
 
+/** 一条渠道故障摘要（R7，镜像 Rust `ipc::ChannelIssueInfo`）：出现即表示该渠道仍未恢复。 */
+export interface ChannelIssue {
+  /** 渠道 id："telegram" / "dingding" / "feishu" / "slack"。 */
+  channel: string;
+  /** 错误文案（源语言英文，与 daemon.log 一致）。 */
+  message: string;
+  /** 首次出现的 Unix 毫秒时间戳。 */
+  atMs: number;
+}
+
+// ===== Codex 权限授权管理面板（spec codex-permission-remember §6.3，镜像 Rust ipc 类型）=====
+
+/** 一个对话的授权摘要（镜像 `permission_rules::SessionRuleSummary`）。 */
+export interface PermissionSessionSummary {
+  sessionId: string;
+  ruleCount: number;
+  fileExactCount: number;
+  projectRoots: string[];
+  fullDisk: boolean;
+  shellCount: number;
+  networkCount: number;
+  mcpCount: number;
+  lastUsedAtMs: number;
+}
+
+/** 面板分组：store 摘要 + registry 标题/项目名增强（可为空串）。 */
+export interface PermissionSessionGroup {
+  summary: PermissionSessionSummary;
+  title: string;
+  projectName: string;
+}
+
+export type PermissionRuleKind =
+  | "fileExact"
+  | "fileProject"
+  | "fileDisk"
+  | "mcpTool"
+  | "networkHost"
+  | "shellExact"
+  | "shellPrefix";
+
+/** 一条规则展示行（D48：原样键文本）。 */
+export interface PermissionRuleInfo {
+  kind: PermissionRuleKind;
+  display: string;
+  createdAtMs: number;
+  lastUsedAtMs: number;
+  expiresAtMs: number;
+}
+
+export type PermissionRulesOp =
+  | { op: "summaries" }
+  | { op: "sessionDetail"; sessionId: string }
+  | { op: "globalDetail" }
+  | { op: "resetSession"; sessionId: string }
+  | { op: "resetGlobal" };
+
+export type PermissionRulesResult =
+  | { kind: "summaries"; sessions: PermissionSessionGroup[]; globalCount: number }
+  | { kind: "rules"; rules: PermissionRuleInfo[] }
+  | { kind: "reset"; removed: number };
+
 /** Per-secret edit intent sent on save. Secrets never round-trip through the config object. */
 export type SecretAction =
   | { kind: "unchanged" }
@@ -459,6 +718,7 @@ export interface AgentModeStatus {
   timeoutHookSupported: boolean;
   timeoutHookInstalled: boolean;
   timeoutHookNeedsUpdate: boolean;
+  recoveryHookInstalled: boolean;
   permission: PermissionStatus;
   permissionNeedsUpdate: boolean;
   stop: StopStatus;

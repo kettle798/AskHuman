@@ -75,11 +75,13 @@ pub fn classify_command(argv: &[String]) -> CommandClass {
         return CommandClass::Meta;
     };
     match first {
-        "--popup" | "--gui-host" => CommandClass::Skip,
+        "--popup" | "--gui-host" | "__permission-diff-worker" | "__permission-shell-worker" => {
+            CommandClass::Skip
+        }
         "dev" | "--help" | "-h" | "--version" | "-v" | "--agent-help" | "--scripting-help" => {
             CommandClass::Meta
         }
-        "--settings" | "--history" | "config" | "channel" => CommandClass::Config,
+        "--settings" | "--history" | "--todos" | "config" | "channel" => CommandClass::Config,
         _ => CommandClass::Runtime,
     }
 }
@@ -204,6 +206,10 @@ mod tests {
         assert_eq!(classify_command(&prog(&["--popup"])), CommandClass::Skip);
         assert_eq!(classify_command(&prog(&["--gui-host"])), CommandClass::Skip);
         assert_eq!(
+            classify_command(&prog(&["__permission-diff-worker"])),
+            CommandClass::Skip
+        );
+        assert_eq!(
             classify_command(&prog(&["dev", "enable"])),
             CommandClass::Meta
         );
@@ -212,6 +218,7 @@ mod tests {
             classify_command(&prog(&["--settings"])),
             CommandClass::Config
         );
+        assert_eq!(classify_command(&prog(&["--todos"])), CommandClass::Config);
         assert_eq!(
             classify_command(&prog(&["channel", "list"])),
             CommandClass::Config

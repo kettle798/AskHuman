@@ -1,10 +1,40 @@
-import MarkdownIt from "markdown-it";
+import type MarkdownIt from "markdown-it";
+import { shallowRef } from "vue";
 
-const md = new MarkdownIt({
-  html: false,
-  linkify: true,
-  breaks: true,
-});
+// R4 bundle 瘦身：markdown-it（连带 entities/linkify-it 等依赖约 170KB）不进主 chunk，
+// 模块加载时立刻发起动态 import（与主 chunk 剩余执行并行）。渲染器就绪前 renderMarkdown
+// 退回「转义 + 保留换行」的纯文本；就绪时 mdRef 变化会让所有依赖它的 computed 自动重算，
+// 调用方无需感知（预热路径下窗口显示前早已就绪，冷路径闪替也在毫秒级）。
+const mdRef = shallowRef<MarkdownIt | null>(null);
+
+/** Resolves when the real renderer is ready (tests await this; app code relies on reactivity). */
+export const markdownReady: Promise<void> = import("markdown-it").then(
+  ({ default: MarkdownItCtor }) => {
+    const md = new MarkdownItCtor({
+      html: false,
+      linkify: true,
+      breaks: true,
+    });
+
+    const defaultFence = md.renderer.rules.fence?.bind(md.renderer);
+    md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+      const rendered = defaultFence
+        ? defaultFence(tokens, idx, options, env, self)
+        : self.renderToken(tokens, idx, options);
+      return wrapCodeBlock(md, rendered, env);
+    };
+
+    const defaultCodeBlock = md.renderer.rules.code_block?.bind(md.renderer);
+    md.renderer.rules.code_block = (tokens, idx, options, env, self) => {
+      const rendered = defaultCodeBlock
+        ? defaultCodeBlock(tokens, idx, options, env, self)
+        : self.renderToken(tokens, idx, options);
+      return wrapCodeBlock(md, rendered, env);
+    };
+
+    mdRef.value = md;
+  },
+);
 
 /** Labels for the per-code-block copy button (localized by the caller). */
 export interface MarkdownOptions {
@@ -21,7 +51,7 @@ const CHECK_ICON =
 // Wrap a rendered <pre>…</pre> code block so it can host a hover copy button.
 // The raw text is read from the DOM at click time (see handleCodeCopyClick), so
 // nothing extra needs to be embedded here beyond the localized labels.
-function wrapCodeBlock(rendered: string, env: unknown): string {
+function wrapCodeBlock(md: MarkdownIt, rendered: string, env: unknown): string {
   const e = (env ?? {}) as MarkdownOptions;
   const copy = md.utils.escapeHtml(e.copyLabel ?? "Copy");
   const copied = md.utils.escapeHtml(e.copiedLabel ?? "Copied");
@@ -31,23 +61,22 @@ function wrapCodeBlock(rendered: string, env: unknown): string {
   return `<div class="code-block">${rendered}${button}</div>`;
 }
 
-const defaultFence = md.renderer.rules.fence?.bind(md.renderer);
-md.renderer.rules.fence = (tokens, idx, options, env, self) => {
-  const rendered = defaultFence
-    ? defaultFence(tokens, idx, options, env, self)
-    : self.renderToken(tokens, idx, options);
-  return wrapCodeBlock(rendered, env);
-};
-
-const defaultCodeBlock = md.renderer.rules.code_block?.bind(md.renderer);
-md.renderer.rules.code_block = (tokens, idx, options, env, self) => {
-  const rendered = defaultCodeBlock
-    ? defaultCodeBlock(tokens, idx, options, env, self)
-    : self.renderToken(tokens, idx, options);
-  return wrapCodeBlock(rendered, env);
-};
+// Minimal HTML escape for the pre-load fallback (mirrors markdown-it's escapeHtml set).
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
 
 export function renderMarkdown(source: string, opts?: MarkdownOptions): string {
+  const md = mdRef.value;
+  if (!md) {
+    // Renderer chunk still loading: escaped plain text with line breaks preserved
+    // (matches breaks:true), upgraded reactively the moment the chunk lands.
+    return `<p>${escapeHtml(source).replace(/\n/g, "<br>\n")}</p>`;
+  }
   return md.render(source, { ...opts });
 }
 

@@ -47,12 +47,16 @@ pub fn help_text(lang: Lang) -> String {
             "  --single                Single choice (default: multiple choice)".to_string(),
             "  --select-only           Choice only: forbid free text/attachments (each question must have options)".to_string(),
             "  --output <text|json>    Output format (default: text)".to_string(),
+            "  --whats-next            Ask \"what should we do next?\" with optional suggested tasks and project todos (see --agent-help)".to_string(),
             String::new(),
             "Management:".to_string(),
             "  --settings              Open the settings window".to_string(),
             "  --history [--all]       Open the reply history window (current project; --all for every project)".to_string(),
+            "  --show-last             Print the full latest completed AskHuman exchange for this Agent session".to_string(),
+            "  --todos                 Open the project todos window (preselects current project)".to_string(),
             "  daemon <sub>            Manage the background daemon: status/stop/restart/start/logs (stop/restart drain active requests; add --force to terminate now)".to_string(),
-            "  mcp                     Run as an MCP server over STDIO, exposing the 'ask' tool (for MCP clients, not humans)".to_string(),
+            "  mcp                     Run as an MCP server over STDIO, exposing 'ask', 'whats_next', 'show_last', and 'todo_add' (for MCP clients)".to_string(),
+            "  todo <sub>              Project todo queue: add [--auto] <text> / list / rm <n> / clear (todos surface as --whats-next choices; --auto ones auto-dispatch)".to_string(),
             "  channel <sub>           Configure IM channels without a GUI (list/set/enable/disable/test/detect; see 'channel help')".to_string(),
             "  agents <sub>            Agent status & integrations (monitor/show/install/uninstall/update; see 'agents help')".to_string(),
             "  config <sub>            Generic config key/value fallback (show/get/set/unset/path; see 'config help')".to_string(),
@@ -80,12 +84,16 @@ pub fn help_text(lang: Lang) -> String {
             "  --single                单选（默认多选）".to_string(),
             "  --select-only           严格选择：禁用自由文本/附件（每题必须有选项）".to_string(),
             "  --output <text|json>    输出格式（默认 text）".to_string(),
+            "  --whats-next            提问「接下来做什么？」，可附建议任务，本项目待办也作为选项（见 --agent-help）".to_string(),
             String::new(),
             "管理:".to_string(),
             "  --settings              启动设置界面".to_string(),
             "  --history [--all]       启动回复历史窗口（默认当前项目；--all 查看全部项目）".to_string(),
+            "  --show-last             输出当前 Agent 会话最近一次完整 AskHuman 已完成问答".to_string(),
+            "  --todos                 启动项目待办窗口（预选当前项目）".to_string(),
             "  daemon <子命令>          管理后台 daemon：status/stop/restart/start/logs（stop/restart 默认等在途请求完结；--force 立即终止）".to_string(),
-            "  mcp                     以 MCP server（STDIO）运行，暴露 'ask' 工具（面向 MCP 客户端，非人类）".to_string(),
+            "  mcp                     以 MCP server（STDIO）运行，暴露 'ask'、'whats_next'、'show_last' 与 'todo_add'（面向 MCP 客户端）".to_string(),
+            "  todo <子命令>            项目级待办队列：add [--auto] <text> / list / rm <n> / clear（待办会作为 --whats-next 的选项出现；--auto 的直接自动派发）".to_string(),
             "  channel <子命令>         无 GUI 配置 IM 渠道（list/set/enable/disable/test/detect；见 'channel help'）".to_string(),
             "  agents <子命令>          Agent 状态与集成（monitor/show/install/uninstall/update；见 'agents help'）".to_string(),
             "  config <子命令>          通用配置键值兜底（show/get/set/unset/path；见 'config help'）".to_string(),
@@ -213,6 +221,44 @@ pub fn agent_help_text(lang: Lang) -> String {
                 "# A long Markdown message with `backticks`, $vars and \"quotes\"".to_string(),
             );
             out.push("EOF".to_string());
+            out.push(String::new());
+            out.push("Project todos:".to_string());
+            out.push("  Store a reminder for the user or a task they asked to do later; not your internal work plan.".to_string());
+            out.push(
+                "  Keep it to one actionable sentence, preferably no more than 100 characters."
+                    .to_string(),
+            );
+            out.push(format!(
+                "  Add when the user asks or defers a concrete task: {prog} todo add \"<task>\""
+            ));
+            out.push(String::new());
+            out.push("End-of-task handoff (--whats-next):".to_string());
+            out.push(format!(
+                "  {prog} --whats-next [\"<completion report>\"] [-o[!] \"<suggested task>\" ...] [-f \"<file>\" ...] [--stdin]"
+            ));
+            out.push("  Run only after the current task is fully complete, to request a separate next task.".to_string());
+            out.push(
+                "  Use normal AskHuman questions for anything within the current task. The user"
+                    .to_string(),
+            );
+            out.push(
+                "  replies with the next task (start it immediately), or approves ending — only"
+                    .to_string(),
+            );
+            out.push(
+                "  then may you end it. -o/-o! are concrete next-task suggestions only; never add"
+                    .to_string(),
+            );
+            out.push(
+                "  an end/stop option because ending is built in. Omit them when there are no"
+                    .to_string(),
+            );
+            out.push("  suggestions. Takes no -q (the question is fixed).".to_string());
+            out.push(String::new());
+            out.push("Context-compaction recovery:".to_string());
+            out.push(format!(
+                "  Run {prog} --show-last after summarization, or whenever the exact last AskHuman question/answer is uncertain."
+            ));
         }
         Lang::Zh => {
             out.push(format!("{prog} —— 向人类发起提问并收集回应。"));
@@ -241,6 +287,39 @@ pub fn agent_help_text(lang: Lang) -> String {
             ));
             out.push("# 含 `反引号`、$VAR 与 \"引号\" 的长 Markdown 消息".to_string());
             out.push("EOF".to_string());
+            out.push(String::new());
+            out.push("项目待办:".to_string());
+            out.push(
+                "  用于提醒用户操作，或记录用户要求稍后执行的任务；不是 Agent 的内部工作计划。"
+                    .to_string(),
+            );
+            out.push("  建议写成一个可执行的句子，尽量不超过 100 个字符。".to_string());
+            out.push(format!(
+                "  用户要求添加或明确延后具体任务时使用：{prog} todo add \"<任务>\""
+            ));
+            out.push(String::new());
+            out.push("任务完成后的交接（--whats-next）:".to_string());
+            out.push(format!(
+                "  {prog} --whats-next [\"<完成报告>\"] [-o[!] \"<建议任务>\" ...] [-f \"<文件>\" ...] [--stdin]"
+            ));
+            out.push(
+                "  仅在当前任务完全完成后运行，用于领取一个独立的下一任务。当前任务内的任何"
+                    .to_string(),
+            );
+            out.push(
+                "  问题都用普通 AskHuman 提问。用户会给出下一个任务（立即开始执行），或确认"
+                    .to_string(),
+            );
+            out.push(
+                "  结束——仅此时才可结束。-o/-o! 只放具体的下一任务建议；不要添加结束/停止"
+                    .to_string(),
+            );
+            out.push("  选项，因为结束项已内置。无建议时省略。不接受 -q（问题固定）。".to_string());
+            out.push(String::new());
+            out.push("上下文压缩恢复:".to_string());
+            out.push(format!(
+                "  被摘要后，或不确定上一次 AskHuman 问答的精确内容时，运行 {prog} --show-last。"
+            ));
         }
     }
     out.join("\n")
@@ -400,5 +479,60 @@ mod tests {
         assert!(en.contains("Asking"));
         assert!(en.contains("Management:"));
         assert!(en.contains("--scripting-help"));
+    }
+
+    #[test]
+    fn help_and_agent_help_cover_whats_next_and_todo() {
+        // spec todo-whats-next D4/D6：--help 列出 --whats-next 与 todo 子命令；
+        // --agent-help 只说用法与语义，不描述输出结构（第 19 轮定案：复用 Ask 标准区块）。
+        for lang in [Lang::En, Lang::Zh] {
+            let h = help_text(lang);
+            assert!(h.contains("--whats-next"));
+            assert!(h.contains("todo "));
+            let ah = agent_help_text(lang);
+            assert!(ah.contains("--whats-next"));
+            assert!(ah.contains("todo add"));
+            // 旧「固定英文结束句」已废除，不应再出现在 help 里。
+            assert!(!ah.contains("no more tasks"));
+        }
+    }
+
+    #[test]
+    fn help_and_agent_help_cover_context_recovery_in_both_languages() {
+        for lang in [Lang::En, Lang::Zh] {
+            let help = help_text(lang);
+            let agent = agent_help_text(lang);
+            assert!(help.contains("--show-last"));
+            assert!(help.contains("show_last"));
+            assert!(agent.contains("--show-last"));
+        }
+    }
+
+    #[test]
+    fn agent_help_distinguishes_project_todos_from_internal_plans() {
+        let en = agent_help_text(Lang::En);
+        assert!(en.contains("user asks or defers a concrete task"));
+        assert!(en.contains("not your internal work plan"));
+        assert!(en.contains("one actionable sentence"));
+        assert!(en.contains("no more than 100 characters"));
+
+        let zh = agent_help_text(Lang::Zh);
+        assert!(zh.contains("用户要求添加或明确延后具体任务时使用"));
+        assert!(zh.contains("不是 Agent 的内部工作计划"));
+        assert!(zh.contains("一个可执行的句子"));
+        assert!(zh.contains("不超过 100 个字符"));
+    }
+
+    #[test]
+    fn agent_help_frames_whats_next_as_end_of_task_handoff() {
+        let en = agent_help_text(Lang::En);
+        assert!(en.contains("End-of-task handoff (--whats-next)"));
+        assert!(en.contains("only after the current task is fully complete"));
+        assert!(en.contains("never add\n  an end/stop option because ending is built in"));
+
+        let zh = agent_help_text(Lang::Zh);
+        assert!(zh.contains("任务完成后的交接（--whats-next）"));
+        assert!(zh.contains("仅在当前任务完全完成后运行"));
+        assert!(zh.contains("不要添加结束/停止\n  选项，因为结束项已内置"));
     }
 }

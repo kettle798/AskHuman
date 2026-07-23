@@ -17,6 +17,7 @@ mod client;
 mod commands;
 mod config;
 mod confirm;
+mod context_binding;
 mod daemon;
 mod dev_instance;
 mod dev_presets;
@@ -38,20 +39,32 @@ mod macos_menu;
 mod macos_quicklook;
 #[cfg(target_os = "macos")]
 mod macos_window_anim;
+#[cfg(target_os = "macos")]
+mod macos_window_order;
 mod mcp;
 mod models;
+mod msg_card;
 mod paths;
 mod perf;
+mod permission_diff;
+mod permission_memory;
+mod permission_rules;
+mod permission_shell;
 mod permissions;
 mod project;
 mod prompts;
 mod secrets;
 mod select;
+mod shell_safety;
+mod show_last;
 mod slack;
 mod sound;
 #[cfg(target_os = "macos")]
 mod speech;
 mod telegram;
+mod textnorm;
+mod todos;
+mod uistate;
 mod update;
 mod watch;
 

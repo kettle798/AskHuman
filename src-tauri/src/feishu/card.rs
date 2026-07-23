@@ -46,6 +46,39 @@ pub fn build_question_card(
     submit_label: &str,
     recommended_prefix: &str,
 ) -> Value {
+    build_question_card_with_todo(
+        title,
+        text,
+        options,
+        is_markdown,
+        single,
+        select_only,
+        selected,
+        input_placeholder,
+        submit_label,
+        recommended_prefix,
+        "",
+        "",
+    )
+}
+
+/// Build a question card with a channel-native colored marker for todo options.
+/// The stored option text remains untouched so callbacks still return the original value.
+#[allow(clippy::too_many_arguments)]
+pub fn build_question_card_with_todo(
+    title: &str,
+    text: &str,
+    options: &[OptionItem],
+    is_markdown: bool,
+    single: bool,
+    select_only: bool,
+    selected: &[String],
+    input_placeholder: &str,
+    submit_label: &str,
+    recommended_prefix: &str,
+    todo_text_prefix: &str,
+    todo_badge_prefix: &str,
+) -> Value {
     let mut elements: Vec<Value> = Vec::new();
     if !text.trim().is_empty() {
         elements.push(body_text(text, is_markdown));
@@ -60,6 +93,8 @@ pub fn build_question_card(
                 false,
                 true,
                 recommended_prefix,
+                todo_text_prefix,
+                todo_badge_prefix,
             ));
         }
     }
@@ -73,8 +108,34 @@ pub fn build_question_card(
         input_placeholder,
         submit_label,
         recommended_prefix,
+        todo_text_prefix,
+        todo_badge_prefix,
     ));
     assemble_card(title, elements, true)
+}
+
+/// `/msg` 一次性输入卡。正文始终按纯文本渲染，避免待发送内容被解释为卡片 markdown。
+pub fn build_msg_compose_card(
+    view: &crate::msg_card::MsgComposeView,
+    user_input_draft: Option<&str>,
+) -> Value {
+    let elements = vec![
+        body_text(&view.plain_body(), false),
+        build_form(
+            &[],
+            &[],
+            user_input_draft,
+            false,
+            false,
+            false,
+            &view.input_placeholder,
+            &view.send_label,
+            "",
+            "",
+            "",
+        ),
+    ];
+    assemble_card(&view.title, elements, true)
 }
 
 /// 终态卡片入参（复刻钉钉「已提交」态）。
@@ -120,11 +181,20 @@ pub fn callback_update_card(card: Value) -> Value {
 /// 勾选器按用户选择 `checked` 且 `disabled`、输入框 `default_value` 回显补充文字且 `disabled`、
 /// 提交按钮 `disabled` 并改文案。
 pub fn build_finalized_card(p: &Finalized) -> Value {
+    build_finalized_card_with_todo(p, "", "")
+}
+
+/// Build a finalized card while preserving the todo-only display treatment.
+pub fn build_finalized_card_with_todo(
+    p: &Finalized,
+    todo_text_prefix: &str,
+    todo_badge_prefix: &str,
+) -> Value {
     let mut elements: Vec<Value> = Vec::new();
     if !p.text.trim().is_empty() {
         elements.push(body_text(p.text, p.is_markdown));
     }
-    // 单选：勾选器在表单外（与提问态一致），终态禁用。
+    // Single-select checkers live outside the form, matching the interactive card layout.
     if p.single {
         for (i, opt) in p.options.iter().enumerate() {
             elements.push(checker_element(
@@ -134,6 +204,8 @@ pub fn build_finalized_card(p: &Finalized) -> Value {
                 true,
                 true,
                 p.recommended_prefix,
+                todo_text_prefix,
+                todo_badge_prefix,
             ));
         }
     }
@@ -147,12 +219,15 @@ pub fn build_finalized_card(p: &Finalized) -> Value {
         p.input_placeholder,
         p.button_label,
         p.recommended_prefix,
+        todo_text_prefix,
+        todo_badge_prefix,
     ));
     assemble_card(p.title, elements, true)
 }
 
 /// 单个勾选器组件：文本用 lark_md（支持推荐项的彩色前缀）。
 /// `disabled=true`（终态）禁用；`single=true` 且非终态时挂 toggle 回调（勾选器在表单外，点击互斥）。
+#[allow(clippy::too_many_arguments)] // arguments mirror the checker payload fields
 fn checker_element(
     i: usize,
     opt: &OptionItem,
@@ -160,8 +235,13 @@ fn checker_element(
     disabled: bool,
     single: bool,
     recommended_prefix: &str,
+    todo_text_prefix: &str,
+    todo_badge_prefix: &str,
 ) -> Value {
-    let display = if opt.recommended {
+    let display = if opt.todo_id.is_some() {
+        let text = opt.text.strip_prefix(todo_text_prefix).unwrap_or(&opt.text);
+        format!("{}{}", todo_badge_prefix, text)
+    } else if opt.recommended {
         format!("{}{}", recommended_prefix, opt.text)
     } else {
         opt.text.clone()
@@ -219,6 +299,8 @@ fn build_form(
     input_placeholder: &str,
     button_label: &str,
     recommended_prefix: &str,
+    todo_text_prefix: &str,
+    todo_badge_prefix: &str,
 ) -> Value {
     let mut form_elements: Vec<Value> = Vec::new();
     // 多选：勾选器在表单内（提交时随 form_value 回传）。单选的勾选器在表单外。
@@ -231,6 +313,8 @@ fn build_form(
                 disabled,
                 false,
                 recommended_prefix,
+                todo_text_prefix,
+                todo_badge_prefix,
             ));
         }
     }
@@ -555,12 +639,18 @@ fn select_button_type(action: crate::select::SelectAction) -> &'static str {
         | crate::select::SelectAction::TaskWorkspace
         | crate::select::SelectAction::TaskAgent
         | crate::select::SelectAction::TaskPermission
+        | crate::select::SelectAction::TaskInputSource
         | crate::select::SelectAction::Msg
-        | crate::select::SelectAction::Stage => "primary",
+        | crate::select::SelectAction::MsgTarget
+        | crate::select::SelectAction::Stage
+        | crate::select::SelectAction::TodoRm
+        | crate::select::SelectAction::TodoAuto => "primary",
         crate::select::SelectAction::Status
         | crate::select::SelectAction::Diff
-        | crate::select::SelectAction::Transcript => "default",
-        crate::select::SelectAction::Unwatch => "danger",
+        | crate::select::SelectAction::Transcript
+        | crate::select::SelectAction::Todo
+        | crate::select::SelectAction::TodoAutoEntry => "default",
+        crate::select::SelectAction::Unwatch | crate::select::SelectAction::TodoRmEntry => "danger",
     }
 }
 
@@ -658,6 +748,69 @@ pub fn build_select_card(v: &crate::select::SelectView) -> Value {
         "config": { "update_multi": true },
         "body": { "elements": body },
     })
+}
+
+/// `/todo-auto` 管理卡：复用逐条切换列表，并在同一卡片底部追加“新增自动待办”表单。
+/// 空项目仍保留表单，以便直接创建第一条自动待办。
+pub fn build_todo_auto_card(
+    v: &crate::select::SelectView,
+    empty_text: &str,
+    input_placeholder: &str,
+    submit_label: &str,
+) -> Value {
+    let mut card = build_select_card(v);
+    let Some(elements) = card
+        .pointer_mut("/body/elements")
+        .and_then(Value::as_array_mut)
+    else {
+        return card;
+    };
+    if v.options.is_empty() {
+        elements.push(body_text(empty_text, true));
+    }
+    elements.push(json!({ "tag": "hr", "margin": "4px 0px 4px 0px" }));
+    elements.push(build_form(
+        &[],
+        &[],
+        None,
+        false,
+        false,
+        false,
+        input_placeholder,
+        submit_label,
+        "",
+        "",
+        "",
+    ));
+    card
+}
+
+/// 待办管理卡（spec todo-whats-next D8）：样式化头部（标题）+ markdown 列表正文 +
+/// 表单（输入框 + 「新增待办」提交按钮）。提交回调与提问卡同构（`form_value.user_input`），
+/// 由 daemon select 路由按台账 kind 分派（不与提问会话冲突）。
+pub fn build_todo_manage_card(
+    title: &str,
+    body_md: &str,
+    input_placeholder: &str,
+    submit_label: &str,
+) -> Value {
+    let elements = vec![
+        body_text(body_md, true),
+        build_form(
+            &[],
+            &[],
+            None,
+            false,
+            false,
+            false,
+            input_placeholder,
+            submit_label,
+            "",
+            "",
+            "",
+        ),
+    ];
+    assemble_card(title, elements, true)
 }
 
 /// 定格单选卡为一段纯文本（无按钮）——`/unwatch` 取到 0 个后用。
@@ -925,6 +1078,35 @@ mod tests {
     }
 
     #[test]
+    fn todo_manage_card_has_list_body_and_add_form() {
+        let card = build_todo_manage_card(
+            "「proj」的待办",
+            "1. 修复登录\n2. 写文档\n\n<font color='grey'>删除：发送 /todo-rm 后选择本项目。</font>",
+            "输入新待办，提交即新增",
+            "新增待办",
+        );
+        assert_eq!(card["schema"], "2.0");
+        let elements = card["body"]["elements"].as_array().unwrap();
+        // 样式化头部 + hr + markdown 列表正文。
+        assert_eq!(elements[0]["text"]["content"], "「proj」的待办");
+        assert_eq!(elements[2]["tag"], "markdown");
+        assert!(elements[2]["content"]
+            .as_str()
+            .unwrap()
+            .contains("修复登录"));
+        // 表单只有输入框 + 提交按钮（无勾选器）。
+        let form = form_of(&card);
+        let fe = form["elements"].as_array().unwrap();
+        assert_eq!(fe.len(), 2);
+        assert_eq!(fe[0]["tag"], "input");
+        assert_eq!(fe[0]["name"], INPUT_NAME);
+        assert_eq!(fe[1]["tag"], "button");
+        assert_eq!(fe[1]["text"]["content"], "新增待办");
+        // 提交回调与提问卡同构（parse_card_submit 可解析）。
+        assert_eq!(fe[1]["behaviors"][0]["value"]["action"], "submit");
+    }
+
+    #[test]
     fn build_card_has_form_and_options() {
         let card = build_question_card(
             "Question 1/2",
@@ -1049,6 +1231,48 @@ mod tests {
         });
         let s = parse_card_submit(&event, &opts).unwrap();
         assert_eq!(s.selected_options, vec!["继续".to_string()]);
+    }
+
+    #[test]
+    fn todo_option_uses_amber_marker_but_submits_original_text() {
+        let opts = vec![OptionItem::with_todo("执行待办：修复登录", "todo-1")];
+        let card = build_question_card_with_todo(
+            "T",
+            "Q",
+            &opts,
+            true,
+            false,
+            false,
+            &[],
+            "ph",
+            "提交",
+            "<font color='green'>【👍推荐】</font> ",
+            "执行待办：",
+            "<font color='orange'>【TODO】</font> ",
+        );
+        let form = form_of(&card);
+        let checker = form["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["tag"] == "checker")
+            .unwrap();
+        assert_eq!(
+            checker["text"]["content"],
+            "<font color='orange'>【TODO】</font> 修复登录"
+        );
+        assert!(!checker["text"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("执行待办："));
+
+        let event = json!({
+            "operator": { "open_id": "ou_1" },
+            "context": { "open_message_id": "om_1" },
+            "action": { "form_value": { "opt_0": true } }
+        });
+        let submitted = parse_card_submit(&event, &opts).unwrap();
+        assert_eq!(submitted.selected_options, vec!["执行待办：修复登录"]);
     }
 
     #[test]
@@ -1184,6 +1408,52 @@ mod tests {
             "action": { "value": "{\"action\":\"submit\"}" }
         });
         assert!(parse_card_submit(&event, &[]).is_some());
+    }
+
+    #[test]
+    fn todo_auto_card_keeps_toggle_rows_and_add_form() {
+        let view = crate::select::build_view(
+            "自动待办".into(),
+            vec![crate::select::SelectOption {
+                id: "t1".into(),
+                dot: None,
+                seq: Some(1),
+                primary: "跑回归".into(),
+                badge: Some("⚡".into()),
+                elapsed: None,
+                secondary: None,
+            }],
+            crate::select::SelectAction::TodoAutoEntry,
+            crate::i18n::Lang::Zh,
+        );
+        let card = build_todo_auto_card(&view, "暂无待办", "输入自动待办", "新增自动待办");
+        let elements = card["body"]["elements"].as_array().unwrap();
+        assert!(elements.iter().any(|element| {
+            element
+                .pointer("/columns/1/elements/0/behaviors/0/value/select")
+                .and_then(Value::as_u64)
+                == Some(0)
+        }));
+        let form = form_of(&card);
+        assert_eq!(form["elements"][0]["name"], INPUT_NAME);
+        assert_eq!(form["elements"][1]["text"]["content"], "新增自动待办");
+    }
+
+    #[test]
+    fn empty_todo_auto_card_still_has_add_form() {
+        let view = crate::select::build_view(
+            "自动待办".into(),
+            Vec::new(),
+            crate::select::SelectAction::TodoAutoEntry,
+            crate::i18n::Lang::Zh,
+        );
+        let card = build_todo_auto_card(&view, "暂无待办", "输入自动待办", "新增自动待办");
+        assert!(card["body"]["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|element| element.to_string().contains("暂无待办")));
+        assert_eq!(form_of(&card)["elements"][0]["name"], INPUT_NAME);
     }
 
     #[test]
@@ -1376,7 +1646,7 @@ mod tests {
                     seq: Some(2),
                     primary: "Cursor · my-frontend".into(),
                     badge: Some("· 关注中".into()),
-                    elapsed: Some("· 已运行 6 分钟".into()),
+                    elapsed: Some("· 累计工作 6 分钟".into()),
                     secondary: Some("甲".into()),
                 },
                 crate::select::SelectOption {
@@ -1414,7 +1684,7 @@ mod tests {
             .unwrap();
         assert!(md0.contains("<font color='green'>●</font>"));
         // 主行：编号 + 主文本 + 关注徽标 + 运行时长（徽标之后）。
-        assert!(md0.contains("**[2]** Cursor · my-frontend · 关注中 · 已运行 6 分钟"));
+        assert!(md0.contains("**[2]** Cursor · my-frontend · 关注中 · 累计工作 6 分钟"));
         assert!(md0.contains("<font color='grey'>甲</font>"));
         let md1 = rows[1]["columns"][0]["elements"][0]["content"]
             .as_str()
@@ -1506,5 +1776,48 @@ mod tests {
             "action": { "value": { "confirm": "approve_once" } }
         });
         assert!(parse_confirm_action(&injected).is_none());
+    }
+
+    #[test]
+    fn msg_compose_card_has_one_active_input_and_preserves_draft() {
+        let view = crate::msg_card::MsgComposeView {
+            seq: 3,
+            title: "给 [3] Codex 发送消息".into(),
+            target_label: "目标".into(),
+            target: "Codex — project".into(),
+            pending_label: "待送达 1 条：".into(),
+            pending_preview: Some(crate::msg_card::PendingPreview {
+                text: "<pending>".into(),
+                omitted_chars: 0,
+            }),
+            preview_omitted: None,
+            input_label: "消息".into(),
+            input_placeholder: "请输入".into(),
+            send_label: "发送".into(),
+            error: Some("太长".into()),
+        };
+        let card = build_msg_compose_card(&view, Some("draft"));
+        let elements = card["body"]["elements"].as_array().unwrap();
+        let form = elements.iter().find(|item| item["tag"] == "form").unwrap();
+        let controls = form["elements"].as_array().unwrap();
+        assert_eq!(
+            controls
+                .iter()
+                .filter(|item| item["tag"] == "input")
+                .count(),
+            1
+        );
+        assert_eq!(
+            controls
+                .iter()
+                .filter(|item| item["tag"] == "button")
+                .count(),
+            1
+        );
+        assert_eq!(controls[0]["default_value"], "draft");
+        assert!(elements.iter().any(|item| item["text"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("<pending>")));
     }
 }

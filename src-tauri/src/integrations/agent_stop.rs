@@ -1,5 +1,7 @@
-//! Per-agent Stop confirmation capability. Product preference is independent from lifecycle
-//! tracking, while both capabilities share exactly one AskHuman-owned Stop handler on disk.
+//! Per-agent Stop confirmation capability. The product preference is preserved independently,
+//! but confirmation is active only while the agent integration mode is CLI or MCP. Lifecycle
+//! tracking remains independent, and both capabilities share exactly one AskHuman-owned Stop
+//! handler on disk.
 
 use std::path::Path;
 
@@ -22,6 +24,12 @@ pub struct StopStatus {
     pub installed: bool,
     pub outdated: bool,
     pub other_handlers_detected: bool,
+}
+
+struct HandlerState {
+    configured: bool,
+    outdated: bool,
+    other_handlers_detected: bool,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -65,11 +73,25 @@ pub fn set_enabled(kind: AgentKind, value: bool) -> Result<()> {
         AgentKind::Grok => unreachable!(),
     }
     save_preferences(&preferences)?;
-    if let Err(error) = reconcile_unlocked(kind) {
+    if let Err(error) = reconcile_current_mode_unlocked(kind) {
         let _ = save_preferences(&original);
         return Err(error);
     }
     Ok(())
+}
+
+fn confirmation_active(preference_enabled: bool, mode: super::agent_mode::Mode) -> bool {
+    preference_enabled && mode != super::agent_mode::Mode::None
+}
+
+/// Whether Stop confirmation should be installed for the requested integration mode.
+pub(crate) fn active_in_mode(kind: AgentKind, mode: super::agent_mode::Mode) -> bool {
+    confirmation_active(enabled(kind), mode)
+}
+
+/// Whether Stop confirmation should be installed for the mode currently represented on disk.
+pub(crate) fn active_in_current_mode(kind: AgentKind) -> bool {
+    active_in_mode(kind, super::agent_mode::current(target_for_kind(kind)))
 }
 
 pub fn status(kind: AgentKind) -> StopStatus {
@@ -83,11 +105,31 @@ pub fn status(kind: AgentKind) -> StopStatus {
         };
     }
     let track = super::agent_lifecycle::tracking_installed(kind);
-    let confirm = enabled(kind);
+    let preference_enabled = enabled(kind);
+    let confirm = confirmation_active(
+        preference_enabled,
+        super::agent_mode::current(target_for_kind(kind)),
+    );
     let expected = hook_command(kind, track, confirm).unwrap_or_default();
     let path = hook_path(kind);
     let text = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".into());
-    let handlers = stop_handlers(kind, &text);
+    let handler_state = inspect_handler_state(kind, &text, &expected, track || confirm);
+    StopStatus {
+        supported: true,
+        enabled: preference_enabled,
+        installed: handler_state.configured,
+        outdated: handler_state.outdated,
+        other_handlers_detected: handler_state.other_handlers_detected,
+    }
+}
+
+fn inspect_handler_state(
+    kind: AgentKind,
+    text: &str,
+    expected: &str,
+    desired_exists: bool,
+) -> HandlerState {
+    let handlers = stop_handlers(kind, text);
     let mut marker_count = 0usize;
     let mut exact_count = 0usize;
     let mut configured = false;
@@ -107,11 +149,8 @@ pub fn status(kind: AgentKind) -> StopStatus {
             other_handlers_detected = true;
         }
     }
-    let desired_exists = track || confirm;
-    StopStatus {
-        supported: true,
-        enabled: confirm,
-        installed: configured,
+    HandlerState {
+        configured,
         outdated: if desired_exists {
             marker_count != 1 || exact_count != 1
         } else {
@@ -121,18 +160,24 @@ pub fn status(kind: AgentKind) -> StopStatus {
     }
 }
 
-/// Reconcile after either preference or lifecycle tracking changes. Caller holds mutation lock.
-pub(crate) fn reconcile_unlocked(kind: AgentKind) -> Result<()> {
+/// Reconcile after an integration mode change. Caller holds the integration mutation lock.
+pub(crate) fn reconcile_unlocked(kind: AgentKind, mode: super::agent_mode::Mode) -> Result<()> {
     if !supported(kind) {
         return Ok(());
     }
     let track = super::agent_lifecycle::tracking_installed(kind);
-    let confirm = enabled(kind);
+    let confirm = active_in_mode(kind, mode);
     if track || confirm {
         install_handler(kind, track, confirm)
     } else {
         remove_handler(kind)
     }
+}
+
+/// Reconcile after either preference or lifecycle tracking changes. Caller holds the integration
+/// mutation lock, and the current mode is resolved from the other on-disk integration artifacts.
+pub(crate) fn reconcile_current_mode_unlocked(kind: AgentKind) -> Result<()> {
+    reconcile_unlocked(kind, super::agent_mode::current(target_for_kind(kind)))
 }
 
 pub fn migrate_outdated() -> Vec<AgentKind> {
@@ -141,13 +186,22 @@ pub fn migrate_outdated() -> Vec<AgentKind> {
         let state = status(kind);
         if state.outdated {
             if let Ok(_lock) = super::mutation_lock::IntegrationMutationLock::acquire() {
-                if reconcile_unlocked(kind).is_ok() {
+                if reconcile_current_mode_unlocked(kind).is_ok() {
                     migrated.push(kind);
                 }
             }
         }
     }
     migrated
+}
+
+fn target_for_kind(kind: AgentKind) -> super::agent_rules::AgentTarget {
+    match kind {
+        AgentKind::Claude => super::agent_rules::AgentTarget::ClaudeCode,
+        AgentKind::Codex => super::agent_rules::AgentTarget::Codex,
+        AgentKind::Cursor => super::agent_rules::AgentTarget::Cursor,
+        AgentKind::Grok => super::agent_rules::AgentTarget::Grok,
+    }
 }
 
 pub(crate) fn hook_command(kind: AgentKind, track: bool, confirm: bool) -> Result<String> {
@@ -337,6 +391,73 @@ mod tests {
         assert!(supported(AgentKind::Codex));
         assert!(supported(AgentKind::Cursor));
         assert!(!supported(AgentKind::Grok));
+    }
+
+    #[test]
+    fn integration_mode_gates_confirmation_but_not_tracking() {
+        for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Cursor] {
+            for mode in [
+                super::super::agent_mode::Mode::None,
+                super::super::agent_mode::Mode::Cli,
+                super::super::agent_mode::Mode::Mcp,
+            ] {
+                for track in [false, true] {
+                    let confirm = confirmation_active(true, mode);
+                    let output =
+                        apply_handler_state(kind, "{}", "/opt/AskHuman", track, confirm).unwrap();
+                    let ours: Vec<Value> = stop_handlers(kind, &output)
+                        .into_iter()
+                        .filter(|handler| {
+                            handler
+                                .get("command")
+                                .and_then(Value::as_str)
+                                .is_some_and(|command| command.contains(MARKER))
+                        })
+                        .collect();
+                    assert_eq!(ours.len(), usize::from(track || confirm));
+                    if let Some(handler) = ours.first() {
+                        let command = handler.get("command").and_then(Value::as_str).unwrap();
+                        assert_eq!(command.contains(" track"), track);
+                        assert_eq!(command.contains(" confirm"), confirm);
+                    }
+                }
+            }
+        }
+        assert!(!confirmation_active(
+            false,
+            super::super::agent_mode::Mode::Cli
+        ));
+    }
+
+    #[test]
+    fn none_mode_detects_and_cleans_legacy_confirm_handlers() {
+        for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Cursor] {
+            for track in [false, true] {
+                let legacy = apply_handler_state(kind, "{}", "/opt/AskHuman", track, true).unwrap();
+                let expected = hook_command_for("/opt/AskHuman", kind, track, false);
+                let stale = inspect_handler_state(kind, &legacy, &expected, track);
+                assert!(stale.configured);
+                assert!(stale.outdated);
+
+                let cleaned =
+                    apply_handler_state(kind, &legacy, "/opt/AskHuman", track, false).unwrap();
+                let current = inspect_handler_state(kind, &cleaned, &expected, track);
+                assert!(!current.configured);
+                assert!(!current.outdated);
+                assert_eq!(
+                    stop_handlers(kind, &cleaned)
+                        .iter()
+                        .filter(|handler| {
+                            handler
+                                .get("command")
+                                .and_then(Value::as_str)
+                                .is_some_and(|command| command.contains(MARKER))
+                        })
+                        .count(),
+                    usize::from(track)
+                );
+            }
+        }
     }
 
     #[test]

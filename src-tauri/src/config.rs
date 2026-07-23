@@ -70,16 +70,16 @@ impl PopupAnimation {
     }
 }
 
-/// 菜单栏 / 托盘状态图标的三态开关（spec D4）。仅 macOS/Linux 桌面有意义；Windows 隐藏。
+/// Menu bar / tray icon mode (spec D4). Available on macOS and Linux desktops; hidden on Windows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MenuBarIconMode {
-    /// 不显示图标（GUI 宿主仍按需承载窗口以保证全局单窗）。默认。
-    #[default]
+    /// Hide the icon while keeping the GUI host available on demand for singleton windows.
     Off,
-    /// 活动时显示：daemon 运行时显示图标；daemon 空闲退出且无窗口后图标消失、宿主退出。
+    /// Show the icon while the daemon is active and exit the host after the daemon becomes idle.
     Active,
-    /// 一直显示：图标常驻（宿主开机自启 + 常驻）；daemon 退出后图标转「停止」态。
+    /// Keep the icon resident and launch it at login; show the stopped state when the daemon exits.
+    #[default]
     Always,
 }
 
@@ -95,15 +95,80 @@ pub enum DaemonLifecycleMode {
     KeepAlive,
 }
 
-/// 弹窗背景效果。仅 macOS 26+ 可在二者间切换；旧系统无论选哪个都呈现模糊。
+/// macOS 窗口材质。Glass 在不支持 Liquid Glass 的系统上解析为 Blur。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum WindowEffect {
     /// macOS 26+ Liquid Glass（`NSGlassEffectView`，由插件应用）。
-    #[default]
     Glass,
     /// 传统毛玻璃模糊（`NSVisualEffectView` / UnderWindowBackground）。
+    /// 默认值：Glass 下文字可读性受壁纸影响大，macOS 26+ 也默认用 Blur。
+    #[default]
     Blur,
+    /// 完全不透明的主题纯色，不使用任何 Visual Effects 视图。
+    Solid,
+}
+
+impl WindowEffect {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Glass => "glass",
+            Self::Blur => "blur",
+            Self::Solid => "solid",
+        }
+    }
+}
+
+/// Global collaboration style for installed agent prompts (spec collaboration-style.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum CollaborationStyle {
+    /// Relentless interview until shared understanding (historical default).
+    #[default]
+    Aligned,
+    /// Fewer mid-task questions; ask on blockers / high blast radius only.
+    Autonomous,
+    /// User-supplied collaboration paragraph (`collaboration_style_custom_text`).
+    Custom,
+}
+
+impl CollaborationStyle {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Aligned => "aligned",
+            Self::Autonomous => "autonomous",
+            Self::Custom => "custom",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "aligned" => Some(Self::Aligned),
+            "autonomous" => Some(Self::Autonomous),
+            "custom" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+}
+
+/// Popup / Confirm submit keyboard shortcut mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum PopupSubmitKey {
+    /// ⌘/Ctrl+Enter submits; plain Enter and other modified Enter insert newline. Default.
+    #[default]
+    CmdEnter,
+    /// Bare Enter submits (same multi-question advance semantics); any modifier+Enter inserts newline.
+    Enter,
+}
+
+impl PopupSubmitKey {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CmdEnter => "cmdEnter",
+            Self::Enter => "enter",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,13 +184,23 @@ pub struct GeneralConfig {
     pub speech_language: String,
     /// 语音输入快捷键（弹窗内）。规范串如 "cmd+d"/"cmd+shift+d"；空串表示关闭。
     pub speech_shortcut: String,
+    /// 弹窗/Confirm 提交快捷键：`cmdEnter`（默认）或 `enter`。
+    pub popup_submit_key: PopupSubmitKey,
+    /// 协作风格：对齐 / 自主 / 自定义（写入 Agent rules/skill 的可替换段）。
+    pub collaboration_style: CollaborationStyle,
+    /// 自定义协作风格正文（英文契约段）；`collaboration_style == custom` 时使用，空则回退对齐默认。
+    #[serde(default)]
+    pub collaboration_style_custom_text: String,
     /// 回复历史保留条数上限。默认 200；`0` 表示停止新增记录（但保留并仍可查看旧记录）。
     pub history_limit: u32,
+    /// 待办执行历史保留条数（按项目各留 N 条，第 16 轮定案）。默认 20；`0` 同 history_limit
+    /// 语义：停止新增记录，既有历史保留。
+    pub todo_history_limit: u32,
     /// Built-in sound played when a popup appears. Empty string disables it.
     /// macOS stores a sound name, such as "Glass"; Linux treats any non-empty
     /// value as enabled and plays a freedesktop notification sound.
     pub popup_sound: String,
-    /// 菜单栏 / 托盘状态图标模式（off/active/always，spec D4）。默认 off（旧用户零行为变化）。
+    /// Menu bar / tray icon mode (off/active/always, spec D4). Defaults to always.
     pub menu_bar_icon: MenuBarIconMode,
     /// 弹窗预热（方案6）：daemon 常驻一个已挂载、隐藏待命的 `--popup --warm` 进程，来请求时直接喂
     /// `Show` 上屏（省掉 WebView 初始化 + 页面加载 + 挂载的关键路径开销）。默认开；可关（非实验项）。
@@ -140,6 +215,11 @@ fn default_history_limit() -> u32 {
     200
 }
 
+/// 待办执行历史默认保留条数（每项目）。
+fn default_todo_history_limit() -> u32 {
+    20
+}
+
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
@@ -147,12 +227,16 @@ impl Default for GeneralConfig {
             language: "auto".to_string(),
             always_on_top: true,
             appear_animation: PopupAnimation::Alert,
-            window_effect: WindowEffect::Glass,
+            window_effect: WindowEffect::Blur,
             speech_language: "auto".to_string(),
             speech_shortcut: "cmd+d".to_string(),
+            popup_submit_key: PopupSubmitKey::CmdEnter,
+            collaboration_style: CollaborationStyle::Aligned,
+            collaboration_style_custom_text: String::new(),
             history_limit: default_history_limit(),
+            todo_history_limit: default_todo_history_limit(),
             popup_sound: String::new(),
-            menu_bar_icon: MenuBarIconMode::Off,
+            menu_bar_icon: MenuBarIconMode::Always,
             popup_prewarm: true,
             daemon_lifecycle: DaemonLifecycleMode::Activity,
         }
@@ -275,6 +359,7 @@ impl Default for FeishuChannelConfig {
 /// 鉴权双 token：Bot Token（`xoxb-…`，Web API 发送）+ App-Level Token（`xapp-…`，Socket Mode 建连）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+#[derive(Default)]
 pub struct SlackChannelConfig {
     pub enabled: bool,
     /// Bot Token（`xoxb-…`）：所有 Web API 调用（chat.* / conversations.* / files.* / auth.test）。
@@ -283,17 +368,6 @@ pub struct SlackChannelConfig {
     pub app_token: String,
     /// 接收/作答用户的 Slack User ID（`U…`，单聊；发送前经 conversations.open 解析 DM 频道）。
     pub user_id: String,
-}
-
-impl Default for SlackChannelConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            bot_token: String::new(),
-            app_token: String::new(),
-            user_id: String::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,8 +470,7 @@ impl AppConfig {
             std::fs::create_dir_all(dir)?;
             harden_dir(dir);
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         let tmp = path.with_extension(format!("json.tmp-{}", uuid::Uuid::new_v4()));
         std::fs::write(&tmp, json.as_bytes())?;
         // Restrict the temp file before rename so the published file is never briefly world-readable.
@@ -563,11 +636,11 @@ mod tests {
         assert_eq!(c.general.language, "auto");
         assert!(c.general.always_on_top);
         assert_eq!(c.general.appear_animation, PopupAnimation::Alert);
-        assert_eq!(c.general.window_effect, WindowEffect::Glass);
+        assert_eq!(c.general.window_effect, WindowEffect::Blur);
         assert_eq!(c.general.speech_language, "auto");
         assert_eq!(c.general.speech_shortcut, "cmd+d");
         assert_eq!(c.general.history_limit, 200);
-        assert_eq!(c.general.menu_bar_icon, MenuBarIconMode::Off);
+        assert_eq!(c.general.menu_bar_icon, MenuBarIconMode::Always);
         assert!(c.general.popup_prewarm);
         assert!(c.channels.popup.enabled);
         assert_eq!(c.channels.popup.width, 560.0);
@@ -600,6 +673,16 @@ mod tests {
         assert!(c.channels.auto_end_watch);
         assert!(!c.agent_tasks.enabled);
         assert_eq!(c.agent_tasks.permission_prompt, AgentTaskPermission::Ask);
+    }
+
+    #[test]
+    fn window_effect_solid_round_trips() {
+        let json = serde_json::to_string(&WindowEffect::Solid).unwrap();
+        assert_eq!(json, "\"solid\"");
+        assert_eq!(
+            serde_json::from_str::<WindowEffect>(&json).unwrap(),
+            WindowEffect::Solid
+        );
     }
 
     #[test]
@@ -672,22 +755,31 @@ mod tests {
     }
 
     #[test]
-    fn menu_bar_icon_parses_lowercase_and_defaults() {
-        // 显式值解析（lowercase serde）。
+    fn menu_bar_icon_preserves_explicit_values_and_defaults_to_always() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.json");
+
+        std::fs::write(&path, r#"{"general":{"menuBarIcon":"off"}}"#).unwrap();
+        let c = AppConfig::load_from(&path);
+        assert_eq!(c.general.menu_bar_icon, MenuBarIconMode::Off);
+
+        std::fs::write(&path, r#"{"general":{"menuBarIcon":"active"}}"#).unwrap();
+        let c = AppConfig::load_from(&path);
+        assert_eq!(c.general.menu_bar_icon, MenuBarIconMode::Active);
+
         std::fs::write(&path, r#"{"general":{"menuBarIcon":"always"}}"#).unwrap();
         let c = AppConfig::load_from(&path);
         assert_eq!(c.general.menu_bar_icon, MenuBarIconMode::Always);
-        // 缺字段 → 默认 Off（旧配置零影响）。
+
+        // A legacy config without the field adopts the new default.
         std::fs::write(&path, r#"{"general":{"theme":"dark"}}"#).unwrap();
         let c = AppConfig::load_from(&path);
-        assert_eq!(c.general.menu_bar_icon, MenuBarIconMode::Off);
-        // 未知值 → 整个 general 解码失败时走容错默认（这里仅 general 内未知枚举值，
-        // serde 会使该字段报错→因 #[serde(default)] 于 GeneralConfig 级别整体回退默认）。
+        assert_eq!(c.general.menu_bar_icon, MenuBarIconMode::Always);
+
+        // An invalid enum value makes the config fall back to the complete default.
         std::fs::write(&path, r#"{"general":{"menuBarIcon":"bogus"}}"#).unwrap();
         let c = AppConfig::load_from(&path);
-        assert_eq!(c.general.menu_bar_icon, MenuBarIconMode::Off);
+        assert_eq!(c.general.menu_bar_icon, MenuBarIconMode::Always);
     }
 
     #[test]

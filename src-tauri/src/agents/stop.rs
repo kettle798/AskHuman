@@ -68,6 +68,29 @@ fn run_inner(args: &[String]) -> Option<Value> {
         }
         return None;
     }
+    if let Some(reason) = confirmation_suppression_reason(kind, &input) {
+        crate::daemon::lifecycle::log_suppression_audit(
+            crate::daemon::lifecycle::SuppressionAudit {
+                component: "stop_confirmation",
+                reason,
+                tool: None,
+                agent: Some(kind.as_str()),
+                session_id: Some(&session_id),
+                thread_id: input
+                    .get("thread_id")
+                    .or_else(|| input.get("threadId"))
+                    .and_then(Value::as_str),
+                turn_id: input
+                    .get("turn_id")
+                    .or_else(|| input.get("turnId"))
+                    .and_then(Value::as_str),
+            },
+        );
+        if track {
+            super::report::report_simple_event(kind, LifecycleEvent::TurnEnd, session_id, cwd);
+        }
+        return None;
+    }
 
     let last_message = last_assistant_message(kind, &input);
     if last_message.user_confirmed_end_turn {
@@ -77,17 +100,35 @@ fn run_inner(args: &[String]) -> Option<Value> {
         return None;
     }
     let lang = Lang::current();
+    // Todo dispatch on the Stop card (spec todo-whats-next D5): the hook's cwd maps to the git
+    // root, whose pending todos become leading options. Dequeue happens centrally in the
+    // Coordinator (options carry todo_id), not here. Only the first MAX_OPTION_TODOS entries
+    // become options (channel option-count limits, round 14); the overflow note goes into the
+    // question text. `parse_ask_decision` gets the same truncated list (index math stays aligned).
+    let project = cwd
+        .as_deref()
+        .map(|c| crate::project::detect_from(Path::new(c)))
+        .unwrap_or_default();
+    let mut todos = if project.is_empty() {
+        Vec::new()
+    } else {
+        crate::todos::list(&project)
+    };
+    let total_todos = todos.len();
+    todos.truncate(crate::todos::MAX_OPTION_TODOS);
     let task = build_task(
         kind,
         &session_id,
-        cwd.as_deref(),
+        &project,
+        &todos,
+        total_todos,
         last_message.display.as_deref(),
         lang,
     );
     let captured = crate::client::run_ask_capture(task, Duration::from_secs(HOOK_WAIT_SECS));
     let decision = captured
         .as_deref()
-        .map(parse_ask_decision)
+        .map(|stdout| parse_ask_decision(stdout, &todos))
         .unwrap_or(StopDecision::End);
 
     match decision {
@@ -114,6 +155,24 @@ fn is_natural_stop(kind: AgentKind, input: &Value) -> bool {
             .is_some_and(|event| event.eq_ignore_ascii_case("stop")),
         AgentKind::Grok => false,
     }
+}
+
+fn confirmation_suppression_reason(kind: AgentKind, input: &Value) -> Option<&'static str> {
+    if kind != AgentKind::Codex {
+        return None;
+    }
+    let thread_source = input
+        .get("thread_source")
+        .or_else(|| input.get("threadSource"))
+        .and_then(Value::as_str);
+    if thread_source == Some("system") {
+        return Some("codex_system_thread");
+    }
+    input
+        .get("transcript_path")
+        .or_else(|| input.get("transcriptPath"))
+        .is_some_and(Value::is_null)
+        .then_some("codex_transcript_path_null")
 }
 
 fn last_assistant_message(kind: AgentKind, input: &Value) -> LastAssistantMessage {
@@ -191,7 +250,9 @@ fn truncate_preserving_layout(text: &str, max_chars: usize) -> String {
 fn build_task(
     kind: AgentKind,
     session_id: &str,
-    cwd: Option<&str>,
+    project: &str,
+    todos: &[crate::todos::TodoEntry],
+    total_todos: usize,
     last_message: Option<&str>,
     lang: Lang,
 ) -> TaskRequest {
@@ -210,34 +271,50 @@ fn build_task(
         ),
     };
     let message = last_message.unwrap_or(unavailable).to_string();
+    // Options: todo chips first (spec D5), then the two original actions. Index math in
+    // `parse_ask_decision` relies on this order. Labels carry the "Run todo: " display prefix
+    // (same as whats-next); the continuation text comes from the raw entry via index, not the label.
+    let prefix = crate::i18n::tr(lang, "whatsNext.todoPrefix");
+    let mut options: Vec<OptionItem> = todos
+        .iter()
+        .map(|entry| OptionItem::with_todo(format!("{}{}", prefix, entry.text), entry.id.clone()))
+        .collect();
+    options.push(OptionItem::new(continue_label, true));
+    options.push(OptionItem::new(end_label, false));
+    // Overflow note (round 14): appended to the question text when the queue exceeds the cap.
+    let mut question = question.to_string();
+    if let Some(note) = crate::todos::overflow_note(total_todos, lang) {
+        question.push_str("\n\n");
+        question.push_str(&note);
+    }
     TaskRequest {
         message: MessagePrompt::new(message, Vec::new()),
-        questions: vec![Question::new(
-            question.to_string(),
-            vec![
-                OptionItem::new(continue_label, true),
-                OptionItem::new(end_label, false),
-            ],
-        )],
+        questions: vec![Question::new(question, options)],
         is_markdown: true,
         source: crate::models::source_name_for_agent(Some(kind)),
         lang: lang.code().to_string(),
-        project: cwd.unwrap_or_default().to_string(),
+        project: project.to_string(),
         select_only: false,
         single: true,
         output_format: OutputFormat::Json,
         record_history: false,
         agent_kind: Some(kind.as_str().to_string()),
         agent_session_id: Some(session_id.to_string()),
+        mcp_instance_id: None,
         agent_pid: None,
         caller_pid: std::process::id(),
         from_mcp: false,
         perf_id: String::new(),
         perf_autodismiss: false,
+        whats_next: false,
     }
 }
 
-fn parse_ask_decision(stdout: &str) -> StopDecision {
+/// Map the Ask JSON to a decision. Option order is fixed by `build_task`: todo chips occupy
+/// indices `0..todos.len()`, then "continue" and "end" (spec D5 mapping):
+/// end = end (text discarded) · todo (± text) = continue with that todo (+ supplement) ·
+/// continue / free text only = original semantics. Dequeue is not done here (Coordinator does it).
+fn parse_ask_decision(stdout: &str, todos: &[crate::todos::TodoEntry]) -> StopDecision {
     let Ok(value) = serde_json::from_str::<Value>(stdout) else {
         return StopDecision::End;
     };
@@ -251,12 +328,17 @@ fn parse_ask_decision(stdout: &str) -> StopDecision {
     else {
         return StopDecision::End;
     };
+    let continue_index = todos.len() as u64;
+    let end_index = continue_index + 1;
     let indices = answer
         .get("selected_indices")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if indices.iter().any(|index| index.as_u64() == Some(1)) {
+    if indices
+        .iter()
+        .any(|index| index.as_u64() == Some(end_index))
+    {
         return StopDecision::End;
     }
     let instruction = answer
@@ -265,7 +347,25 @@ fn parse_ask_decision(stdout: &str) -> StopDecision {
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(|text| truncate_preserving_layout(text, MAX_INSTRUCTION_CHARS));
-    if indices.iter().any(|index| index.as_u64() == Some(0)) || instruction.is_some() {
+    if let Some(todo) = indices
+        .iter()
+        .filter_map(Value::as_u64)
+        .find(|index| *index < continue_index)
+        .and_then(|index| todos.get(index as usize))
+    {
+        // Todo text is always delivered in full (spec D11); the typed supplement follows after a
+        // blank line, same as whats-next.
+        let prompt = match &instruction {
+            Some(extra) => format!("{}\n\n{}", todo.text, extra),
+            None => todo.text.clone(),
+        };
+        return StopDecision::Continue(Some(prompt));
+    }
+    if indices
+        .iter()
+        .any(|index| index.as_u64() == Some(continue_index))
+        || instruction.is_some()
+    {
         StopDecision::Continue(instruction)
     } else {
         StopDecision::End
@@ -316,32 +416,153 @@ mod tests {
     }
 
     #[test]
-    fn maps_ask_results_fail_open() {
-        assert_eq!(parse_ask_decision("not json"), StopDecision::End);
-        assert_eq!(parse_ask_decision("{}"), StopDecision::End);
+    fn codex_system_and_ephemeral_stops_suppress_confirmation() {
         assert_eq!(
-            parse_ask_decision(r#"{"action":"cancel"}"#),
+            confirmation_suppression_reason(
+                AgentKind::Codex,
+                &json!({"thread_source":"system", "transcript_path":"/tmp/rollout.jsonl"})
+            ),
+            Some("codex_system_thread")
+        );
+        assert_eq!(
+            confirmation_suppression_reason(
+                AgentKind::Codex,
+                &json!({"threadSource":"system", "transcriptPath":"/tmp/rollout.jsonl"})
+            ),
+            Some("codex_system_thread")
+        );
+        assert_eq!(
+            confirmation_suppression_reason(AgentKind::Codex, &json!({"transcript_path":null})),
+            Some("codex_transcript_path_null")
+        );
+        assert_eq!(
+            confirmation_suppression_reason(AgentKind::Codex, &json!({"transcriptPath":null})),
+            Some("codex_transcript_path_null")
+        );
+    }
+
+    #[test]
+    fn ordinary_and_non_codex_stops_keep_confirmation() {
+        for input in [
+            json!({"thread_source":"user", "transcript_path":"/tmp/rollout.jsonl"}),
+            json!({"transcript_path":"/tmp/rollout.jsonl"}),
+            json!({}),
+        ] {
+            assert_eq!(
+                confirmation_suppression_reason(AgentKind::Codex, &input),
+                None
+            );
+        }
+        for kind in [AgentKind::Claude, AgentKind::Cursor, AgentKind::Grok] {
+            assert_eq!(
+                confirmation_suppression_reason(
+                    kind,
+                    &json!({"thread_source":"system", "transcript_path":null})
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn maps_ask_results_fail_open() {
+        assert_eq!(parse_ask_decision("not json", &[]), StopDecision::End);
+        assert_eq!(parse_ask_decision("{}", &[]), StopDecision::End);
+        assert_eq!(
+            parse_ask_decision(r#"{"action":"cancel"}"#, &[]),
             StopDecision::End
         );
         assert_eq!(
             parse_ask_decision(
-                r#"{"action":"answer","answers":[{"selected_indices":[1],"user_input":"ignored"}]}"#
+                r#"{"action":"answer","answers":[{"selected_indices":[1],"user_input":"ignored"}]}"#,
+                &[]
             ),
             StopDecision::End
         );
         assert_eq!(
-            parse_ask_decision(r#"{"action":"answer","answers":[{"selected_indices":[0]}]}"#),
+            parse_ask_decision(
+                r#"{"action":"answer","answers":[{"selected_indices":[0]}]}"#,
+                &[]
+            ),
             StopDecision::Continue(None)
         );
         assert_eq!(
-            parse_ask_decision(r#"{"action":"answer","answers":[{"user_input":"  next step  "}]}"#),
+            parse_ask_decision(
+                r#"{"action":"answer","answers":[{"user_input":"  next step  "}]}"#,
+                &[]
+            ),
             StopDecision::Continue(Some("next step".into()))
         );
         assert_eq!(
             parse_ask_decision(
-                r#"{"action":"answer","answers":[{"selected_indices":[],"user_input":""}]}"#
+                r#"{"action":"answer","answers":[{"selected_indices":[],"user_input":""}]}"#,
+                &[]
             ),
             StopDecision::End
+        );
+    }
+
+    fn two_todos() -> Vec<crate::todos::TodoEntry> {
+        vec![
+            crate::todos::TodoEntry {
+                id: "id-1".into(),
+                text: "修复登录 bug".into(),
+                created_at_ms: 1,
+                agent_kind: None,
+                auto: false,
+            },
+            crate::todos::TodoEntry {
+                id: "id-2".into(),
+                text: "写发布说明".into(),
+                created_at_ms: 2,
+                agent_kind: None,
+                auto: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn stop_card_todo_mapping_follows_spec_d5() {
+        let todos = two_todos();
+        // 选待办 → 以该条为 continuation。
+        assert_eq!(
+            parse_ask_decision(
+                r#"{"action":"answer","answers":[{"selected_indices":[0]}]}"#,
+                &todos
+            ),
+            StopDecision::Continue(Some("修复登录 bug".into()))
+        );
+        // 选待办 + 补充文字 → 按空行拼接。
+        assert_eq!(
+            parse_ask_decision(
+                r#"{"action":"answer","answers":[{"selected_indices":[1],"user_input":" 顺带更新截图 "}]}"#,
+                &todos
+            ),
+            StopDecision::Continue(Some("写发布说明\n\n顺带更新截图".into()))
+        );
+        // 「继续对话」（索引后移到 todos.len()）→ 原有语义。
+        assert_eq!(
+            parse_ask_decision(
+                r#"{"action":"answer","answers":[{"selected_indices":[2]}]}"#,
+                &todos
+            ),
+            StopDecision::Continue(None)
+        );
+        // 「结束对话」（末位）→ 结束并丢弃文字。
+        assert_eq!(
+            parse_ask_decision(
+                r#"{"action":"answer","answers":[{"selected_indices":[3],"user_input":"ignored"}]}"#,
+                &todos
+            ),
+            StopDecision::End
+        );
+        // 只填文字 → 继续（文字为指令），不涉及待办。
+        assert_eq!(
+            parse_ask_decision(
+                r#"{"action":"answer","answers":[{"user_input":"先跑测试"}]}"#,
+                &todos
+            ),
+            StopDecision::Continue(Some("先跑测试".into()))
         );
     }
 
@@ -409,11 +630,7 @@ mod tests {
                 last_assistant_message(AgentKind::Codex, &json!({"last_assistant_message": text}));
             assert!(message.user_confirmed_end_turn, "should match: {text:?}");
             assert!(
-                !message
-                    .display
-                    .as_deref()
-                    .unwrap_or("")
-                    .contains(marker),
+                !message.display.as_deref().unwrap_or("").contains(marker),
                 "marker should be stripped from display: {text:?}"
             );
         }
@@ -426,7 +643,10 @@ mod tests {
         ] {
             let message =
                 last_assistant_message(AgentKind::Codex, &json!({"last_assistant_message": text}));
-            assert!(!message.user_confirmed_end_turn, "should not match: {text:?}");
+            assert!(
+                !message.user_confirmed_end_turn,
+                "should not match: {text:?}"
+            );
         }
 
         let long = format!("{}\n{marker}", "你".repeat(2_001));
@@ -441,7 +661,9 @@ mod tests {
         let task = build_task(
             AgentKind::Codex,
             "s1",
-            Some("/tmp/p"),
+            "/tmp/p",
+            &[],
+            0,
             Some("done"),
             Lang::En,
         );
@@ -451,8 +673,67 @@ mod tests {
         assert_eq!(task.output_format, OutputFormat::Json);
         assert_eq!(task.questions[0].predefined_options.len(), 2);
         assert_eq!(task.message.text, "done");
+        assert_eq!(task.project, "/tmp/p");
         assert!(task.questions[0].predefined_options[0].recommended);
         assert!(!task.questions[0].predefined_options[1].recommended);
+    }
+
+    #[test]
+    fn stop_card_prepends_todo_chips_with_ids() {
+        // 待办 chip 前置（带 id，供 Coordinator 出队）+ 原「继续/结束」压后（spec D5）。
+        let task = build_task(
+            AgentKind::Codex,
+            "s1",
+            "/tmp/p",
+            &two_todos(),
+            2,
+            Some("done"),
+            Lang::En,
+        );
+        let options = &task.questions[0].predefined_options;
+        assert_eq!(options.len(), 4);
+        // 未超上限 → 问题正文无溢出提示。
+        assert!(!task.questions[0].message.contains("not listed"));
+        // 展示前缀「Run todo: 」（与 whats-next 一致）；continuation 仍按索引取待办原文。
+        assert_eq!(options[0].text, "Run todo: 修复登录 bug");
+        assert_eq!(options[0].todo_id.as_deref(), Some("id-1"));
+        assert!(!options[0].recommended);
+        assert_eq!(options[1].todo_id.as_deref(), Some("id-2"));
+        assert_eq!(options[2].text, "Continue conversation");
+        assert!(options[2].recommended);
+        assert!(options[2].todo_id.is_none());
+        assert_eq!(options[3].text, "End conversation");
+    }
+
+    #[test]
+    fn stop_card_appends_overflow_note_above_cap() {
+        // 队列超上限（第 14 轮定案）：run_inner 截断后传入截断列表 + 原始总数；
+        // 问题正文带溢出提示，选项数 = 上限 + 2。
+        let todos: Vec<crate::todos::TodoEntry> = (0..crate::todos::MAX_OPTION_TODOS)
+            .map(|i| crate::todos::TodoEntry {
+                id: format!("id-{i}"),
+                text: format!("task {i}"),
+                created_at_ms: i as u64,
+                agent_kind: None,
+                auto: false,
+            })
+            .collect();
+        let task = build_task(
+            AgentKind::Codex,
+            "s1",
+            "/tmp/p",
+            &todos,
+            crate::todos::MAX_OPTION_TODOS + 4,
+            Some("done"),
+            Lang::En,
+        );
+        let options = &task.questions[0].predefined_options;
+        assert_eq!(options.len(), crate::todos::MAX_OPTION_TODOS + 2);
+        assert!(
+            task.questions[0].message.contains("4 more"),
+            "{}",
+            task.questions[0].message
+        );
     }
 
     #[test]

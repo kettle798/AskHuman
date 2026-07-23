@@ -64,6 +64,8 @@ impl StreamConn {
                 Some(Ok(Message::Ping(p))) => {
                     let _ = self.ws.send(Message::Pong(p)).await;
                 }
+                // Cannot collapse into a match guard: `.await` is not allowed there.
+                #[allow(clippy::collapsible_match)]
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
                     if !self.reconnect().await {
                         return None;

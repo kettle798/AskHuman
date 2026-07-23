@@ -22,8 +22,39 @@ export default {
     attachments: "Attachments · {n}",
     inputPlaceholder: "Type your reply…",
     addImage: "Add image",
+    composer: {
+      dockedLabel: "Pinned answer editor",
+      returnToQuestion: "Return to the editor's question",
+    },
     recommended: "Recommended",
     permissionReason: "Reason:",
+    permissionDiff: {
+      title: "Proposed changes",
+      files: "{n} files",
+      additions: "+{n}",
+      deletions: "−{n}",
+      originalParams: "Original tool parameters",
+      snapshotAt: "Read at {time}",
+      omitted: "Omitted {files} files, {hunks} hunks, and {lines} lines",
+      loadingSnapshot: "Reading the local file snapshot…",
+      status: {
+        payload_only:
+          "The original file could not be read. This diff comes only from the agent payload and may be inaccurate.",
+        snapshot_ready: "Combined with a local file snapshot",
+        new_file: "New file (the path does not currently exist)",
+        protected_path:
+          "The protected or high-risk path was not read. This diff may be inaccurate.",
+        timeout: "Reading the original file timed out. This diff may be inaccurate.",
+        too_large: "The file or diff exceeds the safety limit and may be incomplete.",
+        too_many_files: "The file count exceeds the safety limit and the diff may be incomplete.",
+        non_utf8: "The original file is not UTF-8 text. This diff may be inaccurate.",
+        not_regular_file: "The original path is not a regular file. This diff may be inaccurate.",
+        unreadable: "The original file could not be read safely. This diff may be inaccurate.",
+        source_mismatch:
+          "Local content does not match the proposed edit. This diff may be inaccurate.",
+        unsupported: "This native edit does not provide a diff yet",
+      },
+    },
     view: {
       copyMessage: "Copy message",
       viewSource: "View source",
@@ -34,7 +65,7 @@ export default {
     next: "Next",
     nav: {
       pin: "Keep on top",
-      theme: "Toggle theme",
+      todos: "Project todos",
       settings: "Settings",
       history: "History",
       update: "Update available",
@@ -77,6 +108,22 @@ export default {
       stop: "Stop voice input",
       preparing: "Preparing…",
     },
+    imTip: {
+      text: "Set up an IM channel to receive and answer prompts on your phone when away.",
+      action: "Set up",
+      dismiss: "Don't show again",
+    },
+    todos: {
+      title: "Todos",
+      optionPrefix: "Run todo: ",
+      picked: "{n} selected",
+      chipHint: "Select to send with your reply (removed from the list once picked up)",
+      delete: "Delete",
+      deleteConfirm: "Confirm delete",
+      more: "…{n} more todo(s) not listed (view or reorder in the Todos window or /todo).",
+      // Line merged into the answer for each selected todo (blank-line separated).
+      mergeLine: "Also look into this todo task: {text}",
+    },
   },
   // 后端(Swift/Rust)语音事件以语义 key 上报，前端在此翻译。
   speech: {
@@ -118,6 +165,11 @@ export default {
       advanced: "Advanced",
       experimental: "Experimental",
     },
+    search: {
+      placeholder: "Search settings",
+      empty: "No matching settings",
+      close: "Exit search",
+    },
     experimental: {
       enableLabel: "Experimental features",
       enableHint: "Show advanced, unstable features. Off by default.",
@@ -141,6 +193,37 @@ export default {
       daemonLifecycleKeepalive: "Keep alive",
       daemonLifecycleHint:
         "\"On activity\": the daemon starts only when an agent becomes active or asks a question, and exits after a period of idleness. \"Keep alive\": the daemon stays resident and starts at login so IM channels can receive messages anytime; this keeps using a small amount of system resources and holds the IM channel open. When using multiple devices at once, configure a distinct IM bot per device.",
+      daemonLifecycleLockedByTasks:
+        "Locked to \"Keep alive\" by \"Create Agent tasks from IM\"; turn that feature off to switch back to \"On activity\".",
+    },
+    permissionRules: {
+      title: "Codex conversation grants",
+      desc: "\"Allow for this conversation\" grants remembered by AskHuman from permission popups. Grants expire after 30 days without use. Permanent rules written into Codex config files are not managed here.",
+      manage: "Manage",
+      refresh: "Refresh",
+      loading: "Loading…",
+      empty: "No remembered grants yet.",
+      globalGroup: "Cross-session grants (remembered by AskHuman)",
+      sessionFallback: "Conversation {id}",
+      scopeFiles: "{n} exact file(s)",
+      scopeProject: "project {root}",
+      scopeDisk: "full-disk file edits",
+      scopeShell: "{n} shell rule(s)",
+      scopeNetwork: "{n} network host(s)",
+      scopeMcp: "{n} MCP tool(s)",
+      lastUsed: "last used {time}",
+      expires: "expires {time}",
+      detail: "Details",
+      collapse: "Collapse",
+      reset: "Reset",
+      confirmReset: "Confirm reset?",
+      kindFileExact: "File",
+      kindFileProject: "Project",
+      kindFileDisk: "Full disk",
+      kindMcpTool: "MCP tool",
+      kindNetworkHost: "Network host",
+      kindShellExact: "Shell command",
+      kindShellPrefix: "Shell prefix",
     },
     appearance: {
       title: "Appearance",
@@ -154,10 +237,16 @@ export default {
     popupBehavior: {
       title: "Popup behavior",
       alwaysOnTop: "Always on top",
+      submitKey: "Submit shortcut",
+      submitKeyCmdEnter: "⌘↵ submit",
+      submitKeyEnter: "↵ submit",
+      submitKeyCmdEnterHint: "⌘/Ctrl+Enter submits; Enter inserts a newline",
+      submitKeyEnterHint: "Enter submits; any modifier+Enter inserts a newline",
       prewarm: "Pre-warm popup",
       prewarmHint:
         "Keep one popup ready in the background so it appears faster. Uses a little memory.",
-      windowEffect: "Window effect",
+      windowEffect: "Window material",
+      effectSolid: "Solid",
       effectGlass: "Glass",
       effectBlur: "Blur",
       appearAnimation: "Appear animation",
@@ -187,6 +276,17 @@ export default {
     integration: {
       overviewDesc:
         "Use Automatic integration to set up AskHuman in one step. If you prefer to manage files yourself, the reference prompt and MCP examples are available under Manual integration below.",
+      collabTitle: "Collaboration style",
+      collabAligned: "Aligned",
+      collabAutonomous: "Autonomous",
+      collabCustom: "Custom",
+      collabAlignedDesc:
+        "Interview thoroughly until requirements and design are shared; more AskHuman check-ins before large changes.",
+      collabAutonomousDesc:
+        "Fewer interruptions; ask only when blocked, high-risk, or irreversible. Reasonable defaults are fine—summarize them at handoff.",
+      collabCustomDesc:
+        "Edit the English paragraph below to replace how often the agent asks and when it may change the plan. Channel rules (must use AskHuman, whats-next, etc.) stay fixed.",
+      collabSaveCustom: "Save custom text and update integrations",
       manualTitle: "Manual integration",
       autoTitle: "Automatic integration",
       promptTitle: "Reference prompt",
@@ -251,6 +351,9 @@ export default {
       recommendedTag: "Rec",
       codexNoHook:
         "Codex can't extend a CLI tool's timeout, so long waits may be cancelled. Use MCP mode for reliable long waits.",
+      contextRecoveryHookLabel: "Context recovery hook",
+      codexRecoveryHookHint:
+        "Restores the exact last AskHuman exchange after compaction. Codex still cannot extend a CLI tool timeout, so MCP remains recommended for long waits.",
       mcpModeHint:
         "Runs AskHuman as an MCP server with a long tool timeout, so the agent reliably waits for your reply.",
       mcpExampleHint:
@@ -268,6 +371,16 @@ export default {
       permissionDefault: "Always Agent default",
       permissionYolo: "Always YOLO",
       yoloWarning: "YOLO auto-approves operations and bypasses normal Agent protections for every new IM task.",
+      confirmTitle: "Enable \"Create Agent tasks from IM\"?",
+      confirmIntro: "Enabling this takes effect immediately:",
+      confirmKeepalive:
+        "The daemon stays resident and installs a start-at-login item; the daemon lifecycle under Advanced is locked to \"Keep alive\" and changes there won't take effect.",
+      confirmResources: "A small amount of system resources is used continuously in the background.",
+      confirmBotChannel:
+        "This device holds the IM bot channel long-term; devices sharing the same bot will steal each other's messages.",
+      confirmRevert: "Turn this feature off to switch the lifecycle back to \"On activity\".",
+      confirmCancel: "Cancel",
+      confirmEnable: "Enable anyway",
       testTerminal: "Test Terminal",
       terminalTestDone: "Terminal.app test opened successfully. No Agent was started.",
       refresh: "Refresh",
@@ -309,10 +422,12 @@ export default {
       autoEndWatchDesc:
         "When on, if an IM channel is no longer the active channel (e.g. you return to your computer and answer in the local popup, or send a message on another channel that switches the active slot away), all live watches on that channel are stopped automatically—no manual /unwatch needed. Only effective when On-demand IM delivery is enabled.",
       popupTitle: "Local popup",
+      issueBanner: "⚠ Channel issue ({time}): {msg}",
       rememberSize: "Remember window size",
       defaultWidth: "Default width",
       defaultHeight: "Default height",
       telegramTitle: "Telegram",
+      setupGuide: "Setup guide",
       botToken: "Bot Token",
       chatId: "Chat ID",
       apiBaseUrl: "API Base URL",
@@ -339,6 +454,7 @@ export default {
       convertTextToDocxHint:
         "Text files that aren't inlined (e.g. long ones) are converted to docx so DingTalk can preview them; turn off to send the original file.",
       feishuTitle: "Feishu",
+      recommendedBadge: "Recommended",
       appId: "App ID",
       appSecret: "App Secret",
       openId: "Open ID",
@@ -355,7 +471,6 @@ export default {
       slackDetectHint:
         "Use the target Slack account to DM the bot with: {code} (valid for 120s)",
       slackDetected: "Detected and filled User ID: {userId}",
-      moreSoon: "More channels coming soon",
     },
     history: {
       title: "Reply history",
@@ -365,6 +480,9 @@ export default {
       overLimit:
         "There are more entries than this; they'll be trimmed on the next AskHuman call.",
       cleanNow: "Clean up now",
+      todoLimit: "Todo history entries",
+      todoLimitHint:
+        "Maximum executed todos kept per project (view and restore them in the Todos window's History section). 0 stops recording; existing history is kept.",
     },
     about: {
       title: "About",
@@ -469,6 +587,7 @@ export default {
     revokeInterject: "Revoke",
     revokeConfirm: "Revoke the queued message?",
     revokeOk: "Revoke",
+    openTodos: "Project todos",
     view: {
       status: "Status",
       type: "Type",
@@ -499,6 +618,89 @@ export default {
       hoursAgo: "{n}h ago",
       daysAgo: "{n}d ago",
     },
+  },
+  todosWin: {
+    title: "Todos",
+    projectLabel: "Project",
+    sectionWithTodos: "With todos",
+    sectionRecent: "Recent projects",
+    noProjects: "No projects yet",
+    noProjectsHint:
+      "Projects appear here once they have todos, a tracked agent session, or a recent workspace.",
+    empty: "No todos in this project",
+    emptyHint:
+      "Queued ideas are handed to the agent when it asks what to do next, and are removed once it starts working on them.",
+    addPlaceholder: "Add a todo for this project…",
+    add: "Add",
+    edit: "Edit",
+    editLabel: "Edit todo",
+    save: "Save",
+    editCancel: "Cancel",
+    delete: "Delete",
+    deleteConfirm: "Confirm delete",
+    complete: "Mark complete",
+    undoComplete: "Undo complete",
+    copy: "Copy text",
+    copied: "Copied",
+    newTask: "Create Agent task",
+    dragHint: "Drag to reorder (top entries appear first on cards and options)",
+    clear: "Clear todos",
+    clearHist: "Clear history",
+    autoLabel: "Auto",
+    clearTitle: "Clear all todos?",
+    clearDesc:
+      "This removes all {n} todos in this project. Cleared todos do not enter history and cannot be recovered.",
+    clearHistTitle: "Clear execution history?",
+    clearHistDesc: "This removes all {n} history entries in this project and cannot be undone.",
+    confirmCancel: "Cancel",
+    clearOk: "Clear",
+    historyTitle: "History",
+    restore: "Restore to todos",
+    addedBy: "Added by {agent}",
+    autoOn: "Mark as auto-run (dispatched directly at whats-next, no card)",
+    autoOff: "Unmark auto-run",
+    autoNewHint:
+      "When enabled, the Agent will automatically run this todo after completing the preceding task.",
+    time: {
+      justNow: "Just now",
+      secondsAgo: "{n}s ago",
+      minutesAgo: "{n}m ago",
+      hoursAgo: "{n}h ago",
+      daysAgo: "{n}d ago",
+      yesterday: "Yesterday",
+    },
+  },
+  newTask: {
+    title: "New Agent Task",
+    projectLabel: "Project",
+    projectSectionWorkspace: "Recent workspaces",
+    projectSectionTodos: "Projects with todos",
+    noProjects: "No workspace is available",
+    noProjectsHint:
+      "Open a project in a local Agent first, or add a directory in Settings → Experimental.",
+    taskLabel: "Task",
+    manualEntry: "Enter a new task",
+    todoTag: "【TODO】",
+    taskPlaceholder: "Enter the task for the Agent to perform…",
+    supplementLabel: "Extra instructions (optional)",
+    supplementPlaceholder: "Optional: add instructions for this todo…",
+    agentLabel: "Agent",
+    agentLoading: "Checking Agent availability…",
+    readyBinary: "CLI",
+    readyLifecycle: "Lifecycle",
+    readyIntegration: "Integration",
+    permissionLabel: "Permission mode",
+    permissionAgentDefault: "Agent default",
+    permissionAgentDefaultDesc: "Do not override Agent permissions",
+    permissionYolo: "YOLO",
+    permissionYoloBadge: "Danger",
+    permissionYoloDesc: "Auto-approve operations and bypass sandbox restrictions",
+    launch: "Start task",
+    launching: "Starting…",
+    launchNote: "Submitting starts the Agent in a new Terminal window.",
+    tooLong: "Task exceeds 3000 characters (currently {n})",
+    launchFailed: "Failed to launch: {e}",
+    todoMissing: "This todo has been removed; launching uses its saved snapshot.",
   },
   interject: {
     title: "Message to Agent",

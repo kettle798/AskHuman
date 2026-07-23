@@ -54,8 +54,14 @@ fn monitor(args: &[String], lang: Lang) -> Result<(), String> {
     {
         if !json && !text && gui_available() {
             // 彻底路由到统一 GUI 宿主（全局单窗，spec D3）：宿主在则聚焦/新建 Agent 窗口、不在则拉起。
-            if crate::gui_host::host_open(crate::gui_host::WindowKind::Agents, false, None, None)
-                .is_ok()
+            if crate::gui_host::host_open(
+                crate::gui_host::WindowKind::Agents,
+                false,
+                None,
+                None,
+                None,
+            )
+            .is_ok()
             {
                 exit(0);
             }
@@ -431,10 +437,13 @@ fn show(args: &[String], lang: Lang) -> Result<(), String> {
         _ => AGENTS.to_vec(),
     };
 
-    // 参考提示词：单独查看 Grok 时给「skill 正文」（其指令载体是 skill、非 shell 版规则），
-    // 其余（含默认列出全部）沿用共享的 CLI 参考正文。
+    // Show the target-specific body for a single agent. The all-agent view keeps the generic
+    // reference because one shared block cannot represent Codex and non-Codex scope rules.
     if targets == ["grok"] {
         print_line(&crate::prompts::grok_skill_body());
+    } else if targets.len() == 1 {
+        let kind = AgentKind::parse(targets[0]).unwrap();
+        print_line(&crate::prompts::cli_reference_for(kind));
     } else {
         print_line(&crate::prompts::cli_reference());
     }

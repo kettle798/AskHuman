@@ -30,10 +30,18 @@ fn button_style(action: SelectAction) -> Option<&'static str> {
         | SelectAction::TaskWorkspace
         | SelectAction::TaskAgent
         | SelectAction::TaskPermission
+        | SelectAction::TaskInputSource
         | SelectAction::Msg
-        | SelectAction::Stage => Some("primary"),
-        SelectAction::Status | SelectAction::Diff | SelectAction::Transcript => None,
-        SelectAction::Unwatch => Some("danger"),
+        | SelectAction::MsgTarget
+        | SelectAction::Stage
+        | SelectAction::TodoRm
+        | SelectAction::TodoAuto => Some("primary"),
+        SelectAction::Status
+        | SelectAction::Diff
+        | SelectAction::Transcript
+        | SelectAction::Todo
+        | SelectAction::TodoAutoEntry => None,
+        SelectAction::Unwatch | SelectAction::TodoRmEntry => Some("danger"),
     }
 }
 

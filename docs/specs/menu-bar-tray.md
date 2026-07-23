@@ -8,10 +8,40 @@
 > 请求与 Agent 摘要，使菜单可聚焦 Popup、打开插话 composer 或聚焦终端。托盘菜单由 `app/tray_menu.rs`
 > 按稳定 key 做最小 diff，daemon socket 用文件监听唤醒重连。`general.daemonLifecycle=keepalive` 是与
 > `menuBarIcon` 正交的 daemon 常驻策略，GUI Host 与 daemon 使用各自登录项。
+>
+> **渠道故障可见化（R7，2026-07）**：daemon 进程内新增渠道健康登记表（`channels/health.rs`）——四家
+> IM 客户端的统一请求出口失败即登记、该渠道下一次任何成功操作即清除（纯内存态，daemon 重启即清）。
+> 快照经 `TrayState.channel_issues` / `StatusInfo.channel_issues` 下发（旧端缺字段 → 空，不显示）；
+> 登记表内容变化即推一帧 TrayState。托盘状态区逐渠道显示可点击的「⚠ 渠道异常（时间）」行，点击打开
+> 设置窗口并定位渠道 tab（新开窗经 URL `?tab=`、已开窗经 `settings-goto-tab` 事件）；设置页渠道卡
+> 顶部显示错误横幅，渠道 tab 可见期间每 10s 轻量轮询刷新。
+>
+> **D11 补充（宿主换新时效，2026-07）**：除 15s 轮询外，**最后一个窗口关闭时立即**检查并换新
+> （off 模式除外——宿主本就随之退出）；盘上二进制已换新但**有窗口挡住**自动换新时，托盘菜单出现
+> 「重启菜单栏应用以完成更新」项（`binary_stale` 标记入菜单签名，换新完成后自动消失），点击即
+> 释放单实例锁并重启宿主（always 交 launchd KeepAlive，其它自我 re-exec；窗口随之关闭，用户知情选择）。
+>
+> **D8/D11 补充（daemon 停止时更新，2026-07）**：GUI Host 不依赖 daemon 完成手动检查与安装。
+> Host 启动时从 `update.json` 恢复有新版状态；手动检查即时改写菜单，并用菜单内只读状态行显示
+> 「正在检查 / 已是最新版 / 检查或安装失败原因」，执行中禁用重复操作。daemon 恢复后的旧快照与本地
+> 检查结果合并，不得把刚查到的更新入口覆盖掉。Host 换新使用更新前缓存的稳定可执行路径，避免 Linux
+> 替换运行中 inode 后 `current_exe()` 指向 `(... deleted)`；新 Host 拉起失败时旧 Host 保持运行并显示错误。
+>
+> **D8/D10 补充（检查结果一致性，2026-07）**：设置页与菜单检查共享 `update.json`，写操作持
+> `update.lock`，缓存版本只前进不后退。设置页检查成功须即时刷新 Host 菜单；若 daemon 正在运行，
+> 通过增量 IPC 令其立刻重载并广播给弹窗（不运行则不拉起）。菜单检查成功后保留“已检查到新版本
+> vX.Y.Z”或“已是最新版”结果行，不能因菜单点击后自动关闭而让用户看不到任何反馈。
+>
+> **Agent 集成更新提醒（2026-07）**：GUI Host 启动时检查当前四家 Agent 集成，覆盖版本换新后的
+> 首次检查；daemon 每次从停止变为运行时复查。判定与设置 Agents tab 的 `agent_mode::needs_update`
+> 完全同源。存在待更新项时，托盘状态区显示一条可点击灯泡提示：单项列 Agent 名，多项只显示数量，
+> 点击直达 Agents tab；
+> 没有待答时，template 图标右上显示带透明挖空的小实心圆；有待答则仍优先显示问号。设置页成功
+> 更新集成后立即复查并清除提醒，无需新增 daemon IPC。
 
 ## 1. 背景与动机
 
-守护进程（daemon）常驻后台收发渠道消息、协调抢答、追踪 agent，但用户**看不到它在做什么**。希望在 macOS 菜单栏（Linux 桌面托盘）提供一个**默认关闭**的小图标，开启后展示运行状态（是否在跑、几个待答、IM 连接、agent 忙闲、有无更新），并能快速打开设置 / 历史 / Agent 状态、检查/应用更新、重启/停止 daemon。
+守护进程（daemon）常驻后台收发渠道消息、协调抢答、追踪 agent，但用户**看不到它在做什么**。希望在 macOS 菜单栏（Linux 桌面托盘）提供一个默认常驻的小图标，展示运行状态（是否在跑、几个待答、IM 连接、agent 忙闲、有无更新），并能快速打开设置 / 历史 / Agent 状态、检查/应用更新、重启/停止 daemon。
 
 讨论中进一步明确：既然要新增一个常驻 GUI 进程，索性让它**统一承载所有辅助 GUI 窗口（设置 / 历史 / Agent 状态）**，从而保证**每类窗口全局唯一**（重复点击只聚焦、不重复弹出），并让「菜单内更新」「菜单语言热切换」等都顺理成章。
 
@@ -21,7 +51,7 @@ daemon 是**刻意「无 GUI」**的：不初始化 AppKit/GTK、不占主线程
 
 ## 2. 目标（一句话）
 
-提供一个默认关闭的**三态**开关（关 / 活动时显示 / 一直显示）；开启后在菜单栏/托盘显示状态图标并提供状态与快捷操作；同时由一个**单实例 GUI 宿主进程**统一承载设置/历史/Agent/Interject 窗口，保证全局每类唯一。
+提供一个默认“一直显示”的**三态**开关（关 / 活动时显示 / 一直显示）；在菜单栏/托盘显示状态图标并提供状态与快捷操作；同时由一个**单实例 GUI 宿主进程**统一承载设置/历史/Agent/Interject 窗口，保证全局每类唯一。已有配置中的显式选择保持不变。
 
 ## 3. 已确认决策
 
@@ -30,7 +60,7 @@ daemon 是**刻意「无 GUI」**的：不初始化 AppKit/GTK、不占主线程
 | D1 | 平台范围 | **macOS + Linux 桌面**（Tauri 跨平台托盘）。Windows **不支持**（无 daemon，单进程回退），设置项隐藏。Linux 为 **best-effort**：需图形会话（DISPLAY/Wayland）+ 托盘宿主（StatusNotifierItem/appindicator）；headless 服务器无图标、不报错、不影响 daemon。 |
 | D2 | 统一 GUI 宿主进程 | 新增**单实例**宿主进程（隐藏角色 `AskHuman --gui-host`），全局承载**设置 / 历史 / Agent 状态 / Interject**窗口（每类或每 session 唯一）+ 菜单栏状态项。daemon 保持无 GUI、不承载任何窗口。用 **Tauri 2 tray-icon**（原生菜单）。macOS 设 **accessory**（不占 Dock/Cmd-Tab）。 |
 | D3 | 彻底路由（全局单窗，Q2=彻底） | 所有打开窗口的入口都路由到宿主：CLI `AskHuman --settings`/`--history`/`agents monitor`、**弹窗导航栏「设置/历史」按钮**、托盘菜单项。宿主在则聚焦/新建对应窗口，不再各开进程。 |
-| D4 | 三态开关 | `general.menuBarIcon` ∈ `off`(默认) \| `active` \| `always`。设置「通用」Tab；Windows 隐藏。<br>• **off**：无图标（宿主仍按需承载窗口，保证单窗）。<br>• **active（活动时显示）**：daemon 运行时显示图标；无窗口且 daemon 空闲退出后图标消失、宿主退出；不装登录项。<br>• **always（一直显示）**：图标常驻（宿主开机自启 + 常驻）。**图标本身不给 daemon 保活**，daemon 仍按空闲规则退出；退出后图标仍在但显示「停止」态，宿主被动重连，daemon 再次运行即恢复实时态。 |
+| D4 | 三态开关 | `general.menuBarIcon` ∈ `off` \| `active` \| `always`（默认）。设置「通用」Tab；Windows 隐藏。配置缺字段时采用 `always`，已有显式值保持不变。<br>• **off**：无图标（宿主仍按需承载窗口，保证单窗）。<br>• **active（活动时显示）**：daemon 运行时显示图标；无窗口且 daemon 空闲退出后图标消失、宿主退出；不装登录项。<br>• **always（一直显示）**：图标常驻（宿主开机自启 + 常驻）。**图标本身不给 daemon 保活**，daemon 仍按空闲规则退出；退出后图标仍在但显示「停止」态，宿主被动重连，daemon 再次运行即恢复实时态。 |
 | D5 | 窗口续命 daemon（统一规则） | **任意 GUI 窗口打开期间**给（**正在运行的**）daemon 续命；**最后一个窗口关闭后** daemon 重新计时、到点空闲退出。**图标本身从不续命**。打开窗口**不会主动启动** daemon（Agent 状态窗口除外——它需要 daemon 数据，会 `ensure_running` 拉起）。该规则与 tray 模式、与是否显示图标无关。 |
 | D6 | 图标三态（视觉，Q5 扩展） | ① **运行·空闲**：单色模板图（macOS 随明暗自动着色）。② **运行·有待答**：带小圆点/高亮变体。③ **（仅 always）daemon 已停止**：可区分的「停止」态（暗淡/空心变体）。**待答数量在菜单内显示**（不在图标上叠数字）。 |
 | D7 | 菜单内容 | **状态区（只读）**：daemon 运行中/未运行 + 版本 + 运行时长；N 个待答；Agent 工作/空闲数（有数据时）；已连接 IM（有时）；有可用更新（有时）。**操作区**：打开设置 / 打开历史 / 打开 Agent 状态；**检查更新**，有更新时「更新到 vX.Y（答完后生效）」点击即换新；daemon 运行时「重启 daemon」「停止 daemon」，daemon 停止时（always 态）显示「启动 daemon」。 |
@@ -41,6 +71,7 @@ daemon 是**刻意「无 GUI」**的：不初始化 AppKit/GTK、不占主线程
 | D12 | 开机自启（仅 always，Q2=含自启） | 切到 **always** 安装登录项、切走移除：macOS `~/Library/LaunchAgents/<id>.plist`（`RunAtLoad`+`KeepAlive`）；Linux `~/.config/autostart/<id>.desktop`。使「重启系统后/daemon 没起时」图标也一直在。 |
 | D13 | 单实例 + 宿主自有 IPC | 宿主 flock `gui-host.lock` 单实例。宿主自带 IPC（`gui-host.sock`，复用 NDJSON 编解码）接收「打开窗口/关闭/刷新」请求——**与 daemon 解耦**，使 daemon 未运行时也能打开设置/历史。宿主另作为 daemon 客户端：一条**非保活**状态订阅 + 「有窗口时」一条**计活**保活连接（实现 D5）。 |
 | D14 | daemon 集成 | `menuBarIcon != off` 时，daemon 启动 / 配置变更尝试拉起宿主（单实例去重，作兜底；always 主要靠登录项）。新增 `ClientMsg::TraySubscribe` / `ServerMsg::TrayState`（非保活）。`PROTOCOL_VERSION` 保持 1（增量、旧端忽略未知变体）。 |
+| D15 | Agent 集成更新提醒 | GUI Host 启动与 daemon 停→运行时按 Agents 设置页同一口径复查；待更新时显示可点击单行灯泡提示，单项列 Agent 名、多项只显示数量。无待答时 template 图标右上显示带挖空的小实心圆，有待答时问号优先。点击打开 Agents tab；设置内更新成功后即时清除。状态由 Host 本地缓存，不扩展 `TrayState`。 |
 
 ## 4. 约束与既有规则（不可破坏）
 
@@ -66,6 +97,7 @@ daemon 是**刻意「无 GUI」**的：不初始化 AppKit/GTK、不占主线程
 9. **Linux 桌面**：支持托盘的桌面环境功能同 macOS；headless 开启 → 无图标、无报错、daemon 正常。
 10. **Windows**：设置不出现该项；无宿主/托盘逻辑、无崩溃（窗口仍走现有单进程方式）。
 11. **回归**：提问/抢答/drain/自更新/IM 自动激活/历史/Agent 订阅等既有功能不受影响；daemon 空闲退出/指纹换新/排空语义不变。
+12. **Agent 集成提醒（D15）**：制造任一当前模式产物过期后，换新 GUI Host 或启动 daemon，菜单出现灯泡提示（单项列名、多项计数）；无待答时图标显示右上实心圆，有待答时仍显示问号；点击定位 Agents tab；在设置中更新后提示与圆点立即消失。
 
 ## 6. 访谈反馈记录（按时间，供追溯）
 

@@ -74,6 +74,14 @@ pub enum Command {
     Stage(Option<u64>),
     /// `/transcript [编号]`：导出 agent 完整会话渲染（无参 → 单选卡）。
     Transcript(Option<u64>),
+    /// `/todo`、`/待办`：无编号 → 选项目（带文本则选中后新增）；`Some(n)` 是兼容入口，
+    /// 无文本打开 Agent n 所在项目的管理卡，带文本直接追加。文本保留原始换行。
+    Todo(Option<u64>, Option<String>),
+    /// `/todo-rm`、`/删待办`：无参 → 选项目；`Some(n)` 兼容 Agent 编号直达。
+    TodoRm(Option<u64>),
+    /// `/todo-auto`、`/自动待办`：无编号 → 选项目（带文本则新增自动待办）；`Some(n)` 是
+    /// 兼容入口，无文本打开切换卡，带文本直接新增一条自动执行待办。
+    TodoAuto(Option<u64>, Option<String>),
     /// `/help`、`/帮助`、`/?`：返回动态引导文案（可发什么、可用命令）。
     Help,
 }
@@ -100,7 +108,175 @@ pub enum Parsed {
     Text,
 }
 
-/// 解析入站文本：`trim` 后**以 `/` 或 `!` 开头**才进命令分派，取首个 token（大小写不敏感）匹配。
+/// 无斜线前缀时的整句短语 → 无参命令（spec `docs/specs/im-command-phrases.md`）。
+/// 键已是 [`crate::textnorm::normalize_key`] 结果；表构建时要求键唯一。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PhraseKind {
+    New,
+    Here,
+    Help,
+    Status,
+    Watch,
+    Unwatch,
+    Msg,
+    Diff,
+    Stage,
+    Transcript,
+    Todo,
+    TodoRm,
+    TodoAuto,
+}
+
+/// (normalized key, command). Includes slash command names, Chinese token aliases, and
+/// longer voice-friendly phrases. No-arg forms only.
+const COMMAND_PHRASES: &[(&str, PhraseKind)] = &[
+    // /new
+    ("new", PhraseKind::New),
+    ("新建", PhraseKind::New),
+    ("新建会话", PhraseKind::New),
+    ("新建任务", PhraseKind::New),
+    ("新任务", PhraseKind::New),
+    ("开新任务", PhraseKind::New),
+    ("开始新任务", PhraseKind::New),
+    ("新建agent", PhraseKind::New),
+    ("新建代理", PhraseKind::New),
+    ("开启新任务", PhraseKind::New),
+    ("newsession", PhraseKind::New),
+    ("newtask", PhraseKind::New),
+    ("newagent", PhraseKind::New),
+    ("startnewtask", PhraseKind::New),
+    ("createnewsession", PhraseKind::New),
+    ("createnewtask", PhraseKind::New),
+    ("startanewtask", PhraseKind::New),
+    // /here
+    ("here", PhraseKind::Here),
+    ("这里", PhraseKind::Here),
+    ("就在这里", PhraseKind::Here),
+    ("用这里", PhraseKind::Here),
+    ("切换到这里", PhraseKind::Here),
+    ("在这里回复", PhraseKind::Here),
+    ("righthere", PhraseKind::Here),
+    ("usethis", PhraseKind::Here),
+    ("usethischannel", PhraseKind::Here),
+    ("replyhere", PhraseKind::Here),
+    // /help
+    ("help", PhraseKind::Help),
+    ("帮助", PhraseKind::Help),
+    ("怎么用", PhraseKind::Help),
+    ("有哪些命令", PhraseKind::Help),
+    ("命令列表", PhraseKind::Help),
+    ("使用帮助", PhraseKind::Help),
+    ("commands", PhraseKind::Help),
+    ("whatcanido", PhraseKind::Help),
+    ("showhelp", PhraseKind::Help),
+    ("listcommands", PhraseKind::Help),
+    // /status
+    ("status", PhraseKind::Status),
+    ("状态", PhraseKind::Status),
+    ("当前状态", PhraseKind::Status),
+    ("agent状态", PhraseKind::Status),
+    ("看看状态", PhraseKind::Status),
+    ("查看状态", PhraseKind::Status),
+    ("agentstatus", PhraseKind::Status),
+    ("showstatus", PhraseKind::Status),
+    ("listagents", PhraseKind::Status),
+    // /watch
+    ("watch", PhraseKind::Watch),
+    ("关注", PhraseKind::Watch),
+    ("开始关注", PhraseKind::Watch),
+    ("startwatch", PhraseKind::Watch),
+    // /unwatch
+    ("unwatch", PhraseKind::Unwatch),
+    ("取消关注", PhraseKind::Unwatch),
+    ("停止关注", PhraseKind::Unwatch),
+    ("stopwatch", PhraseKind::Unwatch),
+    ("endwatch", PhraseKind::Unwatch),
+    // /msg
+    ("msg", PhraseKind::Msg),
+    ("插话", PhraseKind::Msg),
+    ("发消息", PhraseKind::Msg),
+    ("给agent发消息", PhraseKind::Msg),
+    ("发送消息", PhraseKind::Msg),
+    ("message", PhraseKind::Msg),
+    ("sendmessage", PhraseKind::Msg),
+    ("interject", PhraseKind::Msg),
+    // /diff
+    ("diff", PhraseKind::Diff),
+    ("查看diff", PhraseKind::Diff),
+    ("看diff", PhraseKind::Diff),
+    ("变更", PhraseKind::Diff),
+    ("查看变更", PhraseKind::Diff),
+    ("showdiff", PhraseKind::Diff),
+    ("viewdiff", PhraseKind::Diff),
+    // /stage
+    ("stage", PhraseKind::Stage),
+    ("暂存", PhraseKind::Stage),
+    ("全部暂存", PhraseKind::Stage),
+    ("stageall", PhraseKind::Stage),
+    ("gitadd", PhraseKind::Stage),
+    // /transcript
+    ("transcript", PhraseKind::Transcript),
+    ("导出会话", PhraseKind::Transcript),
+    ("导出记录", PhraseKind::Transcript),
+    ("会话记录", PhraseKind::Transcript),
+    ("exporttranscript", PhraseKind::Transcript),
+    ("exportsession", PhraseKind::Transcript),
+    // /todo
+    ("todo", PhraseKind::Todo),
+    ("待办", PhraseKind::Todo),
+    ("待办列表", PhraseKind::Todo),
+    ("查看待办", PhraseKind::Todo),
+    ("打开待办", PhraseKind::Todo),
+    ("todos", PhraseKind::Todo),
+    ("todolist", PhraseKind::Todo),
+    ("showtodos", PhraseKind::Todo),
+    // /todo-rm
+    ("todorm", PhraseKind::TodoRm),
+    ("删待办", PhraseKind::TodoRm),
+    ("删除待办", PhraseKind::TodoRm),
+    ("deletetodo", PhraseKind::TodoRm),
+    ("removetodo", PhraseKind::TodoRm),
+    // /todo-auto
+    ("todoauto", PhraseKind::TodoAuto),
+    ("自动待办", PhraseKind::TodoAuto),
+    ("autotodo", PhraseKind::TodoAuto),
+];
+
+fn phrase_kind_to_command(kind: PhraseKind) -> Command {
+    match kind {
+        PhraseKind::New => Command::New { has_args: false },
+        PhraseKind::Here => Command::Here,
+        PhraseKind::Help => Command::Help,
+        PhraseKind::Status => Command::Status(None),
+        PhraseKind::Watch => Command::Watch(None),
+        PhraseKind::Unwatch => Command::Unwatch(WatchSel::Auto),
+        PhraseKind::Msg => Command::Msg(None, None),
+        PhraseKind::Diff => Command::Diff(None),
+        PhraseKind::Stage => Command::Stage(None),
+        PhraseKind::Transcript => Command::Transcript(None),
+        PhraseKind::Todo => Command::Todo(None, None),
+        PhraseKind::TodoRm => Command::TodoRm(None),
+        PhraseKind::TodoAuto => Command::TodoAuto(None, None),
+    }
+}
+
+/// Match a bare (no `/`/`!`) inbound message against the command phrase table.
+fn match_command_phrase(text: &str) -> Option<Command> {
+    let key = crate::textnorm::normalize_key(text);
+    if key.is_empty() {
+        return None;
+    }
+    COMMAND_PHRASES
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, kind)| phrase_kind_to_command(*kind))
+}
+
+/// 解析入站文本。
+///
+/// 1. **`/` 或 `!` 前缀**：现有 slash 命令分派（见下）。
+/// 2. **无前缀整句短语**：规范化后命中词表 → 无参命令（spec im-command-phrases；与 slash 同优先于作答）。
+/// 3. 否则 → `Text`。
 ///
 /// `!` 是备用前缀（B 案，四渠道通用）：Slack 客户端把**一切** `/` 开头的输入拦截为
 /// slash command 在本地解析，未注册的名字根本发不出来——`!status`/`!watch 3` 是普通消息，畅通。
@@ -110,6 +286,16 @@ pub enum Parsed {
 /// `/status <编号>`：第二个 token 是纯数字则解析为编号（`Some`），缺省 / 非数字则 `None`（全局列表）。
 pub fn classify(text: &str) -> Parsed {
     let trimmed = text.trim();
+    if trimmed.starts_with('/') || trimmed.starts_with('!') {
+        return classify_prefixed(trimmed);
+    }
+    if let Some(cmd) = match_command_phrase(trimmed) {
+        return Parsed::Command(cmd);
+    }
+    Parsed::Text
+}
+
+fn classify_prefixed(trimmed: &str) -> Parsed {
     let (bare, bang) = match trimmed.strip_prefix('/') {
         Some(rest) => (rest, false),
         None => match trimmed.strip_prefix('!') {
@@ -182,6 +368,45 @@ pub fn classify(text: &str) -> Parsed {
         "transcript" => {
             let sel = tokens.next().and_then(|s| s.parse::<u64>().ok());
             Parsed::Command(Command::Transcript(sel))
+        }
+        "todo" | "待办" => {
+            // 与 `/msg` 同构：首 token 为纯数字 → 编号 + 其后原文（含换行）为待办文本；
+            // 首 token 非数字 → 无编号 + 整段 rest 作文本（先选项目再新增）；空 → 项目管理入口。
+            let (first, content) = match rest.find(char::is_whitespace) {
+                Some(i) => (&rest[..i], rest[i..].trim_start()),
+                None => (rest, ""),
+            };
+            match first.parse::<u64>() {
+                Ok(n) => {
+                    let content = (!content.is_empty()).then(|| content.to_string());
+                    Parsed::Command(Command::Todo(Some(n), content))
+                }
+                Err(_) => {
+                    let content = (!rest.is_empty()).then(|| rest.to_string());
+                    Parsed::Command(Command::Todo(None, content))
+                }
+            }
+        }
+        "todo-rm" | "删待办" => {
+            let sel = tokens.next().and_then(|s| s.parse::<u64>().ok());
+            Parsed::Command(Command::TodoRm(sel))
+        }
+        "todo-auto" | "自动待办" => {
+            // 语法同 /todo：`<n> [text]` 保留 Agent 编号兼容；无编号时先选项目。
+            let (first, content) = match rest.find(char::is_whitespace) {
+                Some(i) => (&rest[..i], rest[i..].trim_start()),
+                None => (rest, ""),
+            };
+            match first.parse::<u64>() {
+                Ok(n) => {
+                    let content = (!content.is_empty()).then(|| content.to_string());
+                    Parsed::Command(Command::TodoAuto(Some(n), content))
+                }
+                Err(_) => {
+                    let content = (!rest.is_empty()).then(|| rest.to_string());
+                    Parsed::Command(Command::TodoAuto(None, content))
+                }
+            }
         }
         "help" | "帮助" | "?" | "？" => Parsed::Command(Command::Help),
         _ if bang => Parsed::Text,
@@ -266,6 +491,13 @@ pub fn help_text(
     out.push_str(&i18n::tr(lang, "autoChannel.helpCmdStage").replace("{p}", prefix));
     out.push('\n');
     out.push_str(&i18n::tr(lang, "autoChannel.helpCmdTranscript").replace("{p}", prefix));
+    // `/todo` · `/todo-rm`：项目待办（spec todo-whats-next D8），与 /status 同门控。
+    out.push('\n');
+    out.push_str(&i18n::tr(lang, "autoChannel.helpCmdTodo").replace("{p}", prefix));
+    out.push('\n');
+    out.push_str(&i18n::tr(lang, "autoChannel.helpCmdTodoRm").replace("{p}", prefix));
+    out.push('\n');
+    out.push_str(&i18n::tr(lang, "autoChannel.helpCmdTodoAuto").replace("{p}", prefix));
     out.push('\n');
     out.push_str(&i18n::tr(lang, "autoChannel.helpCmdHelp").replace("{p}", prefix));
     if auto {
@@ -746,6 +978,75 @@ mod tests {
     }
 
     #[test]
+    fn command_phrase_keys_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for (key, _) in COMMAND_PHRASES {
+            assert!(seen.insert(*key), "duplicate command phrase key: {key}");
+        }
+    }
+
+    #[test]
+    fn classify_bare_phrases_map_to_no_arg_commands() {
+        assert_eq!(
+            classify("新建会话"),
+            Parsed::Command(Command::New { has_args: false })
+        );
+        assert_eq!(
+            classify("新建"),
+            Parsed::Command(Command::New { has_args: false })
+        );
+        assert_eq!(
+            classify("新建 会话！"),
+            Parsed::Command(Command::New { has_args: false })
+        );
+        assert_eq!(
+            classify("new"),
+            Parsed::Command(Command::New { has_args: false })
+        );
+        assert_eq!(classify("状态"), Parsed::Command(Command::Status(None)));
+        assert_eq!(classify("status"), Parsed::Command(Command::Status(None)));
+        assert_eq!(classify("插话"), Parsed::Command(Command::Msg(None, None)));
+        assert_eq!(
+            classify("发消息"),
+            Parsed::Command(Command::Msg(None, None))
+        );
+        assert_eq!(classify("待办"), Parsed::Command(Command::Todo(None, None)));
+        assert_eq!(classify("todo"), Parsed::Command(Command::Todo(None, None)));
+        assert_eq!(classify("删待办"), Parsed::Command(Command::TodoRm(None)));
+        assert_eq!(
+            classify("自动待办"),
+            Parsed::Command(Command::TodoAuto(None, None))
+        );
+        assert_eq!(classify("关注"), Parsed::Command(Command::Watch(None)));
+        assert_eq!(
+            classify("取消关注"),
+            Parsed::Command(Command::Unwatch(WatchSel::Auto))
+        );
+        assert_eq!(classify("这里"), Parsed::Command(Command::Here));
+        assert_eq!(classify("帮助"), Parsed::Command(Command::Help));
+        assert_eq!(classify("diff"), Parsed::Command(Command::Diff(None)));
+        assert_eq!(classify("暂存"), Parsed::Command(Command::Stage(None)));
+        assert_eq!(
+            classify("导出会话"),
+            Parsed::Command(Command::Transcript(None))
+        );
+    }
+
+    #[test]
+    fn classify_phrase_does_not_match_partial_or_prefixed() {
+        // Longer free text stays Text.
+        assert_eq!(classify("请帮我新建会话"), Parsed::Text);
+        assert_eq!(classify("新建会话吧"), Parsed::Text);
+        // Slash path still wins and can carry args.
+        assert_eq!(
+            classify("/new do work"),
+            Parsed::Command(Command::New { has_args: true })
+        );
+        // Unknown bang stays free text.
+        assert_eq!(classify("!important"), Parsed::Text);
+    }
+
+    #[test]
     fn classify_status_with_id() {
         assert_eq!(
             classify("/status 3"),
@@ -961,6 +1262,91 @@ mod tests {
             classify("!MSG-CLEAR 7"),
             Parsed::Command(Command::MsgClear(Some(7)))
         );
+    }
+
+    #[test]
+    fn classify_todo_and_todo_rm() {
+        // `/todo`（无参）→ 选项目管理；非数字文本 → 选项目新增；数字入口保持向后兼容。
+        assert_eq!(
+            classify("/todo"),
+            Parsed::Command(Command::Todo(None, None))
+        );
+        assert_eq!(
+            classify("/todo 3"),
+            Parsed::Command(Command::Todo(Some(3), None))
+        );
+        assert_eq!(
+            classify("/todo 3 修复登录\n再跑测试"),
+            Parsed::Command(Command::Todo(
+                Some(3),
+                Some("修复登录\n再跑测试".to_string())
+            ))
+        );
+        // 无编号有内容（首 token 非数字）→ 由调用方回用法提示。
+        assert_eq!(
+            classify("/todo fix login"),
+            Parsed::Command(Command::Todo(None, Some("fix login".to_string())))
+        );
+        // 中文同义词 + `!` 前缀。
+        assert_eq!(
+            classify("/待办 2 写文档"),
+            Parsed::Command(Command::Todo(Some(2), Some("写文档".to_string())))
+        );
+        assert_eq!(
+            classify("!todo"),
+            Parsed::Command(Command::Todo(None, None))
+        );
+        // `/todo-rm`。
+        assert_eq!(classify("/todo-rm"), Parsed::Command(Command::TodoRm(None)));
+        assert_eq!(
+            classify("/todo-rm 5"),
+            Parsed::Command(Command::TodoRm(Some(5)))
+        );
+        assert_eq!(classify("/删待办"), Parsed::Command(Command::TodoRm(None)));
+        // 非数字参数 → 无参（同 /diff 的宽松处理）。
+        assert_eq!(
+            classify("/todo-rm abc"),
+            Parsed::Command(Command::TodoRm(None))
+        );
+    }
+
+    #[test]
+    fn classify_todo_auto() {
+        // 语法镜像 /todo：无编号 → 选项目；数字入口保持向后兼容。
+        assert_eq!(
+            classify("/todo-auto"),
+            Parsed::Command(Command::TodoAuto(None, None))
+        );
+        assert_eq!(
+            classify("/todo-auto 3"),
+            Parsed::Command(Command::TodoAuto(Some(3), None))
+        );
+        assert_eq!(
+            classify("/todo-auto 3 每晚跑回归"),
+            Parsed::Command(Command::TodoAuto(Some(3), Some("每晚跑回归".to_string())))
+        );
+        // 首 token 非数字 → 无编号有内容（调用方回用法提示）。
+        assert_eq!(
+            classify("/todo-auto run tests"),
+            Parsed::Command(Command::TodoAuto(None, Some("run tests".to_string())))
+        );
+        // 中文同义词。
+        assert_eq!(
+            classify("/自动待办 2"),
+            Parsed::Command(Command::TodoAuto(Some(2), None))
+        );
+    }
+
+    #[test]
+    fn help_text_lists_todo_commands() {
+        for lang in [Lang::En, Lang::Zh] {
+            let t = help_text(true, false, true, "/", lang);
+            assert!(t.contains("todo"), "{t}");
+            assert!(t.contains("todo-rm"), "{t}");
+            assert!(t.contains("todo-auto"), "{t}");
+            let off = help_text(false, false, false, "/", lang);
+            assert!(off.contains("todo") && off.contains("todo-rm") && off.contains("todo-auto"));
+        }
     }
 
     #[test]

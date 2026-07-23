@@ -10,9 +10,24 @@ pub mod file_attachment;
 pub mod help;
 pub mod image_writer;
 pub mod output;
+pub mod todo_cmd;
 
 use crate::i18n::{self, Lang};
+use std::collections::HashMap;
 use std::process::exit;
+
+pub(crate) const FROM_MCP_ENV: &str = "ASKHUMAN_FROM_MCP";
+pub(crate) const MCP_INSTANCE_ID_ENV: &str = "ASKHUMAN_MCP_INSTANCE_ID";
+pub(crate) const MCP_AGENT_KIND_ENV: &str = "ASKHUMAN_MCP_AGENT_KIND";
+pub(crate) const MCP_AGENT_SESSION_ID_ENV: &str = "ASKHUMAN_MCP_AGENT_SESSION_ID";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CallerContext {
+    pub agent_kind: Option<String>,
+    pub agent_session_id: Option<String>,
+    pub mcp_instance_id: Option<String>,
+    pub from_mcp: bool,
+}
 
 /// 向 stdout 输出一行文本，并把 BrokenPipe（读端提前关闭，如 `AskHuman --agent-help | head`）
 /// 视为正常结束：写失败一律静默忽略，退出码由调用方决定（纯输出命令随后 exit(0)，错误分支 exit(1)）。
@@ -62,6 +77,30 @@ pub fn dispatch() {
             print_line(&help::agent_help_text(lang));
             exit(0);
         }
+        "--show-last" => {
+            let context = caller_context();
+            let scope = match show_last_cli_scope(
+                context.agent_kind,
+                context.agent_session_id,
+                crate::project::detect(),
+            ) {
+                Ok(scope) => scope,
+                Err(error) => {
+                    eprintln!("{}{error}", i18n::err_prefix(lang));
+                    exit(1);
+                }
+            };
+            match crate::show_last::recover(&scope) {
+                Ok(output) => {
+                    print_line(&output);
+                    exit(0);
+                }
+                Err(error) => {
+                    eprintln!("{}{error}", i18n::err_prefix(lang));
+                    exit(1);
+                }
+            }
+        }
         "--scripting-help" => {
             print_line(&help::scripting_help_text(lang));
             exit(0);
@@ -76,6 +115,7 @@ pub fn dispatch() {
                 if crate::gui_host::host_open(
                     crate::gui_host::WindowKind::Settings,
                     false,
+                    None,
                     None,
                     None,
                 )
@@ -98,6 +138,7 @@ pub fn dispatch() {
                     all,
                     Some(project),
                     None,
+                    None,
                 )
                 .is_ok()
                 {
@@ -109,6 +150,30 @@ pub fn dispatch() {
                 all,
                 crate::config::AppConfig::load_without_secrets(),
             );
+        }
+        // 独立待办窗口：预选当前项目（与 `--history` 同探测规则）；窗内仍可切换项目。
+        "--todos" => {
+            #[cfg(unix)]
+            {
+                let project = crate::project::detect();
+                if crate::gui_host::host_open(
+                    crate::gui_host::WindowKind::Todos,
+                    false,
+                    Some(project.clone()),
+                    None,
+                    None,
+                )
+                .is_ok()
+                {
+                    exit(0);
+                }
+                crate::app::run_todos(project, crate::config::AppConfig::load_without_secrets());
+            }
+            #[cfg(not(unix))]
+            {
+                eprintln!("--todos is not supported on this platform");
+                exit(1);
+            }
         }
         // 隐藏的统一 GUI 宿主角色（spec D2）：单实例托盘 + 设置/历史/Agent 窗口宿主。
         // 由 CLI 路由 / daemon 按需 spawn；抢宿主单实例锁失败即直接退出（已有宿主在跑）。
@@ -167,7 +232,7 @@ pub fn dispatch() {
         "daemon" => {
             crate::daemon::dispatch(&argv[2..]);
         }
-        // MCP server 角色：以 STDIO 暴露 `ask` 工具，供 Codex / Claude Code / Cursor 等 MCP 客户端调用。
+        // MCP server 角色：以 STDIO 暴露 ask / whats_next / todo_add，供 Codex / Claude Code / Cursor 等 MCP 客户端调用。
         // 每次工具调用都 spawn 一个 `AskHuman --output json …` 子进程复用既有 ask 流程（见 mcp 模块）。
         // 极端歧义（问题正好是 "mcp"）可用 `AskHuman -q mcp` 规避。
         "mcp" => {
@@ -179,6 +244,15 @@ pub fn dispatch() {
             #[cfg(unix)]
             {
                 crate::agents::report::run(&argv[2..]);
+            }
+            exit(0);
+        }
+        // Hidden context-compaction/session-binding hook. It is mode-owned and intentionally
+        // independent from experimental lifecycle tracking.
+        "__context-recovery-hook" => {
+            #[cfg(unix)]
+            {
+                crate::agents::context_recovery::run(&argv[2..]);
             }
             exit(0);
         }
@@ -222,6 +296,26 @@ pub fn dispatch() {
             }
             exit(0);
         }
+        // Hidden short-lived file snapshot worker used only by the local permission popup.
+        "__permission-diff-worker" => {
+            #[cfg(unix)]
+            {
+                if let Some(output) = crate::permission_diff::worker::run_stdio() {
+                    print_line(&output);
+                }
+            }
+            exit(0);
+        }
+        // Hidden short-lived shell policy analysis worker (codex-permission-remember D27).
+        "__permission-shell-worker" => {
+            #[cfg(unix)]
+            {
+                if let Some(output) = crate::permission_shell::run_stdio() {
+                    print_line(&output);
+                }
+            }
+            exit(0);
+        }
         // Agent 状态 + 集成子命令组（spec：cli-config）：monitor / show / install / uninstall / update。
         "agents" => {
             agents_cmd::dispatch(&argv[2..], lang);
@@ -238,6 +332,11 @@ pub fn dispatch() {
         "doctor" => {
             doctor::dispatch(&argv[2..], lang);
             exit(0);
+        }
+        // 项目级待办队列（spec todo-whats-next D6）：add / list / rm / clear。
+        // 极端歧义（问题正好是 "todo"）可用 `AskHuman -q todo` 规避。
+        "todo" => {
+            todo_cmd::dispatch(&argv[2..], lang);
         }
         // 隐藏调试子命令组（不进 help）：如钉钉 watch PoC 探针 `debug dd-watch-poc`。
         "debug" => {
@@ -261,6 +360,7 @@ pub fn dispatch() {
                         | "--select-only"
                         | "--single"
                         | "--output"
+                        | "--whats-next"
                 ) =>
         {
             eprintln!(
@@ -282,18 +382,36 @@ pub fn dispatch() {
                     }
                 };
                 let message = crate::models::MessagePrompt::new(parsed.message_text, files);
-                let questions: Vec<crate::models::Question> = parsed
-                    .questions
-                    .into_iter()
-                    .map(|q| {
-                        let options = q
-                            .options
-                            .into_iter()
-                            .map(|o| crate::models::OptionItem::new(o.text, o.recommended))
-                            .collect();
-                        crate::models::Question::new(q.message, options)
-                    })
-                    .collect();
+                // 项目 key（git 根，回退 cwd）：whats-next 取待办 + TaskRequest 归属共用。
+                let project = crate::project::detect();
+                // 自动执行待办（第 17 轮定案）：whats-next 且存在自动待办 → 不发卡提问，直接
+                // 出队最靠前的一条并打印其原文（agent 把它当作下一个任务）；完成报告照常落回复
+                // 历史。被并发拿走（竞态）→ 回落正常提问。Stop 卡不走此路径。
+                if parsed.whats_next && try_whats_next_auto(&project, &message, lang) {
+                    return;
+                }
+                // whats-next (spec D2): fixed question + suggestions + todo chips + a final end
+                // option. Auto-run todo takeover already happened above and keeps its priority.
+                let questions: Vec<crate::models::Question> = if parsed.whats_next {
+                    vec![whats_next_question(
+                        &project,
+                        &parsed.whats_next_options,
+                        lang,
+                    )]
+                } else {
+                    parsed
+                        .questions
+                        .into_iter()
+                        .map(|q| {
+                            let options = q
+                                .options
+                                .into_iter()
+                                .map(|o| crate::models::OptionItem::new(o.text, o.recommended))
+                                .collect();
+                            crate::models::Question::new(q.message, options)
+                        })
+                        .collect()
+                };
                 // unix：瘦客户端经 Daemon + GUI Helper（A11：上送 source name 与解析好的 lang）。
                 #[cfg(unix)]
                 {
@@ -309,12 +427,13 @@ pub fn dispatch() {
                     crate::perf::mark_spawn(&perf_id);
                     // 顺带探测调用方 Agent 身份（生命周期追踪 spec D21）：仅 env 读取（家族 + 会话 ID，零 ps）。
                     // 方案5(b)：进程树 walk（数十 ms 的 ps 游走）移到 daemon 异步进行——这里只带 CLI 自身 pid。
-                    let (agent_kind, agent_session_id) = detect_caller_agent();
+                    let context = caller_context();
                     crate::perf::mark(&perf_id, "cli.detect_done");
                     // 来源名解析：未定制 `ASKHUMAN_ENV_SOURCE_NAME` 时，用探测到的 Agent 名
                     // （Claude Code / Codex / Cursor）替代默认 "the Loop"；供渠道消息头 + 历史共用
                     // （弹窗标题另由前端按胶囊内联渲染）。MCP 模式 env 判不出家族 → 回退 "the Loop"。
-                    let resolved_agent_kind = agent_kind
+                    let resolved_agent_kind = context
+                        .agent_kind
                         .as_deref()
                         .and_then(crate::agents::AgentKind::parse);
                     let task = crate::ipc::TaskRequest {
@@ -324,18 +443,20 @@ pub fn dispatch() {
                         is_markdown: true,
                         source: crate::models::source_name_for_agent(resolved_agent_kind),
                         lang: lang.code().to_string(),
-                        project: crate::project::detect(),
+                        project,
                         select_only: parsed.select_only,
                         single: parsed.single,
                         output_format: parsed.output_format,
                         record_history: true,
-                        agent_kind,
-                        agent_session_id,
+                        agent_kind: context.agent_kind,
+                        agent_session_id: context.agent_session_id,
+                        mcp_instance_id: context.mcp_instance_id,
                         agent_pid: None,
                         caller_pid: std::process::id(),
-                        from_mcp: from_mcp_env(),
+                        from_mcp: context.from_mcp,
                         perf_id,
                         perf_autodismiss: crate::perf::autodismiss(),
+                        whats_next: parsed.whats_next,
                     };
                     crate::client::run_ask(task);
                 }
@@ -346,6 +467,7 @@ pub fn dispatch() {
                     request.select_only = parsed.select_only;
                     request.single = parsed.single;
                     request.output_format = parsed.output_format;
+                    request.whats_next = parsed.whats_next;
                     crate::app::run_ask(request, crate::config::AppConfig::load());
                 }
             }
@@ -358,29 +480,239 @@ pub fn dispatch() {
     }
 }
 
-/// 探测发起 `AskHuman` 调用的 Agent 身份的**快速部分**（家族 + 会话 ID，仅读 env，零 ps）。
-/// 方案5(b)：进程树 walk（拿 agent pid，数十 ms 的 ps 游走）不在此做——改由 daemon 从 `caller_pid`
-/// 异步进行（含 env 判不出家族的 **MCP 兜底**：daemon walk_any_agent）。env 判不出则两者皆 None。
-#[cfg(unix)]
-fn detect_caller_agent() -> (Option<String>, Option<String>) {
-    use crate::agents::detect;
-    if let Some(kind) = detect::detect_running_agent() {
-        let sid = detect::session_id_from_env(kind);
-        return (Some(kind.as_str().to_string()), sid);
+/// whats-next 自动接管（第 17 轮定案）：出队最靠前的自动待办并直接打印其文本；成功返回 true。
+/// 完成报告（Message）落回复历史——自动路径没有卡片可展示，历史窗口是唯一可查处。
+fn try_whats_next_auto(project: &str, message: &crate::models::MessagePrompt, lang: Lang) -> bool {
+    let Some(entry) = crate::todos::first_auto(project) else {
+        return false;
+    };
+    // 出队即历史记录点（take 落待办执行历史）；被并发拿走 → 回落正常提问。
+    let Some(entry) = crate::todos::take(project, std::slice::from_ref(&entry.id))
+        .into_iter()
+        .next()
+    else {
+        return false;
+    };
+    let limit = crate::config::AppConfig::load_without_secrets()
+        .general
+        .history_limit;
+    if limit > 0 {
+        let context = caller_context();
+        let resolved = context
+            .agent_kind
+            .as_deref()
+            .and_then(crate::agents::AgentKind::parse);
+        let prefix = i18n::tr(lang, "whatsNext.todoPrefix");
+        crate::history::record(
+            crate::history::HistoryEntry {
+                id: uuid::Uuid::new_v4().to_string(),
+                timestamp_ms: crate::history::now_ms(),
+                project: project.to_string(),
+                source: crate::models::source_name_for_agent(resolved),
+                agent_kind: context.agent_kind,
+                agent_session_id: context.agent_session_id,
+                mcp_instance_id: context.mcp_instance_id,
+                channel: "auto".to_string(),
+                action: crate::models::ChannelAction::Send,
+                is_markdown: true,
+                message: message.clone(),
+                questions: vec![crate::models::Question::new(
+                    i18n::tr(lang, "whatsNext.question").to_string(),
+                    Vec::new(),
+                )],
+                answers: vec![crate::history::HistoryAnswer {
+                    selected_options: vec![format!("{}{}", prefix, entry.text)],
+                    user_input: None,
+                    images: Vec::new(),
+                    files: Vec::new(),
+                }],
+            },
+            limit,
+        );
     }
-    (None, None)
+    // 与人工路径同构（第 19 轮定案：复用 Ask 标准区块）：派活 → `[user_input]` + 任务文本。
+    print_line(&crate::cli::output::whats_next_output(
+        &crate::cli::output::WhatsNextReply::Task(entry.text.clone()),
+        &[],
+        lang,
+    ));
+    true
 }
 
-/// 是否经 MCP 模式发起（`AskHuman mcp` spawn 子进程时设 env `ASKHUMAN_FROM_MCP`）。
-/// 非空且非 `0` 即视为真（沿用本项目 env 开关惯例）。daemon 据此对该次 ask「只刷新、不新建」session。
-#[cfg(unix)]
-fn from_mcp_env() -> bool {
-    std::env::var("ASKHUMAN_FROM_MCP")
-        .map(|v| {
-            let v = v.trim();
-            !v.is_empty() && v != "0"
-        })
-        .unwrap_or(false)
+/// Total whats-next option limit, including suggestions, todos, and the final end option.
+const WHATS_NEXT_MAX_OPTIONS: usize = 10;
+
+/// Normalize agent suggestion text for end-option detection (see [`crate::textnorm`]).
+fn normalize_whats_next_option_key(text: &str) -> String {
+    crate::textnorm::normalize_key(text)
+}
+
+/// Agent-supplied end-ish labels (normalized keys). Built-in i18n end strings are always
+/// checked separately for both languages. Whole-key equality only — longer real tasks
+/// that merely contain these words (e.g. "结束本轮的文档") are kept.
+const SPURIOUS_WHATS_NEXT_END_KEYS: &[&str] = &[
+    // Chinese
+    "结束本轮",
+    "结束对话",
+    "结束会话",
+    "结束",
+    "收工",
+    "没有更多",
+    "没有更多任务",
+    "没有更多工作",
+    "无事可做",
+    "没事了",
+    "没有了",
+    "先这样",
+    "不用了",
+    "就到这里",
+    "可以结束了",
+    // English
+    "endthisturn",
+    "endtheturn",
+    "endturn",
+    "endthissession",
+    "endsession",
+    "endconversation",
+    "endthisconversation",
+    "nomore",
+    "nomorework",
+    "nomoretasks",
+    "nomoretodos",
+    "nothingelse",
+    "nothingtodo",
+    "alldone",
+    "weredone",
+    "wearedone",
+    "nofurtherwork",
+    "nofurthertasks",
+    "stop",
+    "done",
+    "finish",
+    "finished",
+];
+
+/// True when a caller `-o` / MCP option is a mistaken "end this turn" stand-in and must be
+/// dropped so only AskHuman's built-in end option remains.
+fn is_spurious_whats_next_end_option(text: &str) -> bool {
+    let key = normalize_whats_next_option_key(text);
+    if key.is_empty() {
+        return false;
+    }
+    if SPURIOUS_WHATS_NEXT_END_KEYS.contains(&key.as_str()) {
+        return true;
+    }
+    // Built-in labels in both UI languages (agent lang may disagree with current UI lang).
+    for lang in [Lang::Zh, Lang::En] {
+        if key == normalize_whats_next_option_key(i18n::tr(lang, "whatsNext.endOption")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Build the fixed whats-next question (spec todo-whats-next D2): `-o`/`-o!` suggestions first,
+/// project todo chips next, and the end option last. Suggestions consume the ten-option capacity
+/// first and are silently truncated; todos fill the remainder in FIFO order. Auto-run takeover
+/// happens before this function is called.
+///
+/// Caller suggestions that look like an end/stop/no-more-work choice are dropped: the protocol
+/// forbids agents from supplying those; AskHuman always appends the sole built-in end option.
+fn whats_next_question(
+    project: &str,
+    suggestions: &[args::OptArg],
+    lang: Lang,
+) -> crate::models::Question {
+    whats_next_question_from_entries(suggestions, crate::todos::list(project), lang)
+}
+
+fn whats_next_question_from_entries(
+    suggestions: &[args::OptArg],
+    entries: Vec<crate::todos::TodoEntry>,
+    lang: Lang,
+) -> crate::models::Question {
+    let prefix = i18n::tr(lang, "whatsNext.todoPrefix");
+    let total = entries.len();
+    let task_slots = WHATS_NEXT_MAX_OPTIONS - 1;
+    let mut options: Vec<crate::models::OptionItem> = suggestions
+        .iter()
+        .filter(|option| !is_spurious_whats_next_end_option(&option.text))
+        .take(task_slots)
+        .map(|option| crate::models::OptionItem::new(&option.text, option.recommended))
+        .collect();
+    let todo_slots = task_slots - options.len();
+    let shown_todos = total.min(todo_slots);
+    options.extend(entries.into_iter().take(todo_slots).map(|entry| {
+        crate::models::OptionItem::with_todo(format!("{}{}", prefix, entry.text), entry.id)
+    }));
+    options.push(crate::models::OptionItem::new(
+        i18n::tr(lang, "whatsNext.endOption"),
+        false,
+    ));
+    let mut message = i18n::tr(lang, "whatsNext.question").to_string();
+    // When suggestions consume every task slot, omit overflow noise as explicitly requested.
+    if todo_slots > 0 && total > shown_todos {
+        let note =
+            i18n::tr(lang, "todo.moreNote").replace("{n}", &(total - shown_todos).to_string());
+        message.push_str("\n\n");
+        message.push_str(&note);
+    }
+    crate::models::Question::new(message, options)
+}
+
+/// Resolve the calling Agent with environment-only work so it is safe on the ask hot path and
+/// available to both daemon-backed Unix and single-process Windows builds.
+pub(crate) fn caller_context() -> CallerContext {
+    caller_context_from_env(&std::env::vars().collect())
+}
+
+fn caller_context_from_env(env: &HashMap<String, String>) -> CallerContext {
+    let nonempty = |name: &str| {
+        env.get(name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let from_mcp = nonempty(FROM_MCP_ENV).is_some_and(|value| value != "0");
+    if from_mcp {
+        let kind = nonempty(MCP_AGENT_KIND_ENV)
+            .filter(|value| crate::agents::AgentKind::parse(value).is_some());
+        let session_id = nonempty(MCP_AGENT_SESSION_ID_ENV);
+        let (agent_kind, agent_session_id) = match (kind, session_id) {
+            (Some(kind), Some(session_id)) => (Some(kind), Some(session_id)),
+            _ => (None, None),
+        };
+        return CallerContext {
+            agent_kind,
+            agent_session_id,
+            mcp_instance_id: nonempty(MCP_INSTANCE_ID_ENV),
+            from_mcp: true,
+        };
+    }
+    let kind = crate::agents::detect::detect_running_agent_from(env);
+    CallerContext {
+        agent_kind: kind.map(|kind| kind.as_str().to_string()),
+        agent_session_id: kind
+            .and_then(|kind| crate::agents::detect::session_id_from_env_map(kind, env)),
+        mcp_instance_id: None,
+        from_mcp: false,
+    }
+}
+
+fn show_last_cli_scope(
+    agent_kind: Option<String>,
+    agent_session_id: Option<String>,
+    project: String,
+) -> Result<crate::show_last::Scope, &'static str> {
+    match (agent_kind, agent_session_id) {
+        (Some(agent_kind), Some(session_id)) => Ok(crate::show_last::Scope::AgentSession {
+            agent_kind,
+            session_id,
+        }),
+        (None, None) => Ok(crate::show_last::Scope::Project(project)),
+        _ => Err(
+            "AskHuman detected an Agent caller but no trustworthy session id; refusing an unsafe project-wide fallback",
+        ),
+    }
 }
 
 /// 提问解析的入口包装：仅当出现 `--stdin` 时读取标准输入作为 Message，
@@ -423,4 +755,243 @@ fn read_stdin_message(lang: Lang) -> String {
         }
     }
     buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn suggestion(text: &str, recommended: bool) -> args::OptArg {
+        args::OptArg {
+            text: text.to_string(),
+            recommended,
+        }
+    }
+
+    fn todo(index: usize) -> crate::todos::TodoEntry {
+        crate::todos::TodoEntry {
+            id: format!("todo-{index}"),
+            text: format!("todo {index}"),
+            created_at_ms: index as u64,
+            agent_kind: None,
+            auto: false,
+        }
+    }
+
+    #[test]
+    fn show_last_project_fallback_requires_a_non_agent_caller() {
+        assert!(matches!(
+            show_last_cli_scope(None, None, "/project".into()).unwrap(),
+            crate::show_last::Scope::Project(project) if project == "/project"
+        ));
+        assert!(show_last_cli_scope(Some("codex".into()), None, "/project".into()).is_err());
+        assert!(show_last_cli_scope(None, Some("session".into()), "/project".into()).is_err());
+        assert!(matches!(
+            show_last_cli_scope(
+                Some("codex".into()),
+                Some("session".into()),
+                "/project".into()
+            )
+            .unwrap(),
+            crate::show_last::Scope::AgentSession { agent_kind, session_id }
+                if agent_kind == "codex" && session_id == "session"
+        ));
+    }
+
+    #[test]
+    fn caller_context_prefers_trusted_mcp_binding_and_ignores_stale_native_env() {
+        let env = HashMap::from([
+            (FROM_MCP_ENV.into(), "1".into()),
+            (MCP_INSTANCE_ID_ENV.into(), "  instance  ".into()),
+            (MCP_AGENT_KIND_ENV.into(), "cursor".into()),
+            (MCP_AGENT_SESSION_ID_ENV.into(), " conversation ".into()),
+            ("CODEX_THREAD_ID".into(), "stale-codex".into()),
+        ]);
+        assert_eq!(
+            caller_context_from_env(&env),
+            CallerContext {
+                agent_kind: Some("cursor".into()),
+                agent_session_id: Some("conversation".into()),
+                mcp_instance_id: Some("instance".into()),
+                from_mcp: true,
+            }
+        );
+
+        for env in [
+            HashMap::from([
+                (FROM_MCP_ENV.into(), "1".into()),
+                (MCP_AGENT_KIND_ENV.into(), "unknown".into()),
+                (MCP_AGENT_SESSION_ID_ENV.into(), "session".into()),
+            ]),
+            HashMap::from([
+                (FROM_MCP_ENV.into(), "true".into()),
+                (MCP_AGENT_KIND_ENV.into(), "codex".into()),
+            ]),
+        ] {
+            let context = caller_context_from_env(&env);
+            assert!(context.from_mcp);
+            assert!(context.agent_kind.is_none());
+            assert!(context.agent_session_id.is_none());
+        }
+    }
+
+    #[test]
+    fn caller_context_detects_direct_agent_and_never_assigns_mcp_partition() {
+        let env = HashMap::from([
+            ("CURSOR_AGENT".into(), "1".into()),
+            ("CURSOR_CONVERSATION_ID".into(), " conversation ".into()),
+            (FROM_MCP_ENV.into(), "0".into()),
+            (MCP_INSTANCE_ID_ENV.into(), "ignored".into()),
+        ]);
+        assert_eq!(
+            caller_context_from_env(&env),
+            CallerContext {
+                agent_kind: Some("cursor".into()),
+                agent_session_id: Some("conversation".into()),
+                mcp_instance_id: None,
+                from_mcp: false,
+            }
+        );
+        assert_eq!(
+            caller_context_from_env(&HashMap::new()),
+            CallerContext::default()
+        );
+    }
+
+    #[test]
+    fn whats_next_orders_suggestions_todos_then_end_with_ten_total() {
+        let question = whats_next_question_from_entries(
+            &[
+                suggestion("Write docs", false),
+                suggestion("Add tests", true),
+            ],
+            (1..=10).map(todo).collect(),
+            Lang::En,
+        );
+
+        assert_eq!(question.predefined_options.len(), WHATS_NEXT_MAX_OPTIONS);
+        assert_eq!(question.predefined_options[0].text, "Write docs");
+        assert!(!question.predefined_options[0].recommended);
+        assert_eq!(question.predefined_options[1].text, "Add tests");
+        assert!(question.predefined_options[1].recommended);
+        assert_eq!(
+            question.predefined_options[2].todo_id.as_deref(),
+            Some("todo-1")
+        );
+        assert_eq!(
+            question.predefined_options.last().unwrap().text,
+            "End this turn"
+        );
+        assert!(question.message.contains('3'), "{}", question.message);
+    }
+
+    #[test]
+    fn whats_next_silently_keeps_first_nine_suggestions() {
+        let suggestions: Vec<_> = (1..=12)
+            .map(|index| suggestion(&format!("suggestion {index}"), false))
+            .collect();
+        let question = whats_next_question_from_entries(&suggestions, vec![todo(1)], Lang::En);
+
+        assert_eq!(question.predefined_options.len(), WHATS_NEXT_MAX_OPTIONS);
+        assert_eq!(question.predefined_options[8].text, "suggestion 9");
+        assert!(question.predefined_options[..9]
+            .iter()
+            .all(|option| option.todo_id.is_none()));
+        assert_eq!(
+            question.predefined_options.last().unwrap().text,
+            "End this turn"
+        );
+        assert_eq!(question.message, "What should we do next?");
+    }
+
+    #[test]
+    fn normalize_strips_whitespace_and_punctuation() {
+        assert_eq!(
+            normalize_whats_next_option_key("End this turn!"),
+            "endthisturn"
+        );
+        assert_eq!(normalize_whats_next_option_key("  结束本轮。 "), "结束本轮");
+        assert_eq!(normalize_whats_next_option_key("We're done"), "weredone");
+        assert_eq!(
+            normalize_whats_next_option_key("No more tasks"),
+            "nomoretasks"
+        );
+    }
+
+    #[test]
+    fn spurious_end_detector_matches_table_and_builtin() {
+        assert!(is_spurious_whats_next_end_option("End this turn"));
+        assert!(is_spurious_whats_next_end_option("结束本轮"));
+        assert!(is_spurious_whats_next_end_option("  结束本轮。"));
+        assert!(is_spurious_whats_next_end_option("no more tasks!"));
+        assert!(is_spurious_whats_next_end_option("Stop"));
+        assert!(is_spurious_whats_next_end_option("先这样"));
+        assert!(is_spurious_whats_next_end_option("We're done"));
+        // Real tasks that only contain end-ish words stay.
+        assert!(!is_spurious_whats_next_end_option("结束本轮的文档撰写"));
+        assert!(!is_spurious_whats_next_end_option(
+            "Stop the flaky e2e suite"
+        ));
+        assert!(!is_spurious_whats_next_end_option("Write docs"));
+    }
+
+    #[test]
+    fn whats_next_drops_spurious_end_suggestions_and_keeps_one_builtin() {
+        let question = whats_next_question_from_entries(
+            &[
+                suggestion("Write docs", false),
+                suggestion("结束本轮", false),
+                suggestion("End this turn", true),
+                suggestion("no more work", false),
+                suggestion("Add tests", true),
+            ],
+            (1..=10).map(todo).collect(),
+            Lang::Zh,
+        );
+
+        let labels: Vec<&str> = question
+            .predefined_options
+            .iter()
+            .map(|o| o.text.as_str())
+            .collect();
+        assert!(labels.contains(&"Write docs"));
+        assert!(labels.contains(&"Add tests"));
+        // Only the final built-in end option (Chinese UI); agent end-ish labels dropped.
+        assert_eq!(labels.last().copied(), Some("结束本轮"));
+        assert_eq!(
+            labels.iter().filter(|t| **t == "结束本轮").count(),
+            1,
+            "{labels:?}"
+        );
+        assert!(
+            labels[..labels.len() - 1]
+                .iter()
+                .all(|t| !is_spurious_whats_next_end_option(t)),
+            "{labels:?}"
+        );
+        // Dropped end-ish suggestions free slots for more todos.
+        assert!(
+            question
+                .predefined_options
+                .iter()
+                .filter(|o| o.todo_id.is_some())
+                .count()
+                >= 2
+        );
+    }
+
+    #[test]
+    fn whats_next_all_spurious_suggestions_leave_only_end_when_no_todos() {
+        let question = whats_next_question_from_entries(
+            &[
+                suggestion("End this turn", false),
+                suggestion("收工", false),
+                suggestion("done", false),
+            ],
+            vec![],
+            Lang::En,
+        );
+        assert_eq!(question.predefined_options.len(), 1);
+        assert_eq!(question.predefined_options[0].text, "End this turn");
+    }
 }

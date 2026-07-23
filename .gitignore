@@ -6,6 +6,8 @@
 # Node / 前端
 node_modules/
 dist/
+# ANALYZE=1 pnpm build 的 bundle 构成报告
+bundle-stats.html
 
 # Rust / Tauri
 src-tauri/target/

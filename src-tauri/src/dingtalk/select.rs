@@ -52,12 +52,18 @@ fn button_color(action: crate::select::SelectAction) -> &'static str {
         | crate::select::SelectAction::TaskWorkspace
         | crate::select::SelectAction::TaskAgent
         | crate::select::SelectAction::TaskPermission
+        | crate::select::SelectAction::TaskInputSource
         | crate::select::SelectAction::Status
         | crate::select::SelectAction::Msg
+        | crate::select::SelectAction::MsgTarget
         | crate::select::SelectAction::Diff
         | crate::select::SelectAction::Stage
-        | crate::select::SelectAction::Transcript => "blue",
-        crate::select::SelectAction::Unwatch => "red",
+        | crate::select::SelectAction::Transcript
+        | crate::select::SelectAction::Todo
+        | crate::select::SelectAction::TodoRm
+        | crate::select::SelectAction::TodoAuto
+        | crate::select::SelectAction::TodoAutoEntry => "blue",
+        crate::select::SelectAction::Unwatch | crate::select::SelectAction::TodoRmEntry => "red",
     }
 }
 

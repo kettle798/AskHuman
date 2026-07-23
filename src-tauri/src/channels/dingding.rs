@@ -11,7 +11,7 @@
 //! （`MessagingChannel`）+ 薄外层 `DingTalkChannel`。
 
 use super::conversation::{run_conversation, MessagingChannel, QuestionCtx};
-use super::{Channel, Interruption, Preemption, ResultSink};
+use super::{Channel, ConversationOrigin, Interruption, Preemption, ResultSink};
 use crate::config::DingTalkChannelConfig;
 use crate::dingtalk::card;
 use crate::dingtalk::client::DingTalkClient;
@@ -85,10 +85,16 @@ impl Channel for DingTalkChannel {
         "dingding"
     }
 
-    fn start(&self, request: &crate::models::AskRequest, sink: ResultSink) {
+    fn start(
+        &self,
+        request: &crate::models::AskRequest,
+        origin: &ConversationOrigin,
+        sink: ResultSink,
+    ) {
         let config = self.config.clone();
         let preempt = self.preempt.clone();
         let request = request.clone();
+        let origin = origin.clone();
         let transport = self.transport.clone();
         tauri::async_runtime::spawn(async move {
             let lang = Lang::current();
@@ -121,7 +127,7 @@ impl Channel for DingTalkChannel {
                 );
                 return;
             }
-            run_conversation(&mut session, &request, preempt, sink).await;
+            run_conversation(&mut session, &request, &origin, preempt, sink).await;
         });
     }
 
@@ -164,23 +170,22 @@ impl MessagingChannel for DingTalkSession {
         &mut self,
         message: &MessagePrompt,
         is_markdown: bool,
-        source: &str,
+        header: &str,
         lang: Lang,
     ) {
         let Some(client) = self.client.as_ref() else {
             return;
         };
-        let header = i18n::source_header(lang, "channel.messageFrom", source);
         let result = if is_markdown {
             let body = if message.text.trim().is_empty() {
                 format!("**{}**", header)
             } else {
                 format!("**{}**\n\n{}", header, message.text)
             };
-            client.send_oto_markdown(&header, &body).await
+            client.send_oto_markdown(header, &body).await
         } else {
             let body = if message.text.trim().is_empty() {
-                header.clone()
+                header.to_string()
             } else {
                 format!("{}\n\n{}", header, message.text)
             };
@@ -251,13 +256,15 @@ impl MessagingChannel for DingTalkSession {
         // 选项以 `[{id,md}]` 下发（md 富文本含推荐绿色徽标）；模板回传选项 id（下标），
         // 提交时经 restore_selected 按下标还原原文。单选/严格由 single/allow_input 变量控制。
         let recommended_label = i18n::tr(ctx.lang, "channel.dingtalkRecommended");
-        let param_map = card::build_card_param_map(
+        let param_map = card::build_card_param_map_with_todo(
             title,
             ctx.text,
             ctx.options,
             ctx.single,
             ctx.select_only,
             recommended_label,
+            i18n::tr(ctx.lang, "whatsNext.todoPrefix"),
+            i18n::tr(ctx.lang, "channel.dingtalkTodo"),
         );
         let private_param_map = card::build_card_private_map();
 
@@ -303,7 +310,7 @@ impl MessagingChannel for DingTalkSession {
                     match card::parse_card_submit(&data) {
                         Some(s) if s.out_track_id == out_track_id && s.user_id == user_id => {
                             // 立刻回成功裁决：消除「请求失败」、置灰点击者（不在此等任何慢活）。
-                            let _ = ack.send(card::submit_ack_success());
+                            let _ = ack.send_and_wait(card::submit_ack_success()).await;
                             // 收尾并发下载（不在 3 秒关键路径），再经 OpenAPI 写公有终态文案。
                             for h in downloads {
                                 let _ = h.await;
@@ -324,6 +331,7 @@ impl MessagingChannel for DingTalkSession {
                                 user_input: s.user_input,
                                 images,
                                 files,
+                                todo_ids: Vec::new(),
                             });
                         }
                         // 非本卡片（理论上不会路由到此）：回空包让 Router 别空等，继续。
@@ -621,6 +629,7 @@ async fn message_to_answer(
                 user_input,
                 images: Vec::new(),
                 files: Vec::new(),
+                todo_ids: Vec::new(),
             })
         }
         // 严格模式禁附件：图片/文件回复忽略（继续等待编号选择）。
@@ -636,6 +645,7 @@ async fn message_to_answer(
                     user_input: None,
                     images: vec![img],
                     files: Vec::new(),
+                    todo_ids: Vec::new(),
                 }),
                 Err(e) => {
                     let lang = Lang::current();
@@ -664,6 +674,7 @@ async fn message_to_answer(
                     user_input: None,
                     images: Vec::new(),
                     files: vec![path],
+                    todo_ids: Vec::new(),
                 }),
                 Err(e) => {
                     let lang = Lang::current();

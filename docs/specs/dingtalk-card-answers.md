@@ -31,7 +31,7 @@
 | DC4 | 投放接口 | `POST /v1.0/card/instances/createAndDeliver` 投放到机器人单聊：`openSpaceId="dtv1.card//IM_ROBOT.{userId}"` + `imRobotOpenSpaceModel:{supportForward:true}` + `imRobotOpenDeliverModel:{spaceType:"IM_ROBOT", robotCode:clientId}` + `callbackType="STREAM"` + `userIdType:1` + `outTrackId`(uuid) |
 | DC5 | cardData 填充 | `cardData.cardParamMap` 复杂值转 JSON 字符串：`title`/`markdown`/`private_input` 为字符串；`submitted` 初始为 `"false"`；`options` 为 `[{"text":"选项"}]` 的 **JSON 字符串** |
 | DC6 | 回调解析 | 订阅 topic `/v1.0/card/instances/callback`；回调 `data` 含 `userId`/`outTrackId`/`content`(或 `value`，为 JSON 字符串)；解析 `content.cardPrivateData.actionIds`(=`["submit_action"]`) 与 `params.{selected_options,user_input}`。按 `outTrackId` 匹配当前卡片、`userId==配置 userId` 归属。`selected_options` 为选项文本数组（**过滤空串**，兼容元素为字符串或 `{text}` 对象） |
-| DC7 | 完成 + 回包 | 点「提交」即完成该题。**必须在卡片回调 3 秒内 ACK 时回包** `{cardUpdateOptions:{updatePrivateDataByKey:true}, userPrivateData:{cardParamMap:{submitted:"true"}}}`，否则卡片成功条件 `submitted==true` 不满足、用户会看到「提交失败」toast。Stream 层对**卡片回调改为延迟 ACK**（由会话层算出回包后再 ACK） |
+| DC7 | 完成 + 回包 | 点「提交」即完成该题。**必须在卡片回调 3 秒内 ACK 时回包** `{cardUpdateOptions:{updatePrivateDataByKey:true}, userPrivateData:{cardParamMap:{submitted:"true"}}}`，否则卡片成功条件 `submitted==true` 不满足、用户会看到「提交失败」toast。Stream 层对**卡片回调改为延迟 ACK**（由会话层算出回包后再 ACK）；最终提交须等待 Router 完成 Stream 写入尝试后才返回答案，避免单进程提前退出 |
 | DC8 | 图片/文件 | 作答期间**累积**用户在聊天里发的图片/文件（bot 消息 topic），点提交时连同 `selected_options`+`user_input` 一并作为答案；聊天里的**纯文字忽略**（请用卡片输入框，避免双输入源冲突） |
 | DC9 | 失败兜底 | 卡片投放失败（接口报错等）→ **自动回退**到现有「纯文本 + 编号选项」B 方案问该题（保留 B 方案代码） |
 | DC10 | Stream 订阅 | 会话期 Stream 同时订阅 **bot 消息**(`/v1.0/im/bot/messages/get`) + **卡片回调**(`/v1.0/card/instances/callback`) 两个 topic |

@@ -7,10 +7,8 @@
 
 use crate::config::AppConfig;
 use crate::confirm::{ConfirmFinalView, ConfirmView};
-use serde_json::Value;
-
 /// Feishu callback ack sender type (used when finalizing via card callback response).
-pub type FsAck = tokio::sync::oneshot::Sender<Option<Value>>;
+pub type FsAck = crate::feishu::router::CardAck;
 
 /// Send a confirm card to the given channel.  Returns the platform message ID on success.
 pub async fn send(channel_id: &str, config: &AppConfig, view: &ConfirmView) -> Option<String> {

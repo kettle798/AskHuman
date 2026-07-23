@@ -169,10 +169,8 @@ pub fn migrate_outdated() -> Vec<AgentKind> {
         AgentKind::Grok,
     ] {
         let st = status(kind);
-        if st.installed && st.outdated {
-            if install(kind).is_ok() {
-                migrated.push(kind);
-            }
+        if st.installed && st.outdated && install(kind).is_ok() {
+            migrated.push(kind);
         }
     }
     migrated
@@ -252,7 +250,7 @@ pub(crate) fn uninstall_unlocked(kind: AgentKind) -> Result<String> {
         AgentKind::Codex => codex_uninstall()?,
         AgentKind::Grok => json_uninstall(kind, &paths::grok_hooks_json(), Shape::Nested)?,
     }
-    super::agent_stop::reconcile_unlocked(kind)?;
+    super::agent_stop::reconcile_current_mode_unlocked(kind)?;
     Ok(message("cmd.lifecycleRemoved"))
 }
 
@@ -359,8 +357,13 @@ fn json_status(kind: AgentKind, path: &std::path::Path, shape: Shape) -> Lifecyc
             supported: true,
         };
     };
-    let (any, complete) =
-        json_presence_with_stop(kind, &exe, &root, shape, super::agent_stop::enabled(kind));
+    let (any, complete) = json_presence_with_stop(
+        kind,
+        &exe,
+        &root,
+        shape,
+        super::agent_stop::active_in_current_mode(kind),
+    );
     LifecycleStatus {
         installed: any,
         outdated: any && !complete,
@@ -449,8 +452,13 @@ fn elem_matches(
 
 fn json_install(kind: AgentKind, exe: &str, path: &std::path::Path, shape: Shape) -> Result<()> {
     let text = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
-    let updated =
-        apply_json_install_with_stop(kind, exe, &text, shape, super::agent_stop::enabled(kind))?;
+    let updated = apply_json_install_with_stop(
+        kind,
+        exe,
+        &text,
+        shape,
+        super::agent_stop::active_in_current_mode(kind),
+    )?;
     write_text(path, &updated)
 }
 
@@ -584,7 +592,7 @@ fn codex_install(exe: &str) -> Result<()> {
         exe,
         &text,
         Shape::Nested,
-        super::agent_stop::enabled(AgentKind::Codex),
+        super::agent_stop::active_in_current_mode(AgentKind::Codex),
     )?;
     write_text(&path, &updated)?;
     if let Err(error) = super::agent_permission::reconcile_codex_trust(
@@ -1041,7 +1049,7 @@ mod tests {
         let v = to_value(&out);
         assert_eq!(v["version"], 1);
         let arr = v["hooks"]["beforeSubmitPrompt"].as_array().unwrap();
-        assert_eq!(arr[0]["command"].as_str().unwrap().contains(MARKER), true);
+        assert!(arr[0]["command"].as_str().unwrap().contains(MARKER));
         assert!(arr[0].get("hooks").is_none(), "flat 形状无嵌套 hooks");
     }
 

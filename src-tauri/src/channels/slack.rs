@@ -2,7 +2,7 @@
 //! + Web API 发（文本 / 图片 / 文件 / Block Kit 互动卡片）。
 //!
 //! 方案 A（默认）：提问以 **Block Kit 消息内表单**下发——`input` 块放复选框(多选) + 多行输入框(补充文字)
-//! + 提交按钮；用户点「提交」产生一次 `block_actions` 回调（`state.values` 汇总取值）完成该题；
+//! 加提交按钮；用户点「提交」产生一次 `block_actions` 回调（`state.values` 汇总取值）完成该题；
 //! 作答期间在 DM 里发的图片/文件会被累积进答案（纯文字忽略，请用卡片输入框）。回调走 Socket Mode，零公网。
 //!
 //! 方案 B（兜底）：当卡片投放失败时，回退「纯文本 + 编号选项」——用户回一条消息即完成该题。
@@ -14,7 +14,7 @@
 //! （回显已选项 + 补充文字 + 状态行，移除控件）；ack 在 `ws` 层收帧即完成，无需 oneshot 回包。
 
 use super::conversation::{run_conversation, MessagingChannel, QuestionCtx};
-use super::{Channel, Interruption, Preemption, ResultSink};
+use super::{Channel, ConversationOrigin, Interruption, Preemption, ResultSink};
 use crate::config::SlackChannelConfig;
 use crate::i18n::{self, Lang};
 use crate::models::{ImageAttachment, MessagePrompt, QuestionAnswer};
@@ -85,10 +85,16 @@ impl Channel for SlackChannel {
         "slack"
     }
 
-    fn start(&self, request: &crate::models::AskRequest, sink: ResultSink) {
+    fn start(
+        &self,
+        request: &crate::models::AskRequest,
+        origin: &ConversationOrigin,
+        sink: ResultSink,
+    ) {
         let config = self.config.clone();
         let preempt = self.preempt.clone();
         let request = request.clone();
+        let origin = origin.clone();
         let transport = self.transport.clone();
         tauri::async_runtime::spawn(async move {
             let lang = Lang::current();
@@ -117,7 +123,7 @@ impl Channel for SlackChannel {
                 );
                 return;
             }
-            run_conversation(&mut session, &request, preempt, sink).await;
+            run_conversation(&mut session, &request, &origin, preempt, sink).await;
         });
     }
 
@@ -170,7 +176,7 @@ impl MessagingChannel for SlackSession {
         &mut self,
         message: &MessagePrompt,
         is_markdown: bool,
-        source: &str,
+        header: &str,
         lang: Lang,
     ) {
         let (Some(client), Some(dm)) = (self.client.as_ref(), self.dm_channel.as_deref()) else {
@@ -178,10 +184,7 @@ impl MessagingChannel for SlackSession {
         };
         // Slack 专属：消息头用大号 header + ✉️ 信封前缀（与问题标题同款；messageFrom 为多渠道
         // 共用文案，故图标仅在此处加，不影响其它渠道）。正文随后作为 section（mrkdwn / 纯文本）。
-        let header = format!(
-            "✉️ {}",
-            i18n::source_header(lang, "channel.messageFrom", source)
-        );
+        let header = format!("✉️ {}", header);
         let blocks = blockkit::build_message_blocks(&header, &message.text, is_markdown);
         if let Err(e) = client.post_message(dm, Some(&blocks), &header).await {
             eprintln!(
@@ -351,6 +354,7 @@ impl MessagingChannel for SlackSession {
                         user_input: s.user_input,
                         images,
                         files,
+                        todo_ids: Vec::new(),
                     });
                 }
                 SlInbound::Message(event) => {
@@ -635,6 +639,7 @@ async fn message_to_answer(
         user_input,
         images,
         files,
+        todo_ids: Vec::new(),
     })
 }
 

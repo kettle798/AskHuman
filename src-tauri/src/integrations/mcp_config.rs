@@ -470,6 +470,12 @@ fn apply_install_toml_outcome(
     entry.insert("args", value(args));
     entry.insert("startup_timeout_sec", value(startup));
     entry.insert("tool_timeout_sec", value(tool));
+    // Codex: skip per-call approval for our own ask tools. Written only when the key is
+    // absent — a user-edited value is their call and is never touched or flagged as
+    // outdated (`toml_entry_matches` deliberately ignores this key).
+    if target == AgentTarget::Codex && !entry.contains_key("approval_mode") {
+        entry.insert("approval_mode", value("approve"));
+    }
     // Grok：per-tool 超时 `tool_timeouts = { ask = 86400 }`（内联表，对 Composer 更精准）。
     match ask {
         Some(secs) => {
@@ -620,7 +626,7 @@ fn toml_installed(text: &str) -> bool {
     toml_entry(&doc).is_some()
 }
 
-fn toml_entry<'a>(doc: &'a toml_edit::DocumentMut) -> Option<&'a dyn toml_edit::TableLike> {
+fn toml_entry(doc: &toml_edit::DocumentMut) -> Option<&dyn toml_edit::TableLike> {
     doc.get("mcp_servers")?
         .as_table_like()?
         .get(SERVER_NAME)?
@@ -984,6 +990,39 @@ mod tests {
             "[mcp_servers.askhuman]\ncommand = \"{EXE}\"\nargs = [\"mcp\"]\nstartup_timeout_sec = 30\ntool_timeout_sec = 86400\n"
         );
         assert!(!toml_entry_matches(CODEX, &old, EXE));
+    }
+
+    #[test]
+    fn codex_install_sets_approval_mode_only_when_absent() {
+        // Fresh install writes approve (skip per-call approval for our own ask tools).
+        let out = apply_install_toml(CODEX, "", EXE).unwrap();
+        let doc = out.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(
+            toml_entry(&doc)
+                .unwrap()
+                .get("approval_mode")
+                .and_then(|i| i.as_str()),
+            Some("approve")
+        );
+        // A user-edited value survives reinstall/update and never flags "needs update".
+        let user_edited = out.replace("approval_mode = \"approve\"", "approval_mode = \"prompt\"");
+        let rewritten = apply_install_toml(CODEX, &user_edited, EXE).unwrap();
+        let doc = rewritten.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(
+            toml_entry(&doc)
+                .unwrap()
+                .get("approval_mode")
+                .and_then(|i| i.as_str()),
+            Some("prompt")
+        );
+        assert!(toml_entry_matches(CODEX, &rewritten, EXE));
+        // A user-deleted key does not flag "needs update" either.
+        let deleted = out.replace("approval_mode = \"approve\"\n", "");
+        assert!(toml_entry_matches(CODEX, &deleted, EXE));
+        // Grok config never gets the Codex-specific key.
+        let grok = apply_install_toml(GROK, "", EXE).unwrap();
+        let doc = grok.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(toml_entry(&doc).unwrap().get("approval_mode").is_none());
     }
 
     #[test]

@@ -42,11 +42,13 @@ AskHuman/
   src/                       Vue 前端（Vite 根目录）
     index.html               前端入口、首帧关键样式与平台探测
     main.ts                  挂载 App、引入全局样式
-    App.vue                  按 URL 路由 popup/settings/history/agents/interject
-    views/PopupView.vue      提问与回答弹窗
+    App.vue                  按 URL 路由 popup/settings/history/agents/interject/todos
+    views/PopupView.vue      提问与回答弹窗（编排层；状态与区块组件在 views/popup/）
     views/AgentsView.vue     Agent 生命周期状态窗口
     views/InterjectView.vue  Agent 插话编辑器
-    views/SettingsView.vue   通用、Agent、渠道、高级与实验设置
+    views/TodosView.vue      项目待办窗口（项目选择 + 增删清空）
+    views/NewTaskView.vue    新建 Agent 任务窗口（GUI 单页表单，spec gui-agent-task-launch）
+    views/SettingsView.vue   设置页（编排层；各 tab 组件与域逻辑在 views/settings/）
     views/HistoryView.vue    回复历史列表、搜索与筛选
     components/HistoryDetail.vue  单条历史的只读详情
     lib/history.ts           历史记录展示相关纯函数
@@ -75,6 +77,7 @@ AskHuman/
         agents_cmd.rs        agents 模式、状态与 capability 子命令
         doctor.rs            daemon、渠道和 Agent 集成体检
         debug_cmd.rs         不进入 help 的调试子命令
+        todo_cmd.rs          todo add/list/rm/clear 子命令
         file_attachment.rs   -f 路径解析与校验
         output.rs            文本/JSON 结果格式化
         image_writer.rs      回复图片落盘
@@ -86,12 +89,15 @@ AskHuman/
       secrets.rs             系统钥匙串与密钥回退
       project.rs             从 cwd 识别项目根
       history.rs             JSONL 回复历史存储
+      show_last.rs           按 Agent session/MCP instance 恢复最近完成问答
+      context_binding.rs     MCP 会话的一次性 token 与 Grok 安全旁路绑定
+      todos.rs               项目级待办队列（todos.json 直读直写 + 文件锁）
       autochannel.rs         IM 命令分类、活跃槽与共享文案
       perf.rs                跨进程性能埋点
       prompts.rs             CLI/MCP Agent 参考提示词
       mcp/
         mod.rs               STDIO MCP server 运行时
-        ask.rs               ask 工具到现有 CLI 流程的适配
+        ask.rs               ask / whats_next / show_last / todo_add 工具
       hooks.rs               用户级 hooks
       watch.rs               四渠道 /watch 共用状态与文案
       select.rs              跨渠道单选卡模型
@@ -157,6 +163,7 @@ AskHuman/
         agent_launch.rs      Agent readiness、一次性启动记录与 Terminal.app helper
         agent_rules.rs       Agent 全局 Rules 管理
         agent_subagent_guard.rs  Claude/Codex SubagentStart 提示 Hook
+        agent_context_recovery.rs  集成 mode 托管的压缩恢复/会话绑定 Hook
         grok_skill.rs        Grok interaction-protocol skill 管理
         mcp_config.rs        四家 MCP server 配置管理
         agent_mode.rs        None/CLI/MCP 模式编排
@@ -173,7 +180,15 @@ AskHuman/
         mod.rs               CLI 到 Daemon 的连接与管理操作
         composer.rs          Interject 窗口的 daemon 连接
       daemon/
-        mod.rs               Daemon 主循环与消息分发
+        mod.rs               daemon 子命令入口（Unix 转 unix_impl）
+        unix_impl/
+          mod.rs             状态与类型、serve 主循环、连接分发与请求提交
+          watch.rs           watch 订阅持久化、tick 刷新与卡片回调
+          select.rs          跨渠道单选卡发送、路由与回调分发
+          inbound.rs         IM 入站命令层与共享命令处理
+          todo.rs            IM /todo·/todo-rm·/todo-auto 命令与待办管理卡
+          subs.rs            GUI/托盘/Agent 订阅广播与 Interject 连接
+          detect.rs          渠道自动识别流程
         lifecycle.rs         单实例、指纹与空闲生命周期
         spawn.rs             Daemon 脱离启动
         request.rs           请求登记、Coordinator 与 GUI token
@@ -188,6 +203,7 @@ AskHuman/
         mod.rs               Agent 类型、事件与模块入口
         detect.rs            Agent 家族、会话和进程探测
         report.rs            生命周期 Hook 上报与去重
+        context_recovery.rs  压缩后提示、MCP token 注入与 Grok pending 上报
         title.rs             四家会话标题解析
         activity.rs          transcript 尾部活动解析
         registry.rs          Agent 状态推导、持久化与快照
@@ -218,6 +234,7 @@ AskHuman/
 - 渠道测试与识别：`telegram_test`；钉钉、飞书、Slack 各自的 `*_test` / `*_detect_prepare` / `*_detect_wait`；共用 `detect_cancel`
 - 版本自更新：`get_app_version`、`update_check`、`update_get_notes`、`update_apply`、`update_dismiss`、`popup_update_state`、`restart_settings`
 - Agent 生命周期：`agents_init`、`agent_lifecycle_status` / `install` / `uninstall`、`agent_force_idle`
+- 新建 Agent 任务（GUI）：`open_new_task`、`new_task_init`、`new_task_projects`(+`_refreshed`)、`project_key_of`、`new_task_launch`
 
 Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-popup-ui.md`：
 
@@ -229,7 +246,7 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 ## UI / 主题
 
 - 主题三态：`system`(prefers-color-scheme)/`light`/`dark`；前端切根类 + 后端设原生窗口主题。
-- macOS：`underWindowBackground` 毛玻璃 + `TitleBarStyle::Overlay` + 隐藏标题（整窗含标题栏皆玻璃），叠 0.2 色罩；Windows/Linux 退化为纯色不透明底。
+- macOS 窗口材质三态：Solid 为完整不透明主题底且不使用 Visual Effects；Blur 使用 Tauri `underWindowBackground`；Glass 仅在 macOS 26+ 使用 `NSGlassEffectView`，旧系统的 `glass` 配置有效值为 Blur。三态共用 `TitleBarStyle::Overlay` + 隐藏标题；Windows/Linux 维持纯色不透明底。
 - Markdown 配色见 `styles/controls.css`（链接/代码块/表头/引用/hr 等）。代码块 hover 右上角有拷贝按钮（`.code-copy`，点击复制 `<code>` 文本，弹窗/历史详情/设置发布说明共用 `renderMarkdown` 故都生效）。
 
 ## 配置
@@ -242,8 +259,9 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 四种 IM 共用 Daemon 内的入站命令层，平台模块只负责传输、渲染和回调；Daemon 存活时即持续监听消息，不要求已有提问。详细能力与代码入口见 `docs/overview-im-commands.md`。
 
 - `channels.autoActivation` 关闭时向所有启用 IM 投放，开启时以当前活跃槽为主；切槽会补推在途请求，watch 渠道仍会加入对应 Agent 新提问的投放并集。
-- 共享命令包括 `/new`、`/help`、`/here`、`/status`、`/watch`、`/unwatch`、`/msg`、`/msg-clear`、`/diff`、`/stage` 和 `/transcript`；Slack 使用 `!` 作为可输入的备用前缀。
+- 共享命令包括 `/new`、`/help`、`/here`、`/status`、`/watch`、`/unwatch`、`/msg`、`/msg-clear`、`/diff`、`/stage`、`/transcript`、`/todo`、`/todo-rm` 和 `/todo-auto`；Slack 使用 `!` 作为可输入的备用前缀。
 - macOS 开启 `agentTasks` 后，`/new` 依次选择 workspace、已就绪 Agent 与权限，在新的 Terminal.app 窗口启动真实交互会话；Daemon 只负责启动前流程，之后复用 lifecycle/watch。
+- macOS 本地 GUI 亦可创建任务（不要求开启 `agentTasks`）：待办窗口行内按钮与托盘「新建 Agent 任务」打开统一的新建任务窗口，就绪判定与启动链路与 `/new` 相同；见 `docs/specs/gui-agent-task-launch.md`。
 - Agent 数字编号在 daemon 生命周期内稳定，供状态、关注、插话和 Git/会话导出共用；无参目标选择复用跨渠道单选卡模型。
 - Watch 订阅持久化并就地更新原卡；`/stage` 必须经过跨渠道 Confirm，不能直接执行暂存。
 
@@ -252,6 +270,10 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 - `general.historyLimit` 控制 `~/.askhuman/history.jsonl` 的全局保留数；0 停止新增，裁剪/立即清理时清空已有记录。
 - 历史在 Coordinator 的唯一汇聚点记录“发送”和“用户主动取消”，系统取消不记。
 - 记录按 git 根（回退 cwd）归项目；图片和文件只保存路径，读取对旧记录和缺失附件保持兼容。
+- 完成问答额外记录可用的 Agent session ID 和 MCP instance ID；`AskHuman --show-last`
+  或 MCP `show_last` 可在上下文压缩后读取当前会话最近一条提问语境与实际答案（省略空字段、
+  未选候选项和 recommended 标记）。取得真实 session 后只做精确查询，不向弱键级联；
+  只有完全非 Agent 的 CLI 才按项目回退。
 - 历史窗口提供跨项目查看与搜索；完整约束见 `docs/specs/reply-history.md`。
 
 ### 密钥安全
@@ -289,6 +311,16 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 - 排队消息被实际读取后向来源 IM 发阅读回执；即时送达、撤回、覆盖或未消费的消息不回执。
 - 入口为 Agent 状态窗口、托盘菜单和 IM `/msg`；队列实现位于 `agents/interject.rs`。
 
+## 项目待办 + whats-next
+
+> 规格 `docs/specs/todo-whats-next.md`。
+
+- 待办按项目（git 根）归属，`~/.askhuman/state/todos.json` 是唯一数据源：所有进程直读直写 + 文件锁串行化，不依赖 daemon 存活，跨平台。CLI / MCP `todo_add` 在落盘失败时必须报错（禁止假成功 `#0`）。
+- Agent 完成任务后必须调 `AskHuman --whats-next`（MCP 为 `whats_next` 工具）：固定提问 + 可选的 Agent 建议任务 + 待办 chip + 恒有「结束本轮」；顺序固定为建议任务、待办、结束，总选项最多 10 条。建议任务仅在确有建议时通过 `-o`/`-o!`（MCP `options`）传入，选择结果保持普通 Ask 的 `[selected_options]` 语义；待办派活为 `[user_input]`，准许结束为 `[selected_options]`，取消为 `[status]`。选中的待办按 id best-effort 出队（Coordinator 汇聚点统一处理）。标记为「自动执行」（⚡）的待办优先级不变：whats-next 时不发卡、直接按队列顺序派发最靠前一条。
+- 送达面：whats-next / 普通提问 Popup 折叠待办区 / Stop 确认卡（兜底）都以选项形式呈现待办；输入面：CLI `todo` 子命令、Popup 内新增、GUI 待办窗口（托盘/AgentsView 入口）、IM `/todo`。
+- IM `/todo`（管理卡：飞书代码卡自带输入表单，钉钉复用提问卡模板 `allow_input`，TG/Slack 文本 + 命令提示）、`/todo-rm`（复用单选卡逐条删除、就地刷新）与 `/todo-auto`（切换自动执行标记）仅 Unix，实现在 `daemon/unix_impl/todo.rs`。
+- macOS 上待办窗口每条待办另有「创建任务」按钮：预选项目与该待办打开新建任务窗口，Terminal 启动成功后按快照出队（spec `docs/specs/gui-agent-task-launch.md`）。
+
 ## 菜单栏图标 + 统一 GUI Host（Unix 桌面）
 
 > 需求 `docs/specs/menu-bar-tray.md`，计划 `docs/plans/menu-bar-tray.md`。
@@ -298,6 +330,7 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 - `general.menuBarIcon` 支持 `off|active|always`；Windows 不支持，Linux 桌面 best-effort。
 - 托盘状态订阅不保活；只有打开窗口的独立连接给 Daemon 续命。`general.daemonLifecycle=keepalive` 是正交的常驻策略。
 - `TrayState` 汇总待答、IM、Agent、更新与 drain；菜单可聚焦待答 Popup、打开 Agent/插话、控制 Daemon 和应用更新。
+- GUI Host 启动与 daemon 停→运行时复用 Agents 设置页口径检查集成更新；待更新时菜单显示可点击警告，无待答时 template 图标显示右上实心圆，设置内更新成功后即时清除。
 - GUI Host 只在无窗口时换到新二进制；GUI Host always 与 Daemon keepalive 的登录项分别管理。
 
 ## CLI 配置与 Agent 集成（headless / 无 GUI）
@@ -306,20 +339,25 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 - headless/SSH 可用 `channel`、`agents`、`config`、`doctor` 完成渠道配置与 Agent 集成；各子命令提供 help 和 JSON 输出。
 - `channel set` 无 flag 走交互向导，有 flag 走脚本；密钥只从 env/file/stdin 或隐藏输入读取，不进 argv。
-- `agents mode` 维护 None/CLI/MCP 整包；permission、lifecycle、stop 是正交 capability，Grok 仅 None/MCP 且不支持 stop/interject。
+- `agents mode` 维护 None/CLI/MCP 整包；permission/stop 的 preference 独立保存，但只有 CLI/MCP mode 才安装交互接管 Hook，None 隐藏对应设置并卸载其 active 能力；lifecycle 始终正交，Grok 仅 None/MCP 且不支持 stop/interject。
+- 上下文恢复 Hook 由当前 mode 独立托管，不依赖可关闭的 lifecycle tracking；CLI/MCP
+  提示严格只指向用户当前选中的入口，缺失/过期并入当前 Hook 或 MCP 产物的更新状态。
 - 全局交互协议把 Sub Agent 作为唯一例外并禁止其使用 AskHuman；Claude/Codex mode 另带 `SubagentStart` 提示 Hook，Cursor/Grok 只依赖协议文本。
-- `agents update [<agent>]` 按当前 mode 重新 reconcile 单家或全部托管产物；重复设置相同 mode 也会完整更新，但不改正交 capability 偏好。
+- `agents update [<agent>]` 按当前 mode 重新 reconcile 单家或全部托管产物；重复设置相同 mode 也会完整更新，但不改独立保存的 capability 偏好。
 - `config` 是通用键值兜底，`doctor` 汇总 Daemon、渠道和集成；两者复用同一配置与集成模块，不维护第二套逻辑。
 
 ## MCP 支持（CLI 之外的第二种集成形态）
 
 > 需求 `docs/specs/mcp.md`，计划 `docs/plans/mcp.md`。
 
-- `AskHuman mcp` 是只暴露 `ask` 的 STDIO server；每次调用 spawn 现有 CLI JSON 流程，复用 Popup、IM、抢答、历史和 drain。
-- 入参仅 message/questions/files；输出同时提供 structuredContent、JSON 文本和图片 ImageContent。MCP 取消会终止子 CLI，并通过 socket EOF 取消 Daemon 请求。
+- `AskHuman mcp` 暴露 `ask`、`whats_next`、`show_last`、`todo_add`：`ask`/`whats_next` 每次调用 spawn 现有 CLI 流程，复用 Popup、IM、抢答、历史和 drain；`show_last` 只读恢复最近精确问答，`todo_add` 在 MCP 进程内直写 `todos.json`。
+- `ask` 入参为 message/questions/files；输出同时提供 structuredContent、JSON 文本和图片 ImageContent。MCP 取消会终止子 CLI，并通过 socket EOF 取消 Daemon 请求。
 - Agent 自动集成是 None/CLI/MCP 互斥；Grok 仅 None/MCP，其 MCP 产物是 skill + config。
 - Codex、Grok、Claude 分别写适配自身的长超时配置；Cursor MCP 超时不可配置，推荐 CLI 模式。
-- MCP server 环境可能被客户端清空；Daemon 可用调用进程树 pid 只刷新已有 lifecycle session，绝不因此新建幽灵会话。
+- MCP 没有通用的 Agent session 字段：Codex 使用每调用 `_meta.threadId`，Claude/Cursor
+  使用 schema 隐藏的短命一次性 token，Grok 只在进程+项目分区内参数指纹候选唯一时认领；
+  无可信 session 时才回退到当前 MCP instance + project。详见
+  `docs/plans/agent-context-compaction-retention.md`。
 - Codex 配置把 `mcp__askhuman` 加入 Code Mode direct-only namespace，确保 ask 顶层阻塞；最小编辑与所有权记录避免卸载用户原有配置。
 
 ## Agent 原生权限审批（Claude Code / Codex）
@@ -338,6 +376,7 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 - 只处理 Claude Code、Codex、Cursor 的自然完成；Grok、错误和用户中断不能可靠 continuation，不发卡。
 - 三家独立开关默认关；询问“继续/结束”，24h 或基础设施失败 fail-open，投放沿用活跃槽 ∪ watch 渠道。
+- Stop preference 独立保存，但只在 CLI/MCP mode 生效；None 隐藏开关并卸载 confirm 能力，重新集成时自动恢复。若 lifecycle tracking 仍开，共享 Stop handler 只保留 `track`、不弹确认卡。
 - 继续时使用各家原生 continuation，下一次自然 Stop 再询问，不做外部 resume。
 - Stop 确认复用普通 Ask 单选链路但不写回复历史；它与 lifecycle 共用单一 Stop handler，避免并发 Hook 提前置空闲。
 - `[user_confirmed_end_turn]` 出现在最后回复任意位置即表示用户已明确同意结束，命中后直接放行，避免再次确认。
@@ -370,7 +409,7 @@ node scripts/perf-popup.mjs             # 固定 canonical 弹窗性能场景
 ## 注意事项
 
 - **stdout 洁净**：GUI 阶段把 stderr 重定向到 /dev/null（`app/mod.rs` 的 `stderr_redirect`，Unix），自身错误用 `eprintln_real` 走原 stderr。
-- **首帧不白闪**：`src/index.html` 内联关键底色；macOS 毛玻璃下 body 透明叠色罩。
-- **macOS 透明/毛玻璃**依赖 `tauri` 的 `macos-private-api` feature 与 `macOSPrivateApi: true`。
+- **首帧不白闪**：`src/index.html` 内联关键底色；macOS 建窗 URL 携带有效材质，Solid 首帧完整实色，Blur/Glass 首帧透明叠色罩。
+- **macOS 窗口材质**依赖 `tauri` 的 `macos-private-api` feature 与 `macOSPrivateApi: true`；运行时原生层变更必须在主线程执行。
 - **release 自包含**：前端资源在 `cargo build` 时由 `generate_context!` 嵌入，故安装后无需 dev server。
 - Telegram 不接收图片；Cursor Hook 仅 mac/Linux（Windows 禁用并提示）。

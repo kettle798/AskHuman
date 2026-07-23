@@ -6,9 +6,10 @@
 
 ## 背景
 
-AskHuman 当前把同一份强制交互协议写入 Cursor、Claude Code、Codex 的全局 rules，并通过 Grok
-的全局 skill 承载等价协议。部分 Agent 会把这些全局指令继续提供给 Sub Agent，导致主 Agent 与
-Sub Agent 都可能直接调用 AskHuman 提问、要求结束确认，产生多个并发问题和混乱的交互归属。
+AskHuman 从同一模板生成 Cursor、Claude Code、Codex 的全局 rules，并通过 Grok 的全局 skill 承载
+等价协议；生成器允许在共享正文前部加入 Agent 专属的 scope rule。部分 Agent 会把这些全局指令继续
+提供给 Sub Agent，导致主 Agent 与 Sub Agent 都可能直接调用 AskHuman 提问、要求结束确认，产生多个
+并发问题和混乱的交互归属。
 
 本需求不尝试阻止全局规则被 Sub Agent 读取，而是在共享协议里增加清晰的角色边界，并在支持可靠
 启动上下文注入的 Agent 上增加一层 Hook 兜底。
@@ -53,6 +54,12 @@ Sub Agent 都可能直接调用 AskHuman 提问、要求结束确认，产生多
 它们必须位于现有 “must apply under all circumstances” 文字之前。其余 protocol 原文不改。
 
 不要求主 Agent 使用固定 sentinel 或逐字模板；自然语言表达清楚上述两点即可。
+
+2026-07-24 补充：Codex 桌面版会在用户创建任务前运行 Suggested prompts 的 task-suggestion
+generator。为让后台线程实际尝试 AskHuman、并能直接验证运行时 guard，Rules 不再为该角色增加文案
+例外；Codex 与 Claude、Cursor、Grok 一样只保留上面的 subagent 例外。安全边界由运行时提供：
+Codex MCP 从可信 turn metadata 精确拦截 `thread_source=system`（见 `mcp.md`），Stop Hook 对 system /
+ephemeral thread 静默放行并留下审计日志（见 `agent-stop-confirmation.md`）。
 
 ### D2：Grok skill 的常驻 description 同步角色边界
 
@@ -143,3 +150,4 @@ Guard 状态纳入现有 Rule / Skill 更新口径，而不是新增设置行：
 7. 已启用 Claude / Codex 集成但缺 Guard 时显示需更新；更新 Rule 或整包更新后恢复最新状态。
 8. Cursor / Grok 不安装 Guard，且不会因 Guard 不存在显示需更新。
 9. 自动化验证不启动真实 Agent / Sub Agent；任何计费实测必须另行获得用户明确许可。
+10. 四家 CLI / MCP Rules 均只含 subagent scope 例外，不含 task-suggestion generator 例外。

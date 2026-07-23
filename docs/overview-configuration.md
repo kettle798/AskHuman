@@ -11,10 +11,10 @@
 ## 字段地图
 
 - `general`
-  - `theme`、`language`、`alwaysOnTop`、`appearAnimation`、`windowEffect`
+  - `theme`、`language`、`alwaysOnTop`、`appearAnimation`、`windowEffect`（`solid|blur|glass`；配置默认 `blur`，显式 `glass` 在 macOS 26 以下有效值自动解析为 `blur`）
   - `speechLanguage`、`speechShortcut`
   - `historyLimit`（默认 200）与 `popupSound`
-  - `menuBarIcon`（`off|active|always`，默认 `off`，仅 macOS/Linux 桌面）
+  - `menuBarIcon`（`off|active|always`，默认 `always`，仅 macOS/Linux 桌面；已有显式值保持不变）
   - `popupPrewarm`（默认 `true`，Unix）
   - `daemonLifecycle`（`activity|keepalive`，默认 `activity`，Unix）
 - `channels.popup`：`enabled`、`width`、`height`、`rememberSize`
@@ -39,3 +39,7 @@
 
 Agent 任务的 workspace 索引独立存于 `~/.askhuman/agent-workspaces.json`，一次性启动记录存于
 `~/.askhuman/state/agent-launches/`；二者都不是 `AppConfig`。
+
+轻量界面状态（如弹窗「配置 IM 渠道」一次性引导的已关闭标记）独立存于
+`~/.askhuman/ui-state.json`（`src-tauri/src/uistate.rs`）：读失败视为默认、写失败静默，
+与用户配置分离以免互相触发保存/迁移逻辑。

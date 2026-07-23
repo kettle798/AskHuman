@@ -92,6 +92,67 @@ pub async fn request_status() -> Option<StatusInfo> {
     }
 }
 
+/// 权限授权管理面板操作（设置进程 → daemon，spec codex-permission-remember §6.3）。
+/// 面板打开时才调用；daemon 未运行则拉起（store 的读写都必须经 daemon）。
+pub async fn permission_rules_op(
+    op: crate::ipc::PermissionRulesOp,
+) -> Result<crate::ipc::PermissionRulesResult, String> {
+    ensure_running().await.map_err(|e| e.to_string())?;
+    let (mut reader, mut writer) = connect_split().await.map_err(|e| e.to_string())?;
+    ipc::write_msg(&mut writer, &ClientMsg::Hello(hello()))
+        .await
+        .map_err(|e| e.to_string())?;
+    loop {
+        match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
+            Ok(Some(ServerMsg::HelloAck(ack))) => {
+                if ack.status == HelloStatus::Ok {
+                    break;
+                }
+                return Err("daemon is restarting".to_string());
+            }
+            Ok(Some(_)) => continue,
+            _ => return Err("daemon connection lost".to_string()),
+        }
+    }
+    ipc::write_msg(&mut writer, &ClientMsg::PermissionRules { op })
+        .await
+        .map_err(|e| e.to_string())?;
+    loop {
+        match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
+            Ok(Some(ServerMsg::PermissionRules { result })) => return Ok(result),
+            Ok(Some(ServerMsg::Error { message })) => return Err(message),
+            Ok(Some(_)) => continue,
+            _ => return Err("daemon connection lost".to_string()),
+        }
+    }
+}
+
+/// Tell an already-running daemon to reload the persisted update snapshot. This is best-effort and
+/// deliberately does not start the daemon merely because Settings or the tray checked for updates.
+pub async fn notify_update_state_changed() {
+    let Ok((_reader, mut writer)) = connect_split().await else {
+        return;
+    };
+    let _ = ipc::write_msg(&mut writer, &ClientMsg::RefreshUpdateState).await;
+}
+
+/// GUI 启动新任务后把活跃槽切到 popup（spec gui-agent-task-launch G11）。best-effort、不拉起
+/// daemon：daemon 在跑经 IPC 切（含旧渠道反激活回执 / auto-end-watch）；未运行则直接写
+/// `auto-channel.json`（daemon 启动时 `load_active` 读回）。
+pub async fn activate_popup_slot() {
+    match connect_split().await {
+        Ok((_reader, mut writer)) => {
+            if ipc::write_msg(&mut writer, &ClientMsg::ActivatePopupSlot)
+                .await
+                .is_err()
+            {
+                crate::autochannel::save_active(Some("popup"));
+            }
+        }
+        Err(_) => crate::autochannel::save_active(Some("popup")),
+    }
+}
+
 /// 请求停止（force=false 为 graceful：有在途请求时 Daemon 排空后退出）；
 /// 收到 Stopping 回应返回 true，未运行返回 false。
 pub async fn request_stop(force: bool) -> bool {
@@ -129,7 +190,7 @@ async fn wait_for_drain() {
         if transport::connect().await.is_err() {
             return; // 旧 Daemon 已下线，可拉起新的。
         }
-        if last_hint.map_or(true, |t| t.elapsed() >= Duration::from_secs(30)) {
+        if last_hint.is_none_or(|t| t.elapsed() >= Duration::from_secs(30)) {
             match request_status().await {
                 Some(info) => eprintln!(
                     "askhuman: daemon is draining ({} active request(s) left); waiting to submit… (run 'AskHuman daemon restart --force' to switch now, interrupting them)",
@@ -201,6 +262,77 @@ pub fn report_agent_event(msg: ClientMsg) {
             let _ = ipc::write_msg(&mut writer, &msg).await;
         }
     });
+}
+
+/// Best-effort Grok side-channel pending report from the short-lived recovery hook.
+pub fn report_grok_binding_pending(msg: ClientMsg) {
+    report_agent_event(msg);
+}
+
+/// Register the long-lived MCP process before exposing its tools to the client.
+pub async fn register_mcp_instance(
+    mcp_instance_id: String,
+    project: String,
+    server_pid: u32,
+    parent_pid_hint: Option<u32>,
+) {
+    let _ = ensure_running().await;
+    if let Ok((_, mut writer)) = connect_split().await {
+        let _ = ipc::write_msg(
+            &mut writer,
+            &ClientMsg::McpInstanceRegister {
+                mcp_instance_id,
+                project,
+                server_pid,
+                parent_pid_hint,
+            },
+        )
+        .await;
+    }
+}
+
+/// Claim a unique Grok hook candidate. A short bounded retry covers hook/handler scheduling.
+pub async fn claim_grok_binding(
+    mcp_instance_id: String,
+    project: String,
+    tool_name: String,
+    arguments_sha256: String,
+    server_pid: u32,
+) -> Option<String> {
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let Ok((mut reader, mut writer)) = connect_split().await else {
+            continue;
+        };
+        if ipc::write_msg(
+            &mut writer,
+            &ClientMsg::GrokBindingClaim {
+                mcp_instance_id: mcp_instance_id.clone(),
+                project: project.clone(),
+                tool_name: tool_name.clone(),
+                arguments_sha256: arguments_sha256.clone(),
+                server_pid,
+            },
+        )
+        .await
+        .is_err()
+        {
+            continue;
+        }
+        let response = tokio::time::timeout(
+            Duration::from_millis(100),
+            ipc::read_msg::<_, ServerMsg>(&mut reader),
+        )
+        .await;
+        if let Ok(Ok(Some(ServerMsg::GrokBindingClaim { agent_session_id }))) = response {
+            if agent_session_id.is_some() {
+                return agent_session_id;
+            }
+        }
+    }
+    None
 }
 
 /// 插话轮询产物（hook 侧视角，spec agent-interject D3/D4）。
@@ -288,14 +420,34 @@ pub async fn open_for_subscribe() -> std::io::Result<(Reader, OwnedWriteHalf)> {
 /// `AgentsState` 即返回（不持续监听）。daemon 不可达或异常返回 None。
 pub async fn request_agents_snapshot() -> Option<serde_json::Value> {
     ensure_running().await.ok()?;
+    agents_snapshot_once().await
+}
+
+/// 同上，但 daemon 未运行时**不拉起**（待办窗口项目候选用，spec todo-whats-next D9）：
+/// 连不上 / 握手非 Ok / 超时直接返回 None，窗口照样可用。
+///
+/// Bounded by a short timeout so a wedged daemon or non-Ok HelloAck cannot keep the
+/// Todos window spinner spinning forever (subscribe otherwise waits on AgentsState).
+pub async fn agents_snapshot_if_running() -> Option<serde_json::Value> {
+    tokio::time::timeout(Duration::from_millis(800), agents_snapshot_once())
+        .await
+        .unwrap_or_default()
+}
+
+async fn agents_snapshot_once() -> Option<serde_json::Value> {
     let (mut reader, mut writer) = connect_split().await.ok()?;
     ipc::write_msg(&mut writer, &ClientMsg::Hello(hello()))
         .await
         .ok()?;
-    // 等握手 Ok（忽略期间其它消息）。
+    // Wait for HelloAck; any non-Ok status (Draining / Restarting) aborts — do not spin.
     loop {
         match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
-            Ok(Some(ServerMsg::HelloAck(ack))) if ack.status == HelloStatus::Ok => break,
+            Ok(Some(ServerMsg::HelloAck(ack))) => {
+                if ack.status == HelloStatus::Ok {
+                    break;
+                }
+                return None;
+            }
             Ok(Some(_)) => continue,
             _ => return None,
         }
@@ -356,7 +508,7 @@ pub fn run_confirm(task: crate::ipc::ConfirmTask) -> Option<crate::models::Confi
             Ok(Some(ServerMsg::HelloAck(ack))) if ack.status == HelloStatus::Ok => {}
             _ => return None,
         }
-        ipc::write_msg(&mut writer, &ClientMsg::SubmitConfirm(task))
+        ipc::write_msg(&mut writer, &ClientMsg::SubmitConfirm(Box::new(task)))
             .await
             .ok()?;
         read_confirm_frames(&mut reader).await

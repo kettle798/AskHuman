@@ -1,8 +1,8 @@
 //! 统一 GUI 宿主进程的「自有 IPC」协议与客户端（spec D2/D3/D13）。
 //!
-//! 宿主进程（`AskHuman --gui-host`）单实例承载托盘图标 + 设置/历史/Agent 窗口。它另起一条
+//! 宿主进程（`AskHuman --gui-host`）单实例承载托盘图标 + 设置/历史/待办/Agent 窗口。它另起一条
 //! **与 daemon 解耦**的 Unix socket（`~/.askhuman/gui-host.sock`），接收来自 CLI（`--settings`
-//! /`--history`/`agents monitor`）与弹窗导航按钮的「打开窗口」请求，从而保证每类窗口全局唯一。
+//! /`--history`/`--todos`/`agents monitor`）与弹窗导航按钮的「打开窗口」请求，从而保证每类窗口全局唯一。
 //!
 //! 传输复用 `ipc::codec` 的 NDJSON 编解码；协议见 `HostMsg`。客户端入口为 `host_open`。
 //! 宿主侧的监听 / 窗口管理 / 托盘逻辑见 `app::gui_host`。
@@ -18,6 +18,11 @@ pub enum WindowKind {
     Agents,
     /// 插话 composer（spec agent-interject D7）：每 session 全局唯一，`OpenWindow.session` 必填。
     Interject,
+    /// 项目待办窗口（spec todo-whats-next D9）：全局唯一；`project` 为预选项目 key（可空）。
+    Todos,
+    /// 「新建 Agent 任务」窗口（spec gui-agent-task-launch）：全局唯一；
+    /// `project` 为预选项目 key、`todo` 为预选待办 id（均可空）。
+    NewTask,
 }
 
 /// CLI / 弹窗 → 宿主 的消息。
@@ -25,10 +30,11 @@ pub enum WindowKind {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum HostMsg {
     /// 打开（或聚焦已存在的）指定窗口。`all` 仅历史窗口使用（默认展示全部项目）；
-    /// `project` 仅历史窗口使用——携带调用方的项目 key（空串=未知项目），让宿主里的历史窗口
-    /// 默认过滤到调用方项目而非宿主自身 cwd（spec 计划「项目过滤经 OpenWindow 字段传递」）。
+    /// `project` 按窗口类型复用：历史窗口=调用方项目 key（空串=未知项目，宿主里的历史窗口
+    /// 默认过滤到该项目而非宿主自身 cwd）；设置窗口=初始定位 tab（如 "channel"）。
     /// `session`/`agent`/`cwd` 仅插话窗口使用：目标 agent 的 session_id（窗口唯一键）、
-    /// 家族（头部胶囊）与工作目录（头部项目名）。旧宿主忽略未知字段（serde default 兼容）。
+    /// 家族（头部胶囊）与工作目录（头部项目名）。`todo` 仅新建任务窗口使用：预选待办 id。
+    /// 旧宿主忽略未知字段（serde default 兼容）。
     OpenWindow {
         kind: WindowKind,
         #[serde(default)]
@@ -41,6 +47,8 @@ pub enum HostMsg {
         agent: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        todo: Option<String>,
     },
     /// 探活（保留；当前 `host_open` 不依赖回包）。
     Ping,
@@ -66,7 +74,7 @@ pub fn interject_label(session_id: &str) -> String {
 }
 
 #[cfg(unix)]
-pub use unix_impl::{bind, host_open, spawn_detached};
+pub use unix_impl::{bind, host_open, spawn_detached, spawn_detached_from};
 
 #[cfg(unix)]
 mod unix_impl {
@@ -100,9 +108,18 @@ mod unix_impl {
     /// 后台拉起宿主进程（`AskHuman --gui-host`，detach 新会话脱离调用方终端）。
     /// 单实例由宿主自身的 flock 去重——重复 spawn 的多余进程会因抢锁失败而立即退出。
     pub fn spawn_detached() -> std::io::Result<()> {
+        let exe = std::env::current_exe()?;
+        spawn_detached_from(&exe)
+    }
+
+    /// Start GUI Host from a caller-supplied stable disk path.
+    ///
+    /// The running executable can be replaced during self-update. In particular, Linux may then
+    /// report `current_exe()` as a deleted inode path, so the old Host passes its launch path here.
+    pub fn spawn_detached_from(exe: &std::path::Path) -> std::io::Result<()> {
         use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
-        let exe = std::env::current_exe()?;
+
         let mut cmd = Command::new(exe);
         cmd.arg("--gui-host")
             .stdin(Stdio::null())
@@ -122,22 +139,23 @@ mod unix_impl {
     ///
     /// 流程：连宿主 → 发 `OpenWindow` → 返回；连不上则 `spawn --gui-host` 后轮询重连。
     /// 全程失败返回 `Err`，调用方据此回退到「本进程直接建窗」兜底（保证至少能打开窗口）。
-    /// `target` 仅插话窗口使用（session/agent/cwd），其余窗口传 `None`。
+    /// `target` 仅插话窗口使用（session/agent/cwd）、`todo` 仅新建任务窗口使用，其余窗口传 `None`。
     pub fn host_open(
         kind: WindowKind,
         all: bool,
         project: Option<String>,
         target: Option<InterjectTarget>,
+        todo: Option<String>,
     ) -> std::io::Result<()> {
         let handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
-            rt.block_on(host_open_async(kind, all, project, target))
+            rt.block_on(host_open_async(kind, all, project, target, todo))
         });
         match handle.join() {
             Ok(r) => r,
-            Err(_) => Err(Error::new(ErrorKind::Other, "host_open worker panicked")),
+            Err(_) => Err(Error::other("host_open worker panicked")),
         }
     }
 
@@ -146,10 +164,11 @@ mod unix_impl {
         all: bool,
         project: Option<String>,
         target: Option<InterjectTarget>,
+        todo: Option<String>,
     ) -> std::io::Result<()> {
         // 1. 宿主已在 → 直接发送。
         if let Ok(stream) = connect().await {
-            return send_open(stream, kind, all, project, target).await;
+            return send_open(stream, kind, all, project, target, todo).await;
         }
         // 2. 宿主不在 → 拉起后轮询重连（最多约 6 秒，覆盖 Tauri 进程启动 + socket 就绪）。
         spawn_detached()?;
@@ -157,7 +176,7 @@ mod unix_impl {
         while start.elapsed() < Duration::from_secs(6) {
             tokio::time::sleep(Duration::from_millis(80)).await;
             if let Ok(stream) = connect().await {
-                return send_open(stream, kind, all, project, target).await;
+                return send_open(stream, kind, all, project, target, todo).await;
             }
         }
         Err(Error::new(
@@ -172,6 +191,7 @@ mod unix_impl {
         all: bool,
         project: Option<String>,
         target: Option<InterjectTarget>,
+        todo: Option<String>,
     ) -> std::io::Result<()> {
         let (r, mut w) = stream.into_split();
         let (session, agent, cwd) = match target {
@@ -188,6 +208,7 @@ mod unix_impl {
                 session,
                 agent,
                 cwd,
+                todo,
             },
         )
         .await?;

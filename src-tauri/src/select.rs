@@ -44,17 +44,30 @@ pub enum SelectAction {
     TaskWorkspace,
     TaskAgent,
     TaskPermission,
+    TaskInputSource,
     Watch,
     Status,
     Unwatch,
     /// 发送插话（`/msg` 无编号时的选择卡；按钮「发送」，点它把预存内容发给该 agent）。
     Msg,
+    /// 空 `/msg` 的目标选择；点选后进入一次性输入卡，不在本次点击发送正文。
+    MsgTarget,
     /// 导出未暂存 diff。
     Diff,
     /// 发起 stage 确认。
     Stage,
     /// 导出会话 transcript。
     Transcript,
+    /// `/todo` 的选项目卡（点它打开项目待办管理卡，或把预存文本加入项目）。
+    Todo,
+    /// `/todo-rm` 的选项目卡（点它进入该项目的逐条删除选择卡）。
+    TodoRm,
+    /// 待办逐条删除卡（选项＝待办条目，按钮「删除」红色）。
+    TodoRmEntry,
+    /// `/todo-auto` 的选项目卡（点它进入切换卡，或把预存文本加入项目并标为自动执行）。
+    TodoAuto,
+    /// 待办自动执行切换卡（选项＝待办条目，已自动的带 ⚡ 徽标；按钮「切换」，点击即开/关）。
+    TodoAutoEntry,
 }
 
 impl SelectAction {
@@ -64,13 +77,20 @@ impl SelectAction {
             SelectAction::TaskWorkspace => "select.btnChoose",
             SelectAction::TaskAgent => "select.btnChoose",
             SelectAction::TaskPermission => "select.btnChoose",
+            SelectAction::TaskInputSource => "select.btnChoose",
             SelectAction::Watch => "select.btnWatch",
             SelectAction::Status => "select.btnStatus",
             SelectAction::Unwatch => "select.btnUnwatch",
             SelectAction::Msg => "select.btnMsg",
+            SelectAction::MsgTarget => "select.btnChoose",
             SelectAction::Diff => "select.btnDiff",
             SelectAction::Stage => "select.btnStage",
             SelectAction::Transcript => "select.btnTranscript",
+            SelectAction::Todo => "select.btnTodo",
+            SelectAction::TodoRm => "select.btnChoose",
+            SelectAction::TodoRmEntry => "select.btnTodoRmEntry",
+            SelectAction::TodoAuto => "select.btnChoose",
+            SelectAction::TodoAutoEntry => "select.btnTodoAutoEntry",
         };
         i18n::tr(lang, key).to_string()
     }
@@ -89,8 +109,8 @@ pub struct SelectOption {
     pub primary: String,
     /// 主行末徽标（如「· 关注中」，None = 无）。
     pub badge: Option<String>,
-    /// 主行末「· 已运行 X」运行时长（发卡那一刻的快照值，便于区分 agent；None = 无 `startedAt`）。
-    /// 渲染在徽标之后。时长复用 watch 卡算法（`watch::fmt_duration`），始终显示（含 <60 秒）。
+    /// Cumulative active time rendered after the badge. `None` means the snapshot did not carry
+    /// `activeElapsedSecs`; values under one minute still render in seconds.
     pub elapsed: Option<String>,
     /// 次行（灰、可换行）：agent 场景 = 标题。
     pub secondary: Option<String>,
@@ -153,6 +173,61 @@ pub fn title_stage(lang: Lang) -> String {
 pub fn title_transcript(lang: Lang) -> String {
     i18n::tr(lang, "select.titleTranscript").to_string()
 }
+pub fn title_todo(lang: Lang) -> String {
+    i18n::tr(lang, "select.titleTodo").to_string()
+}
+pub fn title_todo_rm(lang: Lang) -> String {
+    i18n::tr(lang, "select.titleTodoRm").to_string()
+}
+
+/// `/todo-rm` 逐条删除卡标题：`「<项目名>」的待办（点删除即移除）：`。
+pub fn title_todo_rm_entries(project_name: &str, lang: Lang) -> String {
+    i18n::tr(lang, "select.titleTodoRmEntries").replace("{project}", project_name)
+}
+
+pub fn title_todo_auto(lang: Lang) -> String {
+    i18n::tr(lang, "select.titleTodoAuto").to_string()
+}
+
+/// `/todo-auto` 切换卡标题：`「<项目名>」的待办（点切换开/关自动执行）：`。
+pub fn title_todo_auto_entries(project_name: &str, lang: Lang) -> String {
+    i18n::tr(lang, "select.titleTodoAutoEntries").replace("{project}", project_name)
+}
+
+/// 由项目待办队列组装逐条删除卡选项：编号＝FIFO 序（1 起），主文本＝待办原文（渲染层自行截断）。
+pub fn todo_rm_options(entries: &[crate::todos::TodoEntry]) -> Vec<SelectOption> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| SelectOption {
+            id: e.id.clone(),
+            dot: None,
+            seq: Some((i + 1) as u64),
+            primary: e.text.clone(),
+            badge: None,
+            elapsed: None,
+            secondary: None,
+        })
+        .collect()
+}
+
+/// `/todo-auto` 切换卡选项：同删除卡，但已自动的条目带 ⚡ 徽标（第 17 轮定案）。
+pub fn todo_auto_options(entries: &[crate::todos::TodoEntry], lang: Lang) -> Vec<SelectOption> {
+    let mark = i18n::tr(lang, "todo.autoMark");
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| SelectOption {
+            id: e.id.clone(),
+            dot: None,
+            seq: Some((i + 1) as u64),
+            primary: e.text.clone(),
+            badge: e.auto.then(|| mark.to_string()),
+            elapsed: None,
+            secondary: None,
+        })
+        .collect()
+}
 
 pub fn title_task_workspace(lang: Lang) -> String {
     match lang {
@@ -178,9 +253,16 @@ pub fn title_task_permission(lang: Lang) -> String {
     .to_string()
 }
 
-/// 由一条注册表快照记录组装选项字段（`dot / seq / primary=类型·工作目录名 / elapsed=已运行时长 /
-/// secondary=标题`）；`sid` 已由调用方取好。`watching` 命中则加「· 关注中」徽标。`now`＝当前 epoch 秒，
-/// 用于据 `startedAt` 算运行时长。
+pub fn title_task_input_source(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Choose a task source",
+        Lang::Zh => "选择任务来源",
+    }
+    .to_string()
+}
+
+/// Build one agent option from a registry snapshot. Cumulative active time comes precomputed in
+/// `activeElapsedSecs`; `now` remains in the shared call shape for compatibility with callers.
 fn option_from_record(
     rec: &Value,
     sid: String,
@@ -199,7 +281,7 @@ fn option_from_record(
     } else {
         None
     };
-    // 运行时长只对「工作中」显示（用户定案：空闲 agent 显示「已运行」易误导，直接不显示）。
+    // Picker badges remain limited to Working agents; final Watch cards carry frozen totals.
     let elapsed = (dot == Some(SelectDot::Working))
         .then(|| elapsed_badge(rec, now, lang))
         .flatten();
@@ -214,14 +296,12 @@ fn option_from_record(
     }
 }
 
-/// 主行末「· 已运行 X」时长徽标：据 `startedAt` 起算，复用 watch 卡算法（`fmt_duration`），始终显示
-/// （含 <60 秒的「X 秒」，最利于区分）。无 `startedAt` → None（不显示）。仅工作中 agent 用（调用方门控）。
-fn elapsed_badge(rec: &Value, now: u64, lang: Lang) -> Option<String> {
-    let start = rec.get("startedAt").and_then(|v| v.as_u64())?;
-    let secs = now.saturating_sub(start);
+/// Main-line cumulative active-time badge. Only Working agents call this helper.
+fn elapsed_badge(rec: &Value, _now: u64, lang: Lang) -> Option<String> {
+    let secs = rec.get("activeElapsedSecs").and_then(|v| v.as_u64())?;
     Some(format!(
         "· {}",
-        i18n::tr(lang, "watch.statsElapsed")
+        i18n::tr(lang, "watch.statsActiveElapsed")
             .replace("{t}", &crate::watch::fmt_duration(secs, lang))
     ))
 }
@@ -384,14 +464,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// 固定「当前时刻」，配合 `startedAt` 断言运行时长。
+    /// Fixed call-time value retained by the public option-builder API.
     const NOW: u64 = 1_000_000;
 
     fn snap() -> Value {
         json!([
-            {"seq":1,"kind":"cursor","sessionId":"s-idle","state":"idle","title":"闲着","cwd":"/tmp/my-proj","startedAt": NOW - 600},
-            {"seq":2,"kind":"claude","sessionId":"s-work","state":"working","title":"忙着","cwd":"/tmp/api-server","startedAt": NOW - 360},
-            {"seq":3,"kind":"codex","sessionId":"s-end","state":"ended","title":"完了","cwd":"/tmp/proj","startedAt": NOW - 100},
+            {"seq":1,"kind":"cursor","sessionId":"s-idle","state":"idle","title":"闲着","cwd":"/tmp/my-proj","activeElapsedSecs":600},
+            {"seq":2,"kind":"claude","sessionId":"s-work","state":"working","title":"忙着","cwd":"/tmp/api-server","activeElapsedSecs":360},
+            {"seq":3,"kind":"codex","sessionId":"s-end","state":"ended","title":"完了","cwd":"/tmp/proj","activeElapsedSecs":100},
         ])
     }
 
@@ -406,8 +486,7 @@ mod tests {
         // 主文本 = 类型 · 工作目录名。
         assert_eq!(opts[0].primary, "Claude Code · api-server");
         assert_eq!(opts[0].secondary.as_deref(), Some("忙着"));
-        // 运行时长（6 分钟 = NOW-360）。
-        assert_eq!(opts[0].elapsed.as_deref(), Some("· 已运行 6 分钟"));
+        assert_eq!(opts[0].elapsed.as_deref(), Some("· 累计工作 6 分钟"));
         assert_eq!(opts[1].id, "s-idle");
         assert_eq!(opts[1].dot, Some(SelectDot::Idle));
         assert_eq!(opts[1].primary, "Cursor · my-proj");
@@ -418,15 +497,13 @@ mod tests {
     }
 
     #[test]
-    fn elapsed_shows_seconds_under_a_minute_and_none_without_start() {
+    fn elapsed_shows_seconds_under_a_minute_and_none_without_active_time() {
         let snap = json!([
-            {"seq":1,"kind":"claude","sessionId":"s1","state":"working","title":"t","cwd":"/tmp/a","startedAt": NOW - 30},
+            {"seq":1,"kind":"claude","sessionId":"s1","state":"working","title":"t","cwd":"/tmp/a","activeElapsedSecs":30},
             {"seq":2,"kind":"cursor","sessionId":"s2","state":"working","title":"t","cwd":"/tmp/b"},
         ]);
         let opts = agent_options(&snap, &HashSet::new(), NOW, Lang::Zh);
-        // <60 秒仍显示「X 秒」（用户定案：始终显示，最利于区分）。
-        assert_eq!(opts[0].elapsed.as_deref(), Some("· 已运行 30 秒"));
-        // 无 startedAt → 不显示时长。
+        assert_eq!(opts[0].elapsed.as_deref(), Some("· 累计工作 30 秒"));
         assert_eq!(opts[1].elapsed, None);
     }
 
@@ -451,7 +528,7 @@ mod tests {
         let opt2 = agent_option_by_session(&snap(), "s-work", 2, NOW, Lang::Zh);
         assert_eq!(opt2.dot, Some(SelectDot::Working));
         assert_eq!(opt2.primary, "Claude Code · api-server");
-        assert_eq!(opt2.elapsed.as_deref(), Some("· 已运行 6 分钟"));
+        assert_eq!(opt2.elapsed.as_deref(), Some("· 累计工作 6 分钟"));
     }
 
     #[test]
@@ -476,14 +553,76 @@ mod tests {
     }
 
     #[test]
+    fn todo_rm_options_are_numbered_by_fifo_order() {
+        let entries = vec![
+            crate::todos::TodoEntry {
+                id: "id-a".into(),
+                text: "修复登录".into(),
+                created_at_ms: 1,
+                agent_kind: None,
+                auto: false,
+            },
+            crate::todos::TodoEntry {
+                id: "id-b".into(),
+                text: "写文档".into(),
+                created_at_ms: 2,
+                agent_kind: None,
+                auto: false,
+            },
+        ];
+        let opts = todo_rm_options(&entries);
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].id, "id-a");
+        assert_eq!(opts[0].seq, Some(1));
+        assert_eq!(opts[0].primary, "修复登录");
+        assert!(opts[0].dot.is_none() && opts[0].secondary.is_none());
+        assert_eq!(opts[1].seq, Some(2));
+        // 标题带项目名。
+        assert!(title_todo_rm_entries("proj", Lang::Zh).contains("proj"));
+    }
+
+    #[test]
+    fn todo_auto_options_badge_marks_auto_entries_only() {
+        let entries = vec![
+            crate::todos::TodoEntry {
+                id: "id-a".into(),
+                text: "修复登录".into(),
+                created_at_ms: 1,
+                agent_kind: None,
+                auto: true,
+            },
+            crate::todos::TodoEntry {
+                id: "id-b".into(),
+                text: "写文档".into(),
+                created_at_ms: 2,
+                agent_kind: None,
+                auto: false,
+            },
+        ];
+        let opts = todo_auto_options(&entries, Lang::Zh);
+        assert_eq!(opts.len(), 2);
+        // 已自动的带 ⚡ 徽标；未自动的无徽标。
+        assert!(opts[0].badge.as_deref().unwrap_or_default().contains('⚡'));
+        assert!(opts[1].badge.is_none());
+        assert_eq!(opts[0].seq, Some(1));
+        assert!(title_todo_auto_entries("proj", Lang::Zh).contains("proj"));
+    }
+
+    #[test]
     fn action_button_labels() {
         assert_eq!(SelectAction::Watch.button_label(Lang::Zh), "关注");
         assert_eq!(SelectAction::Status.button_label(Lang::Zh), "查看");
         assert_eq!(SelectAction::Unwatch.button_label(Lang::Zh), "取消");
         assert_eq!(SelectAction::Msg.button_label(Lang::Zh), "发送");
+        assert_eq!(SelectAction::MsgTarget.button_label(Lang::Zh), "选择");
         assert_eq!(SelectAction::Diff.button_label(Lang::Zh), "差异");
         assert_eq!(SelectAction::Stage.button_label(Lang::Zh), "暂存");
         assert_eq!(SelectAction::Transcript.button_label(Lang::Zh), "会话");
+        assert_eq!(SelectAction::Todo.button_label(Lang::Zh), "待办");
+        assert_eq!(SelectAction::TodoRm.button_label(Lang::Zh), "选择");
+        assert_eq!(SelectAction::TodoRmEntry.button_label(Lang::Zh), "删除");
+        assert_eq!(SelectAction::TodoAuto.button_label(Lang::Zh), "选择");
+        assert_eq!(SelectAction::TodoAutoEntry.button_label(Lang::Zh), "切换");
         let more = SelectOption {
             id: MORE_OPTION_ID.into(),
             dot: None,
@@ -503,7 +642,7 @@ mod tests {
     fn watch_options_only_working_including_grok() {
         let mut snap = snap();
         snap.as_array_mut().unwrap().push(json!({
-            "seq":4,"kind":"grok","sessionId":"s-grok","state":"working","title":"g","cwd":"/tmp/g","startedAt": NOW - 120
+            "seq":4,"kind":"grok","sessionId":"s-grok","state":"working","title":"g","cwd":"/tmp/g","activeElapsedSecs":120
         }));
         let opts = watch_options(&snap, &HashSet::new(), NOW, Lang::Zh);
         // working cursor (s-work) 不在 snap() 默认里——snap() 里 claude s-work 是 working。
@@ -533,8 +672,7 @@ mod tests {
         // 仅剩工作中·非 grok 的那一个（claude s-work）。
         assert_eq!(opts.len(), 1);
         assert_eq!(opts[0].id, "s-work");
-        // 运行时长随选项显示。
-        assert_eq!(opts[0].elapsed.as_deref(), Some("· 已运行 6 分钟"));
+        assert_eq!(opts[0].elapsed.as_deref(), Some("· 累计工作 6 分钟"));
         // 关注徽标仍生效。
         let mut watching = HashSet::new();
         watching.insert("s-work".to_string());

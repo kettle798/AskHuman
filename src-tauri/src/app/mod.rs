@@ -32,6 +32,8 @@ use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 /// 运行时只读状态：供 popup_init 拉取请求内容与主题。
 pub struct AppState {
     pub interaction: InteractionRequest,
+    /// Native edit intent used only by the local permission popup.
+    pub popup_edit: Option<Box<crate::permission_diff::PermissionEditIntent>>,
     pub config: AppConfig,
     /// 来源名（弹窗标题「Question from {source}」）。Daemon 模式由调用方上送（A11）；
     /// 设置 / 非 Daemon 回退路径取本进程环境。
@@ -64,6 +66,9 @@ enum View {
     History {
         all: bool,
     },
+    /// 独立项目待办窗口（`AskHuman --todos`）；预选项目取自 `AppState.project`。
+    #[cfg(unix)]
+    Todos,
     /// Agent 生命周期状态窗口（实验性功能，spec D13）：订阅 daemon 推送，动态更新。
     #[cfg(unix)]
     Agents,
@@ -89,6 +94,7 @@ pub struct PopupIpc {
 #[cfg(unix)]
 pub struct WarmPopup {
     pub show: std::sync::Mutex<Option<crate::ipc::ShowPayload>>,
+    pub finalized: AtomicBool,
 }
 
 /// 弹窗作答 → Daemon 的桥：把前端 `submit_popup` / `cancel_popup` 转成 IPC `answer` 发回 Daemon。
@@ -100,6 +106,10 @@ pub struct GuiBridge {
     request_id: std::sync::Mutex<String>,
     /// 仅投递一次（发送/取消互斥，去重）。
     done: AtomicBool,
+    /// Content/native window readiness is reported exactly once.
+    ready_sent: AtomicBool,
+    /// Daemon presentation authorization is applied exactly once.
+    presented: AtomicBool,
     app: tauri::AppHandle,
 }
 
@@ -127,6 +137,47 @@ impl GuiBridge {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             app.exit(0);
         });
+    }
+
+    pub fn dismiss_from_daemon(&self) {
+        self.done.store(true, Ordering::SeqCst);
+        if let Some(window) = self.app.get_webview_window("popup") {
+            let _ = window.close();
+        } else {
+            self.send_popup_dismissed();
+        }
+    }
+
+    pub fn send_popup_ready(&self, window_number: Option<i64>) {
+        if self.ready_sent.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let _ = self.tx.send(crate::ipc::ClientMsg::PopupReady {
+            request_id: self.request_id(),
+            window_number,
+        });
+    }
+
+    pub fn send_popup_focused(&self) {
+        if !self.ready_sent.load(Ordering::SeqCst) || self.is_done() {
+            return;
+        }
+        let _ = self.tx.send(crate::ipc::ClientMsg::PopupFocused {
+            request_id: self.request_id(),
+        });
+    }
+
+    pub fn send_popup_dismissed(&self) {
+        if !self.ready_sent.load(Ordering::SeqCst) {
+            return;
+        }
+        let _ = self.tx.send(crate::ipc::ClientMsg::PopupDismissed {
+            request_id: self.request_id(),
+        });
+    }
+
+    fn begin_presentation(&self) -> bool {
+        !self.presented.swap(true, Ordering::SeqCst)
     }
 
     /// 提交作答。
@@ -176,12 +227,59 @@ impl GuiBridge {
     }
 }
 
-/// 方案6：预热弹窗领用 + 前端把本次请求内容绘制完成后，由 `popup_show_window` 命令在主线程调用本函数，
-/// 把一直隐藏待命的弹窗上屏：按**当前** config 兜底重设尺寸/置顶/出现动画/窗口效果，再 `show()` + 提示音 +
-/// 聚焦 + Dock 角标。延后到此刻 show 可杜绝「空白/旧内容闪现」（窗口隐藏到本次内容已绘制才出现）。
+fn cascade_popup_position(win: &tauri::WebviewWindow, cascade_index: u32) {
+    if cascade_index == 0 {
+        return;
+    }
+    let (Ok(position), Ok(size), Ok(scale), Ok(Some(monitor))) = (
+        win.outer_position(),
+        win.outer_size(),
+        win.scale_factor(),
+        win.current_monitor(),
+    ) else {
+        return;
+    };
+    let step = (24.0 * scale).round().max(1.0) as i32;
+    let monitor_position = monitor.position();
+    let monitor_size = monitor.size();
+    let max_x = monitor_position
+        .x
+        .saturating_add(monitor_size.width.saturating_sub(size.width) as i32);
+    let max_y = monitor_position
+        .y
+        .saturating_add(monitor_size.height.saturating_sub(size.height) as i32);
+    let slots_x = max_x.saturating_sub(position.x).max(0) / step;
+    let slots_y = max_y.saturating_sub(position.y).max(0) / step;
+    let slots = slots_x.min(slots_y);
+    let slot = if slots > 0 {
+        ((cascade_index.saturating_sub(1) % slots as u32) + 1) as i32
+    } else {
+        0
+    };
+    let _ = win.set_position(tauri::PhysicalPosition::new(
+        position.x.saturating_add(step.saturating_mul(slot)),
+        position.y.saturating_add(step.saturating_mul(slot)),
+    ));
+}
+
+/// Present a fully rendered helper window according to the daemon-owned focus decision.
+/// Foreground uses the regular Tauri activation path; background cascade must not activate NSApp.
 #[cfg(unix)]
-pub(crate) fn finalize_popup_show(app: &tauri::AppHandle) {
+pub(crate) fn finalize_popup_show(
+    app: &tauri::AppHandle,
+    presentation: crate::ipc::PopupPresentation,
+) {
     use tauri::Manager;
+    if let Some(bridge) = app.try_state::<GuiBridge>() {
+        if !bridge.begin_presentation() {
+            return;
+        }
+    }
+    if let Some(warm) = app.try_state::<WarmPopup>() {
+        if warm.finalized.swap(true, Ordering::SeqCst) {
+            return;
+        }
+    }
     let Some(win) = app.get_webview_window("popup") else {
         return;
     };
@@ -192,7 +290,7 @@ pub(crate) fn finalize_popup_show(app: &tauri::AppHandle) {
         config.channels.popup.height,
     ));
     let _ = win.set_always_on_top(config.general.always_on_top);
-    // 预热期间 config 若变过，这里按最新主题兜底同步原生外观（NSAppearance / vibrancy）。
+    // Apply the latest native appearance in case the theme changed while prewarmed.
     crate::commands::apply_theme_to_windows(app, &crate::commands::theme_str(config.general.theme));
     #[cfg(target_os = "macos")]
     {
@@ -207,28 +305,52 @@ pub(crate) fn finalize_popup_show(app: &tauri::AppHandle) {
                 config.general.appear_animation.ns_animation_behavior(),
             );
         }
-        // 必须按**当前** window_effect 完整套材质：热进程建窗时可能仍是旧效果（Glass 路径不挂
-        // vibrancy），若待命期间用户切到 Blur 而这里只处理 Glass，会得到「透明 + 无材质」看不清。
+        // Reapply the complete current material before showing a prewarmed window.
         set_runtime_window_effect(&win, config.general.window_effect);
-        let count = if let Some(w) = app.try_state::<WarmPopup>() {
-            w.show
-                .lock()
-                .ok()
-                .and_then(|g| {
+        let count = app
+            .try_state::<WarmPopup>()
+            .and_then(|w| {
+                w.show.lock().ok().and_then(|g| {
                     g.as_ref()
                         .and_then(|s| s.interaction.ask())
                         .map(|request| request.questions.len())
                 })
-                .unwrap_or(0)
-        } else {
-            0
-        };
+            })
+            .or_else(|| {
+                app.try_state::<AppState>().and_then(|state| {
+                    state
+                        .interaction
+                        .ask()
+                        .map(|request| request.questions.len())
+                })
+            })
+            .unwrap_or(0);
         crate::macos_dock_icon::announce_questions(count);
     }
-    let _ = win.show();
+    match presentation {
+        crate::ipc::PopupPresentation::Foreground => {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        crate::ipc::PopupPresentation::BackgroundCascade {
+            cascade_index,
+            behind_window_number,
+        } => {
+            #[cfg(target_os = "macos")]
+            if let Ok(ns_window) = win.ns_window() {
+                crate::macos_window_order::cascade(ns_window, cascade_index);
+                crate::macos_window_order::show_behind(ns_window, behind_window_number);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = behind_window_number;
+                cascade_popup_position(&win, cascade_index);
+                let _ = win.show();
+            }
+        }
+    }
     crate::perf::mark_env("gui.win_show");
     crate::sound::play(&config.general.popup_sound);
-    let _ = win.set_focus();
 }
 
 /// 无任何可用通信 Channel 时的退出码（供下游据此降级）。
@@ -339,6 +461,7 @@ fn run_gui_ask(request: AskRequest, config: AppConfig, messaging_active: bool) -
     let lang = Lang::resolve(&config.general.language);
     let state = AppState {
         interaction: InteractionRequest::Ask(request.clone()),
+        popup_edit: None,
         config: config.clone(),
         source: crate::models::source_name(),
         project: crate::project::detect(),
@@ -396,12 +519,15 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
         + is_feishu_active(&config) as usize
         + is_slack_active(&config) as usize;
     let preempt = Arc::new(crate::channels::Preemption::new());
+    let project = crate::project::detect();
+    let source = crate::models::source_name();
+    let origin = crate::channels::ConversationOrigin::new(&source, None, &project);
     let coordinator = Coordinator::new_headless(
         request.clone(),
         preempt.clone(),
         messaging_count,
-        crate::project::detect(),
-        crate::models::source_name(),
+        project,
+        source,
     );
 
     rt.block_on(async move {
@@ -414,6 +540,7 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
             let req = request.clone();
             let sink = coordinator.clone();
             let preempt = preempt.clone();
+            let origin = origin.clone();
             handles.push(tokio::spawn(async move {
                 // 单进程：每进程起一个仅挂本会话的 Router（统一走 Router 路径，单一 offset）。
                 let router = match TgRouter::connect(&cfg).await {
@@ -437,7 +564,7 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
                     ));
                     return;
                 }
-                run_conversation(&mut session, &req, preempt, sink).await;
+                run_conversation(&mut session, &req, &origin, preempt, sink).await;
             }));
         }
 
@@ -448,6 +575,7 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
             let req = request.clone();
             let sink = coordinator.clone();
             let preempt = preempt.clone();
+            let origin = origin.clone();
             handles.push(tokio::spawn(async move {
                 // 单进程：每进程起一个仅挂本会话的 Router（统一走 Router 路径）。
                 let router =
@@ -472,7 +600,7 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
                     ));
                     return;
                 }
-                run_conversation(&mut session, &req, preempt, sink).await;
+                run_conversation(&mut session, &req, &origin, preempt, sink).await;
             }));
         }
 
@@ -483,6 +611,7 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
             let req = request.clone();
             let sink = coordinator.clone();
             let preempt = preempt.clone();
+            let origin = origin.clone();
             handles.push(tokio::spawn(async move {
                 // 单进程：每进程起一个仅挂本会话的 Router（统一走 Router 路径）。
                 let router = match FsRouter::connect(&cfg).await {
@@ -506,7 +635,7 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
                     ));
                     return;
                 }
-                run_conversation(&mut session, &req, preempt, sink).await;
+                run_conversation(&mut session, &req, &origin, preempt, sink).await;
             }));
         }
 
@@ -517,6 +646,7 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
             let req = request.clone();
             let sink = coordinator.clone();
             let preempt = preempt.clone();
+            let origin = origin.clone();
             handles.push(tokio::spawn(async move {
                 // 单进程：每进程起一个仅挂本会话的 Router（统一走 Router 路径，独占一条 Socket Mode 连接）。
                 let router = match SlRouter::connect(&cfg).await {
@@ -540,7 +670,7 @@ fn run_headless(request: AskRequest, config: AppConfig) -> ! {
                     ));
                     return;
                 }
-                run_conversation(&mut session, &req, preempt, sink).await;
+                run_conversation(&mut session, &req, &origin, preempt, sink).await;
             }));
         }
 
@@ -570,6 +700,7 @@ pub fn run_settings(config: AppConfig) -> ! {
             Vec::new(),
             false,
         )),
+        popup_edit: None,
         config,
         source: crate::models::source_name(),
         project: crate::project::detect(),
@@ -598,6 +729,7 @@ pub fn run_history(project: String, all: bool, config: AppConfig) -> ! {
             Vec::new(),
             false,
         )),
+        popup_edit: None,
         config,
         source: crate::models::source_name(),
         project,
@@ -616,6 +748,36 @@ pub fn run_history(project: String, all: bool, config: AppConfig) -> ! {
     std::process::exit(0);
 }
 
+/// 待办窗口模式：独立进程建窗（gui-host 不可用时的兜底；与 `--settings` / `--history` 同机制）。
+/// `project` 为预选项目 key（通常是 CLI cwd 的 git 根），写入 `AppState.project`。
+#[cfg(unix)]
+pub fn run_todos(project: String, config: AppConfig) -> ! {
+    let lang = Lang::resolve(&config.general.language);
+    let state = AppState {
+        interaction: InteractionRequest::Ask(AskRequest::new(
+            crate::models::MessagePrompt::default(),
+            Vec::new(),
+            false,
+        )),
+        popup_edit: None,
+        config,
+        source: crate::models::source_name(),
+        project,
+        agent_kind: None,
+        agent_pid: None,
+        created_at_ms: 0,
+    };
+    if let Err(e) = launch(state, View::Todos, None) {
+        stderr_redirect::eprintln_real(&format!(
+            "{}{}",
+            i18n::err_prefix(lang),
+            i18n::tr(lang, "app.todosLaunchFailed").replace("{e}", &e.to_string())
+        ));
+        std::process::exit(1);
+    }
+    std::process::exit(0);
+}
+
 /// Agent 状态窗口入口（`AskHuman agents status`，实验性功能 spec D13）：
 /// 创建窗口 + 订阅 daemon 推送，动态展示工作中 / 空闲 / 已结束的 agent。
 #[cfg(unix)]
@@ -627,6 +789,7 @@ pub fn run_agents(config: AppConfig) -> ! {
             Vec::new(),
             false,
         )),
+        popup_edit: None,
         config,
         source: crate::models::source_name(),
         project: crate::project::detect(),
@@ -661,6 +824,7 @@ pub fn run_gui_host(config: AppConfig) -> ! {
             Vec::new(),
             false,
         )),
+        popup_edit: None,
         config,
         source: crate::models::source_name(),
         project: crate::project::detect(),
@@ -717,6 +881,7 @@ pub fn run_gui_helper(_endpoint: String, token: String, warm: bool) -> ! {
                 Vec::new(),
                 false,
             )),
+            popup_edit: None,
             config: AppConfig::load_without_secrets(),
             source: String::new(),
             project: String::new(),
@@ -781,6 +946,7 @@ pub fn run_gui_helper(_endpoint: String, token: String, warm: bool) -> ! {
     let request_id = show.request_id.clone();
     let state = AppState {
         interaction: show.interaction,
+        popup_edit: show.popup_edit,
         // The popup helper never connects to IM (the daemon does); it only needs general/theme/
         // popup-size config. Skip keychain via load_without_secrets().
         config: AppConfig::load_without_secrets(),
@@ -813,6 +979,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
     let popup_h = state.config.channels.popup.height;
     let always_on_top = state.config.general.always_on_top;
     let window_effect = state.config.general.window_effect;
+    let effective_window_effect = effective_window_effect(window_effect);
     #[cfg(target_os = "macos")]
     let appear_behavior = state
         .config
@@ -844,6 +1011,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             crate::commands::popup_init,
+            crate::commands::enrich_permission_diff,
             crate::commands::perf_mark,
             crate::commands::popup_agent_terminal,
             crate::commands::popup_agent_resolved,
@@ -860,6 +1028,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::show_attachment_menu,
             crate::commands::get_settings,
             crate::commands::save_settings,
+            crate::commands::permission_rules_panel,
             crate::commands::agent_task_workspaces,
             crate::commands::agent_task_workspace_add,
             crate::commands::agent_task_workspace_pick,
@@ -869,12 +1038,16 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::agent_task_readiness,
             crate::commands::agent_task_test_terminal,
             crate::commands::get_prompt,
+            crate::commands::collaboration_style_defaults,
+            crate::commands::collaboration_style_apply_integrations,
             crate::commands::open_test_popup,
             crate::commands::popup_sound_support,
             crate::commands::play_popup_sound,
             crate::commands::set_theme,
             crate::commands::update_theme,
             crate::commands::open_settings,
+            crate::commands::popup_im_tip_visible,
+            crate::commands::popup_im_tip_dismiss,
             crate::commands::apply_window_effect,
             crate::commands::start_speech,
             crate::commands::stop_speech,
@@ -945,6 +1118,28 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::update_dismiss,
             crate::commands::restart_settings,
             crate::commands::popup_update_state,
+            crate::commands::channel_health,
+            crate::commands::todos_list,
+            crate::commands::todos_add,
+            crate::commands::todos_remove,
+            crate::commands::todos_complete,
+            crate::commands::todos_clear,
+            crate::commands::todos_reorder,
+            crate::commands::todos_set_auto,
+            crate::commands::todos_set_text,
+            crate::commands::todos_history,
+            crate::commands::todos_restore,
+            crate::commands::todos_history_clear,
+            crate::commands::todos_init,
+            crate::commands::todos_projects,
+            crate::commands::todos_projects_enriched,
+            crate::commands::open_todos,
+            crate::commands::open_new_task,
+            crate::commands::new_task_init,
+            crate::commands::new_task_projects,
+            crate::commands::new_task_projects_refreshed,
+            crate::commands::project_key_of,
+            crate::commands::new_task_launch,
         ])
         .on_window_event(|window, event| {
             match window.label() {
@@ -969,6 +1164,16 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                         }
                     }
                     WindowEvent::Resized(_) => persist_popup_size(window),
+                    WindowEvent::Focused(true) => {
+                        if let Some(bridge) = window.app_handle().try_state::<GuiBridge>() {
+                            bridge.send_popup_focused();
+                        }
+                    }
+                    WindowEvent::Destroyed => {
+                        if let Some(bridge) = window.app_handle().try_state::<GuiBridge>() {
+                            bridge.send_popup_dismissed();
+                        }
+                    }
                     _ => {}
                 },
                 // 设置窗口关闭时清掉 Liquid Glass 注册表条目：插件按 label 缓存玻璃视图，
@@ -1019,7 +1224,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                 View::Popup => {
                     // Dock 跳动 + 角标提问数（冷路径有请求；预热路径延后到 `popup_show_window` 领用时）。
                     #[cfg(target_os = "macos")]
-                    if !warm {
+                    if !warm && !is_helper {
                         let count = app
                             .state::<AppState>()
                             .interaction
@@ -1030,46 +1235,43 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                     }
 
                     if show_popup || warm {
-                        let builder = WebviewWindowBuilder::new(
-                            app,
-                            "popup",
-                            WebviewUrl::App("index.html?view=popup".into()),
-                        )
-                        .title(i18n::tr(lang, "title.popup"))
-                        .inner_size(popup_w, popup_h)
-                        .min_inner_size(420.0, 480.0)
-                        .center()
-                        // 先隐藏构建，设好原生出现动画后再显示，触发 macOS 窗口出现动画。
-                        .visible(false)
-                        .always_on_top(always_on_top)
-                        // 方案6：禁用 WebView 后台节流，使隐藏/被遮挡时 rAF/定时器照常回调。预热窗长期隐藏；
-                        // 且「内容绘制完成才 show()」依赖双 rAF，默认 Suspend 会暂停回调 → 永不上屏。
-                        .background_throttling(
-                            tauri::utils::config::BackgroundThrottlingPolicy::Disabled,
-                        )
-                        .theme(theme);
-                        let win = apply_surface(builder, window_bg, window_effect).build()?;
+                        let mut url = String::from("index.html?view=popup");
+                        append_window_effect_query(&mut url, effective_window_effect);
+                        let builder =
+                            WebviewWindowBuilder::new(app, "popup", WebviewUrl::App(url.into()))
+                                .title(i18n::tr(lang, "title.popup"))
+                                .inner_size(popup_w, popup_h)
+                                .min_inner_size(420.0, 480.0)
+                                .center()
+                                // 先隐藏构建，设好原生出现动画后再显示，触发 macOS 窗口出现动画。
+                                .visible(false)
+                                .focused(false)
+                                .always_on_top(always_on_top)
+                                // 方案6：禁用 WebView 后台节流，使隐藏/被遮挡时 rAF/定时器照常回调。预热窗长期隐藏；
+                                // 且「内容绘制完成才 show()」依赖双 rAF，默认 Suspend 会暂停回调 → 永不上屏。
+                                .background_throttling(
+                                    tauri::utils::config::BackgroundThrottlingPolicy::Disabled,
+                                )
+                                .theme(theme);
+                        let win =
+                            apply_surface(builder, window_bg, effective_window_effect).build()?;
+                        #[cfg(target_os = "macos")]
+                        set_runtime_window_effect_with_bg(&win, window_effect, window_bg);
+                        // Todos may be added from the separate manager window, CLI, MCP, or IM
+                        // while this question is open. Keep the popup's project list live.
+                        #[cfg(unix)]
+                        watch_todos_file(win.clone());
                         // 预热路径：窗口保持隐藏待命，待 `Show` 领用、前端绘制完成后由 `popup_show_window` 上屏。
-                        if !warm {
+                        if !warm && !is_helper {
                             // macOS：隐藏构建后先设原生出现动画（样式由设置决定），再 show()。
                             #[cfg(target_os = "macos")]
                             if let Ok(ns) = win.ns_window() {
                                 crate::macos_window_anim::set_appear_animation(ns, appear_behavior);
                             }
-                            // 玻璃模式：显示前挂整窗 Liquid Glass（旧系统由插件回退 vibrancy）。
-                            // 模糊模式：背景已在 apply_surface 构建期挂好，无需处理。
-                            #[cfg(target_os = "macos")]
-                            if matches!(window_effect, WindowEffect::Glass) {
-                                apply_liquid_glass(&win);
-                            }
                             let _ = win.show();
                             crate::perf::mark_env("gui.win_show");
                             // Play the configured popup sound after the window becomes visible.
                             crate::sound::play(&app.state::<AppState>().config.general.popup_sound);
-                            // GUI Helper 由 Daemon 拉起，可能不自动获焦 → 尽力前置。
-                            if is_helper {
-                                let _ = win.set_focus();
-                            }
                         }
                     }
 
@@ -1086,6 +1288,8 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                                 tx: gui_tx,
                                 request_id: std::sync::Mutex::new(request_id),
                                 done: AtomicBool::new(false),
+                                ready_sent: AtomicBool::new(false),
+                                presented: AtomicBool::new(false),
                                 app: app.handle().clone(),
                             });
                             // 方案6 预热：manage 领用槽（None=待命）；首条 `Show` 经 reader 循环填入并唤醒前端。
@@ -1093,6 +1297,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                             if warm {
                                 app.manage(WarmPopup {
                                     show: std::sync::Mutex::new(None),
+                                    finalized: AtomicBool::new(false),
                                 });
                             }
                             // 读 Daemon → GUI 的消息：被抢答 cancel / 连接断开 → 退出本进程。
@@ -1130,9 +1335,31 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                                             }
                                             let _ = app_handle.emit("popup-show", ());
                                         }
+                                        #[cfg(unix)]
+                                        Ok(Some(crate::ipc::ServerMsg::PresentPopup {
+                                            request_id,
+                                            presentation,
+                                        })) => {
+                                            let matches = app_handle
+                                                .try_state::<GuiBridge>()
+                                                .map(|bridge| bridge.request_id() == request_id)
+                                                .unwrap_or(false);
+                                            if !matches {
+                                                continue;
+                                            }
+                                            let app2 = app_handle.clone();
+                                            let _ = app_handle.run_on_main_thread(move || {
+                                                finalize_popup_show(&app2, presentation);
+                                            });
+                                        }
                                         Ok(Some(crate::ipc::ServerMsg::Cancel { .. })) => {
-                                            app_handle.exit(0);
-                                            break;
+                                            let app2 = app_handle.clone();
+                                            let _ = app_handle.run_on_main_thread(move || {
+                                                if let Some(bridge) = app2.try_state::<GuiBridge>()
+                                                {
+                                                    bridge.dismiss_from_daemon();
+                                                }
+                                            });
                                         }
                                         // 配置实时变更（A12）：转发给前端实时切主题/语言。
                                         // 复用既有 "settings-updated" 事件（前端已监听 general 配置）。
@@ -1150,7 +1377,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                                                     theme,
                                                 );
                                             }
-                                            // windowEffect 热同步：在途 helper 收到后即时切 glass/blur
+                                            // Hot-sync the requested material to the in-flight helper.
                                             //（热待命进程不在 broadcast 列表，靠 finalize 领用时兜底）。
                                             // apply_window_effect_to_all 内部 hop 主线程（本 reader 在 tokio worker）。
                                             if let Some(effect) = general
@@ -1218,6 +1445,11 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                             let project = app.state::<AppState>().project.clone();
                             let source = app.state::<AppState>().source.clone();
                             let agent_kind = app.state::<AppState>().agent_kind.clone();
+                            let origin = crate::channels::ConversationOrigin::new(
+                                &source,
+                                agent_kind.as_deref(),
+                                &project,
+                            );
                             let coordinator = Coordinator::new(
                                 app.handle().clone(),
                                 request.clone(),
@@ -1232,7 +1464,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                             let config = app.state::<AppState>().config.clone();
                             for ch in active_messaging_channels(&config) {
                                 coordinator.register(ch.clone());
-                                ch.start(&request, coordinator.clone());
+                                ch.start(&request, &origin, coordinator.clone());
                             }
                             app.manage(coordinator);
                         }
@@ -1242,13 +1474,21 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                     // Window build only needs general (theme); get_settings() reads secrets later.
                     let config = AppConfig::load_without_secrets();
                     // 独立 --settings 进程内无弹窗 → 不置顶（popup_pin 恒 false）。
-                    create_settings_window(app, &config, popup_pin(app, &config))?;
+                    create_settings_window(app, &config, popup_pin(app, &config), None)?;
                 }
                 View::History { all } => {
                     // History window only needs general (theme); skip keychain.
                     let config = AppConfig::load_without_secrets();
                     // 进程内默认项目（AppState.project = CLI 探测的当前项目）→ 传 None 沿用。
                     create_history_window(app, &config, all, None, popup_pin(app, &config))?;
+                }
+                #[cfg(unix)]
+                View::Todos => {
+                    let config = AppConfig::load_without_secrets();
+                    // 预选项目在 AppState.project（CLI 探测的 cwd git 根）。
+                    let project = app.state::<AppState>().project.clone();
+                    let preselect = (!project.is_empty()).then_some(project.as_str());
+                    create_todos_window(app, &config, preselect, popup_pin(app, &config))?;
                 }
                 #[cfg(unix)]
                 View::GuiHost => {
@@ -1335,6 +1575,11 @@ pub(crate) fn render_result(
     lang: Lang,
 ) -> (RenderOutcome, Vec<Vec<String>>) {
     use crate::models::OutputFormat;
+    // whats-next（spec todo-whats-next D3）：stdout 为一段纯文本（任务内容 / 固定结束句），
+    // 取消沿用 `[status]`；附件仍落盘并以 `[files]` 附于文本后。
+    if request.whats_next {
+        return render_whats_next(request, result, lang);
+    }
     let json = request.output_format == OutputFormat::Json;
     match result.action {
         ChannelAction::Cancel => (
@@ -1397,6 +1642,47 @@ pub(crate) fn render_result(
     }
 }
 
+/// whats-next 结果渲染（spec todo-whats-next D3）：提交映射（`output::whats_next_reply`）→
+/// 一段纯文本；回答附带的图片照常落盘，与透传文件一起按 `[files]` 附于文本后。
+fn render_whats_next(
+    request: &AskRequest,
+    result: &ChannelResult,
+    lang: Lang,
+) -> (RenderOutcome, Vec<Vec<String>>) {
+    let reply = output::whats_next_reply(request, result);
+    // 落盘图片（仅 Send 路径有回答；取消路径 answers 为空，循环自然跳过）。
+    let mut image_paths_per_q: Vec<Vec<String>> = Vec::with_capacity(result.answers.len());
+    for (i, answer) in result.answers.iter().enumerate() {
+        match image_writer::save(&answer.images, &request.id, i, lang) {
+            Ok(paths) => image_paths_per_q.push(paths),
+            Err(e) => {
+                return (
+                    RenderOutcome {
+                        stdout: String::new(),
+                        stderr: Some(format!("{}{}", i18n::err_prefix(lang), e)),
+                        exit_code: 1,
+                    },
+                    Vec::new(),
+                );
+            }
+        }
+    }
+    let files: Vec<String> = image_paths_per_q
+        .iter()
+        .flatten()
+        .cloned()
+        .chain(result.answers.iter().flat_map(|a| a.files.iter().cloned()))
+        .collect();
+    (
+        RenderOutcome {
+            stdout: output::whats_next_output(&reply, &files, lang),
+            stderr: None,
+            exit_code: 0,
+        },
+        image_paths_per_q,
+    )
+}
+
 /// 把结果输出到 stdout（或 stderr），返回退出码。（保留供复用；当前协调器内联渲染。）
 pub(crate) fn emit_result(request: &AskRequest, result: &ChannelResult) -> i32 {
     let (outcome, _) = render_result(request, result, Lang::current());
@@ -1420,13 +1706,51 @@ fn resolved_theme(config: &AppConfig) -> tauri::Theme {
     }
 }
 
-/// 平台相关窗口表面：
-/// - macOS：透明窗口 + `underWindowBackground` 毛玻璃（vibrancy），底色由材质提供；
-/// - 其它平台：纯色不透明底（无毛玻璃）。
+/// Resolve the persisted preference into a material supported by the current macOS runtime.
+fn resolve_window_effect(requested: WindowEffect, glass_supported: bool) -> WindowEffect {
+    match requested {
+        WindowEffect::Glass if !glass_supported => WindowEffect::Blur,
+        other => other,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn glass_supported() -> bool {
+    objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some()
+}
+
+fn effective_window_effect(requested: WindowEffect) -> WindowEffect {
+    #[cfg(target_os = "macos")]
+    {
+        resolve_window_effect(requested, glass_supported())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        requested
+    }
+}
+
+/// Add the effective material to an internal window URL so first-frame CSS is correct.
+fn append_window_effect_query(url: &mut String, effect: WindowEffect) {
+    #[cfg(target_os = "macos")]
+    {
+        url.push(if url.contains('?') { '&' } else { '?' });
+        url.push_str("effect=");
+        url.push_str(effect.as_str());
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (url, effect);
+}
+
+/// Platform-specific initial surface:
+/// - macOS Blur gets Tauri's native `UnderWindowBackground` effect at build time;
+/// - macOS Glass stays transparent until the plugin attaches `NSGlassEffectView` after build;
+/// - macOS Solid starts with the current theme color and no Visual Effects view;
+/// - other platforms keep their existing opaque background.
 fn apply_surface<'a, R, M>(
     builder: WebviewWindowBuilder<'a, R, M>,
-    #[allow(unused_variables)] window_bg: tauri::window::Color,
-    #[allow(unused_variables)] effect: WindowEffect,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] window_bg: tauri::window::Color,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] effect: WindowEffect,
 ) -> WebviewWindowBuilder<'a, R, M>
 where
     R: tauri::Runtime,
@@ -1439,16 +1763,14 @@ where
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .hidden_title(true);
         match effect {
-            // 模糊：构建期挂 Tauri 自带 NSVisualEffectView。
             WindowEffect::Blur => builder.effects(
                 EffectsBuilder::new()
                     .effect(Effect::UnderWindowBackground)
                     .state(EffectState::FollowsWindowActiveState)
                     .build(),
             ),
-            // 玻璃：此处不挂 vibrancy，背景由 `apply_liquid_glass` 在 build 后接管；
-            // 否则 vibrancy 会压在玻璃层之上，看到的仍是普通毛玻璃。
             WindowEffect::Glass => builder,
+            WindowEffect::Solid => builder.background_color(window_bg),
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -1457,17 +1779,13 @@ where
     }
 }
 
-/// macOS：给窗口挂上唯一的背景层。
-/// - macOS 26+：`NSGlassEffectView`（Liquid Glass 整窗背景）；
-/// - 旧系统：插件自动回退到 `NSVisualEffectView`（等价于此前的 vibrancy）。
-/// 因 `apply_surface` 已不再挂 Tauri 自带 vibrancy，这里需对所有 macOS 版本生效。
 #[cfg(target_os = "macos")]
-fn apply_liquid_glass<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+fn apply_liquid_glass<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> Result<(), String> {
     use tauri_plugin_liquid_glass::{LiquidGlassConfig, LiquidGlassExt};
-    // 整窗背景：cornerRadius 0，由窗口自身圆角裁剪；不加 tint，使用 Regular 材质。
-    let _ = window
+    window
         .liquid_glass()
-        .set_effect(window, LiquidGlassConfig::default());
+        .set_effect(window, LiquidGlassConfig::default())
+        .map_err(|error| error.to_string())
 }
 
 /// 窗口关闭前移除 Liquid Glass 背景：同时把插件按 label 缓存的注册表条目清掉，
@@ -1476,58 +1794,196 @@ fn apply_liquid_glass<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
 fn clear_window_glass(window: &tauri::Window) {
     use tauri_plugin_liquid_glass::{LiquidGlassConfig, LiquidGlassExt};
     if let Some(w) = window.app_handle().get_webview_window(window.label()) {
-        let _ = w.liquid_glass().set_effect(
+        if let Err(error) = w.liquid_glass().set_effect(
             &w,
             LiquidGlassConfig {
                 enabled: false,
                 ..Default::default()
             },
-        );
+        ) {
+            stderr_redirect::eprintln_real(&format!(
+                "window material cleanup failed: window={} error={error}",
+                window.label()
+            ));
+        }
     }
 }
 
-/// 运行时切换窗口背景效果，供设置页「玻璃/模糊」开关实时作用于已打开窗口。
-/// 切换前先卸掉另一种背景层，避免玻璃与 vibrancy 叠加。
+#[cfg(target_os = "macos")]
+fn disable_plugin_effect<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+) -> Result<(), String> {
+    use tauri_plugin_liquid_glass::{LiquidGlassConfig, LiquidGlassExt};
+    window
+        .liquid_glass()
+        .set_effect(
+            window,
+            LiquidGlassConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn remove_native_blur_views<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    if let Ok(ns) = window.ns_window() {
+        crate::macos_window_anim::remove_vibrancy_views(ns);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn remove_all_native_effect_views<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    if let Ok(ns) = window.ns_window() {
+        crate::macos_window_anim::remove_window_effect_views(ns);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_native_opaque<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, opaque: bool) {
+    if let Ok(ns) = window.ns_window() {
+        crate::macos_window_anim::set_window_opaque(ns, opaque);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_native_glass<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> Result<(), String> {
+    set_native_opaque(window, false);
+    window
+        .set_background_color(Some(tauri::window::Color(0, 0, 0, 0)))
+        .map_err(|error| error.to_string())?;
+    remove_native_blur_views(window);
+    apply_liquid_glass(window)
+}
+
+#[cfg(target_os = "macos")]
+fn apply_native_blur<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> Result<(), String> {
+    disable_plugin_effect(window)?;
+    set_native_opaque(window, false);
+    window
+        .set_background_color(Some(tauri::window::Color(0, 0, 0, 0)))
+        .map_err(|error| error.to_string())?;
+    remove_native_blur_views(window);
+    window
+        .set_effects(
+            EffectsBuilder::new()
+                .effect(Effect::UnderWindowBackground)
+                .state(EffectState::FollowsWindowActiveState)
+                .build(),
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn apply_solid<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    window_bg: tauri::window::Color,
+) -> Result<(), String> {
+    let cleanup_result = disable_plugin_effect(window);
+    remove_all_native_effect_views(window);
+    let background_result = window
+        .set_background_color(Some(window_bg))
+        .map_err(|error| error.to_string());
+    set_native_opaque(window, true);
+    cleanup_result.and(background_result)
+}
+
+#[cfg(target_os = "macos")]
+fn log_material_error<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    requested: WindowEffect,
+    effective: WindowEffect,
+    stage: &str,
+    error: &str,
+) {
+    stderr_redirect::eprintln_real(&format!(
+        "window material failed: window={} requested={} effective={} stage={} error={}",
+        window.label(),
+        requested.as_str(),
+        effective.as_str(),
+        stage,
+        error
+    ));
+}
+
+#[cfg(target_os = "macos")]
+fn emit_window_effect<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, effect: WindowEffect) {
+    use tauri::Emitter;
+    if let Err(error) = window.emit("window-effect-changed", effect.as_str()) {
+        stderr_redirect::eprintln_real(&format!(
+            "window material event failed: window={} effect={} error={error}",
+            window.label(),
+            effect.as_str()
+        ));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_runtime_window_effect_with_bg<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    requested: WindowEffect,
+    window_bg: tauri::window::Color,
+) -> WindowEffect {
+    let effective = effective_window_effect(requested);
+    let actual = match effective {
+        WindowEffect::Glass => match apply_native_glass(window) {
+            Ok(()) => WindowEffect::Glass,
+            Err(error) => {
+                log_material_error(window, requested, effective, "glass", &error);
+                match apply_native_blur(window) {
+                    Ok(()) => WindowEffect::Blur,
+                    Err(error) => {
+                        log_material_error(window, requested, effective, "blur-fallback", &error);
+                        if let Err(error) = apply_solid(window, window_bg) {
+                            log_material_error(
+                                window,
+                                requested,
+                                effective,
+                                "solid-fallback",
+                                &error,
+                            );
+                        }
+                        WindowEffect::Solid
+                    }
+                }
+            }
+        },
+        WindowEffect::Blur => match apply_native_blur(window) {
+            Ok(()) => WindowEffect::Blur,
+            Err(error) => {
+                log_material_error(window, requested, effective, "blur", &error);
+                if let Err(error) = apply_solid(window, window_bg) {
+                    log_material_error(window, requested, effective, "solid-fallback", &error);
+                }
+                WindowEffect::Solid
+            }
+        },
+        WindowEffect::Solid => {
+            if let Err(error) = apply_solid(window, window_bg) {
+                log_material_error(window, requested, effective, "solid", &error);
+            }
+            WindowEffect::Solid
+        }
+    };
+    emit_window_effect(window, actual);
+    actual
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn set_runtime_window_effect<R: tauri::Runtime>(
     window: &tauri::WebviewWindow<R>,
-    effect: WindowEffect,
+    requested: WindowEffect,
 ) {
-    use tauri_plugin_liquid_glass::{LiquidGlassConfig, LiquidGlassExt};
-    match effect {
-        WindowEffect::Glass => {
-            // Tauri 的 set_effects(None) 在 macOS 为空实现，需手动移除残留的 vibrancy 视图。
-            if let Ok(ns) = window.ns_window() {
-                crate::macos_window_anim::remove_vibrancy_views(ns);
-            }
-            apply_liquid_glass(window);
-        }
-        WindowEffect::Blur => {
-            let _ = window.liquid_glass().set_effect(
-                window,
-                LiquidGlassConfig {
-                    enabled: false,
-                    ..Default::default()
-                },
-            );
-            // 先清掉旧的 vibrancy，避免重复点击叠加多层。
-            if let Ok(ns) = window.ns_window() {
-                crate::macos_window_anim::remove_vibrancy_views(ns);
-            }
-            let _ = window.set_effects(
-                EffectsBuilder::new()
-                    .effect(Effect::UnderWindowBackground)
-                    .state(EffectState::FollowsWindowActiveState)
-                    .build(),
-            );
-        }
-    }
+    let config = AppConfig::load_without_secrets();
+    let window_bg = background_for(resolved_theme(&config));
+    set_runtime_window_effect_with_bg(window, requested, window_bg);
 }
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn set_runtime_window_effect<R: tauri::Runtime>(
     _window: &tauri::WebviewWindow<R>,
-    _effect: WindowEffect,
+    _requested: WindowEffect,
 ) {
 }
 
@@ -1549,12 +2005,76 @@ pub(crate) fn apply_window_effect_to_all<R: tauri::Runtime>(
     });
 }
 
-/// 解析 general 配置里的 `windowEffect` 字符串（`"glass"` / `"blur"`）。
+/// Refresh the native safety background after a theme change while Solid is active.
+#[cfg(target_os = "macos")]
+pub(crate) fn refresh_solid_window_backgrounds<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    window_bg: tauri::window::Color,
+) {
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        use tauri::Manager;
+        for (_label, window) in app2.webview_windows() {
+            if let Err(error) = window.set_background_color(Some(window_bg)) {
+                stderr_redirect::eprintln_real(&format!(
+                    "solid window background refresh failed: window={} error={error}",
+                    window.label()
+                ));
+            }
+            set_native_opaque(&window, true);
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn refresh_solid_window_backgrounds<R: tauri::Runtime>(
+    _app: &tauri::AppHandle<R>,
+    _window_bg: tauri::window::Color,
+) {
+}
+
+/// Parse the persisted `windowEffect` value from a general-config broadcast.
 pub(crate) fn parse_window_effect(s: &str) -> Option<WindowEffect> {
     match s {
         "glass" => Some(WindowEffect::Glass),
         "blur" => Some(WindowEffect::Blur),
+        "solid" => Some(WindowEffect::Solid),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod window_effect_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_requested_material_against_glass_capability() {
+        assert_eq!(
+            resolve_window_effect(WindowEffect::Glass, true),
+            WindowEffect::Glass
+        );
+        assert_eq!(
+            resolve_window_effect(WindowEffect::Glass, false),
+            WindowEffect::Blur
+        );
+        for supported in [false, true] {
+            assert_eq!(
+                resolve_window_effect(WindowEffect::Blur, supported),
+                WindowEffect::Blur
+            );
+            assert_eq!(
+                resolve_window_effect(WindowEffect::Solid, supported),
+                WindowEffect::Solid
+            );
+        }
+    }
+
+    #[test]
+    fn parses_all_persisted_material_values() {
+        assert_eq!(parse_window_effect("glass"), Some(WindowEffect::Glass));
+        assert_eq!(parse_window_effect("blur"), Some(WindowEffect::Blur));
+        assert_eq!(parse_window_effect("solid"), Some(WindowEffect::Solid));
+        assert_eq!(parse_window_effect("unknown"), None);
     }
 }
 
@@ -1577,6 +2097,7 @@ pub(crate) fn create_settings_window<R, M>(
     manager: &M,
     config: &AppConfig,
     pin_above_popup: bool,
+    initial_tab: Option<&str>,
 ) -> tauri::Result<()>
 where
     R: tauri::Runtime,
@@ -1584,30 +2105,37 @@ where
 {
     if let Some(w) = manager.get_webview_window("settings") {
         let _ = w.set_focus();
+        // 已开窗：经事件让前端切到目标 tab（前端 mount 时已注册监听）。
+        if let Some(tab) = initial_tab {
+            use tauri::Emitter;
+            let _ = w.emit("settings-goto-tab", tab.to_string());
+        }
         return Ok(());
     }
     let theme = window_theme(config);
     let lang = Lang::resolve(&config.general.language);
     let window_bg = background_for(resolved_theme(config));
-    let builder = WebviewWindowBuilder::new(
-        manager,
-        "settings",
-        WebviewUrl::App("index.html?view=settings".into()),
-    )
-    .title(i18n::tr(lang, "title.settings"))
-    .inner_size(560.0, 640.0)
-    // 最小宽度：保证标题栏内居中的 tab 不会与左上角红绿灯重叠。
-    .min_inner_size(480.0, 520.0)
-    .center()
-    .always_on_top(pin_above_popup)
-    .theme(theme);
+    // 新开窗：目标 tab 进初始 URL（无监听时序问题）。tab 值可带 `#elementId` 锚点后缀
+    // （spec gui-agent-task-launch G5），必须转义避免 `#` 被当作 URL fragment 吞掉后续参数。
+    let mut url = match initial_tab {
+        Some(tab) => format!("index.html?view=settings&tab={}", urlencode(tab)),
+        None => "index.html?view=settings".to_string(),
+    };
     let window_effect = config.general.window_effect;
+    let effective_window_effect = effective_window_effect(window_effect);
+    append_window_effect_query(&mut url, effective_window_effect);
+    let builder = WebviewWindowBuilder::new(manager, "settings", WebviewUrl::App(url.into()))
+        .title(i18n::tr(lang, "title.settings"))
+        .inner_size(560.0, 640.0)
+        // 最小宽度：保证标题栏内居中的 tab 不会与左上角红绿灯重叠。
+        .min_inner_size(480.0, 520.0)
+        .center()
+        .always_on_top(pin_above_popup)
+        .theme(theme);
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
-    let win = apply_surface(builder, window_bg, window_effect).build()?;
+    let win = apply_surface(builder, window_bg, effective_window_effect).build()?;
     #[cfg(target_os = "macos")]
-    if matches!(window_effect, WindowEffect::Glass) {
-        apply_liquid_glass(&win);
-    }
+    set_runtime_window_effect_with_bg(&win, window_effect, window_bg);
     Ok(())
 }
 
@@ -1646,6 +2174,9 @@ where
         url.push_str("&projectName=");
         url.push_str(&urlencode(&crate::project::display_name(key)));
     }
+    let window_effect = config.general.window_effect;
+    let effective_window_effect = effective_window_effect(window_effect);
+    append_window_effect_query(&mut url, effective_window_effect);
     let builder = WebviewWindowBuilder::new(manager, "history", WebviewUrl::App(url.into()))
         .title(i18n::tr(lang, "title.history"))
         .inner_size(820.0, 600.0)
@@ -1653,13 +2184,10 @@ where
         .center()
         .always_on_top(pin_above_popup)
         .theme(theme);
-    let window_effect = config.general.window_effect;
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
-    let win = apply_surface(builder, window_bg, window_effect).build()?;
+    let win = apply_surface(builder, window_bg, effective_window_effect).build()?;
     #[cfg(target_os = "macos")]
-    if matches!(window_effect, WindowEffect::Glass) {
-        apply_liquid_glass(&win);
-    }
+    set_runtime_window_effect_with_bg(&win, window_effect, window_bg);
     // 监听 history.jsonl 变更 → 通知历史窗口实时重载（写入方在别的进程，靠文件监听跨进程感知）。
     watch_history_file(win);
     Ok(())
@@ -1743,23 +2271,184 @@ where
     let theme = window_theme(config);
     let lang = Lang::resolve(&config.general.language);
     let window_bg = background_for(resolved_theme(config));
-    let builder = WebviewWindowBuilder::new(
-        manager,
-        "agents",
-        WebviewUrl::App("index.html?view=agents".into()),
-    )
-    .title(i18n::tr(lang, "title.agents"))
-    .inner_size(760.0, 560.0)
-    .min_inner_size(520.0, 360.0)
-    .center()
-    .theme(theme);
     let window_effect = config.general.window_effect;
+    let effective_window_effect = effective_window_effect(window_effect);
+    let mut url = String::from("index.html?view=agents");
+    append_window_effect_query(&mut url, effective_window_effect);
+    let builder = WebviewWindowBuilder::new(manager, "agents", WebviewUrl::App(url.into()))
+        .title(i18n::tr(lang, "title.agents"))
+        .inner_size(760.0, 560.0)
+        .min_inner_size(520.0, 360.0)
+        .center()
+        .theme(theme);
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
-    let win = apply_surface(builder, window_bg, window_effect).build()?;
+    let win = apply_surface(builder, window_bg, effective_window_effect).build()?;
     #[cfg(target_os = "macos")]
-    if matches!(window_effect, WindowEffect::Glass) {
-        apply_liquid_glass(&win);
+    set_runtime_window_effect_with_bg(&win, window_effect, window_bg);
+    Ok(())
+}
+
+/// 创建（或聚焦已存在的）项目待办窗口（spec todo-whats-next D9）：全局唯一（label `todos`）。
+/// `project_override` 为 Some 时窗口预选该项目（经 URL 参数传递）；None 由前端自选默认项目。
+/// 实时同步：监听 `todos.json` 变化 → `todos-updated` 事件（daemon 不参与，窗口独立可用）。
+#[cfg(unix)]
+pub(crate) fn create_todos_window<R, M>(
+    manager: &M,
+    config: &AppConfig,
+    project_override: Option<&str>,
+    pin_above_popup: bool,
+) -> tauri::Result<()>
+where
+    R: tauri::Runtime,
+    M: Manager<R>,
+{
+    if let Some(w) = manager.get_webview_window("todos") {
+        let _ = w.set_focus();
+        // 已开窗时带新预选项目 → 通知前端切换（与设置窗口 goto-tab 同模式）。
+        if let Some(key) = project_override {
+            use tauri::Emitter;
+            let _ = w.emit("todos-goto-project", key.to_string());
+        }
+        return Ok(());
     }
+    let theme = window_theme(config);
+    let lang = Lang::resolve(&config.general.language);
+    let window_bg = background_for(resolved_theme(config));
+    let mut url = String::from("index.html?view=todos");
+    if let Some(key) = project_override {
+        url.push_str("&project=");
+        url.push_str(&urlencode(key));
+    }
+    let window_effect = config.general.window_effect;
+    let effective_window_effect = effective_window_effect(window_effect);
+    append_window_effect_query(&mut url, effective_window_effect);
+    let builder = WebviewWindowBuilder::new(manager, "todos", WebviewUrl::App(url.into()))
+        .title(i18n::tr(lang, "title.todos"))
+        .inner_size(520.0, 560.0)
+        .min_inner_size(400.0, 320.0)
+        .center()
+        .always_on_top(pin_above_popup)
+        // 拖拽排序用 HTML5 DnD：Tauri 原生 drag-drop 处理器会吞掉 webview 内的
+        // dragover/drop 事件（macOS WKWebView），必须禁用；本窗口不需要文件拖入。
+        .disable_drag_drop_handler()
+        .theme(theme);
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    let win = apply_surface(builder, window_bg, effective_window_effect).build()?;
+    #[cfg(target_os = "macos")]
+    set_runtime_window_effect_with_bg(&win, window_effect, window_bg);
+    watch_todos_file(win);
+    Ok(())
+}
+
+/// 监听 `todos.json` 变更并向目标窗口发 `todos-updated`（待办窗口与提问 Popup 都据此重载；
+/// 写入方可能是任意进程，靠文件监听跨进程感知）。原子写（tmp + rename）换 inode，故监听
+/// **state 目录**再按文件名过滤（与 `watch_history_file` 同思路）。
+#[cfg(unix)]
+fn watch_todos_file<R: tauri::Runtime>(window: tauri::WebviewWindow<R>) {
+    use tauri::Emitter;
+    std::thread::spawn(move || {
+        use notify::{RecursiveMode, Watcher};
+        use std::sync::mpsc::{channel, RecvTimeoutError};
+        use std::time::Duration;
+        let dir = crate::paths::state_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let (tx, rx) = channel::<()>();
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if let Ok(ev) = res {
+                    let hit = ev
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name().map(|n| n == "todos.json").unwrap_or(false));
+                    if hit {
+                        let _ = tx.send(());
+                    }
+                }
+            }) {
+                Ok(w) => w,
+                Err(_) => return,
+            };
+        if watcher.watch(&dir, RecursiveMode::NonRecursive).is_err() {
+            return;
+        }
+        loop {
+            if rx.recv().is_err() {
+                break;
+            }
+            // 去抖：合并连续写入事件。
+            loop {
+                match rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(()) => continue,
+                    Err(RecvTimeoutError::Timeout) => break,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                }
+            }
+            // 窗口已关闭 → emit 失败 → 退出线程，自动释放 watcher。
+            if window.emit("todos-updated", ()).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// 创建（或聚焦已存在的）「新建 Agent 任务」窗口（spec gui-agent-task-launch）：全局唯一
+/// （label `newtask`）。`project_override` / `todo_override` 为预选项目 key 与待办 id（经 URL
+/// 参数传递）；已开窗时经 `newtask-goto` 事件更新预选。`todos.json` 变化经 `todos-updated`
+/// 事件驱动前端重载所选项目待办（复用 `watch_todos_file`）。
+#[cfg(unix)]
+pub(crate) fn create_new_task_window<R, M>(
+    manager: &M,
+    config: &AppConfig,
+    project_override: Option<&str>,
+    todo_override: Option<&str>,
+    pin_above_popup: bool,
+) -> tauri::Result<()>
+where
+    R: tauri::Runtime,
+    M: Manager<R>,
+{
+    if let Some(w) = manager.get_webview_window("newtask") {
+        let _ = w.set_focus();
+        // 已开窗时带新预选打开 → 通知前端整体重置到新预选（与待办窗口 goto-project 同模式）。
+        if project_override.is_some() || todo_override.is_some() {
+            use tauri::Emitter;
+            let _ = w.emit(
+                "newtask-goto",
+                serde_json::json!({
+                    "project": project_override,
+                    "todo": todo_override,
+                }),
+            );
+        }
+        return Ok(());
+    }
+    let theme = window_theme(config);
+    let lang = Lang::resolve(&config.general.language);
+    let window_bg = background_for(resolved_theme(config));
+    let mut url = String::from("index.html?view=newtask");
+    if let Some(key) = project_override {
+        url.push_str("&project=");
+        url.push_str(&urlencode(key));
+    }
+    if let Some(id) = todo_override {
+        url.push_str("&todo=");
+        url.push_str(&urlencode(id));
+    }
+    let window_effect = config.general.window_effect;
+    let effective_window_effect = effective_window_effect(window_effect);
+    append_window_effect_query(&mut url, effective_window_effect);
+    let builder = WebviewWindowBuilder::new(manager, "newtask", WebviewUrl::App(url.into()))
+        .title(i18n::tr(lang, "title.newTask"))
+        .inner_size(520.0, 640.0)
+        .min_inner_size(440.0, 520.0)
+        .center()
+        .always_on_top(pin_above_popup)
+        .theme(theme);
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    let win = apply_surface(builder, window_bg, effective_window_effect).build()?;
+    #[cfg(target_os = "macos")]
+    set_runtime_window_effect_with_bg(&win, window_effect, window_bg);
+    watch_todos_file(win);
     Ok(())
 }
 
@@ -1797,6 +2486,9 @@ where
         url.push_str("&project=");
         url.push_str(&urlencode(&crate::project::display_name(cwd)));
     }
+    let window_effect = config.general.window_effect;
+    let effective_window_effect = effective_window_effect(window_effect);
+    append_window_effect_query(&mut url, effective_window_effect);
     let builder = WebviewWindowBuilder::new(manager, &label, WebviewUrl::App(url.into()))
         .title(i18n::tr(lang, "title.interject"))
         .inner_size(520.0, 340.0)
@@ -1804,13 +2496,10 @@ where
         .center()
         .always_on_top(pin_above_popup)
         .theme(theme);
-    let window_effect = config.general.window_effect;
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
-    let win = apply_surface(builder, window_bg, window_effect).build()?;
+    let win = apply_surface(builder, window_bg, effective_window_effect).build()?;
     #[cfg(target_os = "macos")]
-    if matches!(window_effect, WindowEffect::Glass) {
-        apply_liquid_glass(&win);
-    }
+    set_runtime_window_effect_with_bg(&win, window_effect, window_bg);
     Ok(())
 }
 
@@ -1848,26 +2537,23 @@ pub(crate) fn spawn_agents_subscription(
         loop {
             // 一轮「连接 → 订阅 → 读到断连」+ 退避；与 stop 竞速，stop 触发即退出整个任务。
             let cycle = async {
-                match crate::client::open_for_subscribe().await {
-                    Ok((mut reader, mut writer)) => {
-                        if ipc::write_msg(&mut writer, &ClientMsg::AgentsSubscribe)
-                            .await
-                            .is_err()
-                        {
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                            return;
-                        }
-                        loop {
-                            match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
-                                Ok(Some(ServerMsg::AgentsState { agents })) => {
-                                    let _ = app.emit("agents-updated", agents);
-                                }
-                                Ok(Some(_)) => {}
-                                Ok(None) | Err(_) => break, // 断连 → 跳出去重连。
+                if let Ok((mut reader, mut writer)) = crate::client::open_for_subscribe().await {
+                    if ipc::write_msg(&mut writer, &ClientMsg::AgentsSubscribe)
+                        .await
+                        .is_err()
+                    {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        return;
+                    }
+                    loop {
+                        match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
+                            Ok(Some(ServerMsg::AgentsState { agents })) => {
+                                let _ = app.emit("agents-updated", agents);
                             }
+                            Ok(Some(_)) => {}
+                            Ok(None) | Err(_) => break, // 断连 → 跳出去重连。
                         }
                     }
-                    Err(_) => {}
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             };
@@ -1888,8 +2574,20 @@ pub(crate) fn spawn_agents_subscription(
 fn background_for(theme: tauri::Theme) -> tauri::window::Color {
     match theme {
         tauri::Theme::Dark => tauri::window::Color(30, 30, 30, 255),
-        _ => tauri::window::Color(255, 255, 255, 255),
+        _ => tauri::window::Color(240, 240, 242, 255),
     }
+}
+
+pub(crate) fn background_for_theme_name(theme: &str) -> tauri::window::Color {
+    let resolved = match theme {
+        "light" => tauri::Theme::Light,
+        "dark" => tauri::Theme::Dark,
+        _ => match dark_light::detect() {
+            Ok(dark_light::Mode::Dark) => tauri::Theme::Dark,
+            _ => tauri::Theme::Light,
+        },
+    };
+    background_for(resolved)
 }
 
 fn window_theme(config: &AppConfig) -> Option<tauri::Theme> {
@@ -1977,10 +2675,7 @@ mod stderr_redirect {
             if saved < 0 {
                 return;
             }
-            let devnull = libc::open(
-                b"/dev/null\0".as_ptr() as *const libc::c_char,
-                libc::O_WRONLY,
-            );
+            let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
             if devnull < 0 {
                 libc::close(saved);
                 return;

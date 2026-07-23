@@ -40,13 +40,13 @@ AskHuman "请看看这个改动？" -f ./diff.patch -q "要继续吗？" -o "继
 | F3 | 会话场景 | **单聊**（人与机器人私聊，`chat_type="p2p"`），无需 @ |
 | F4 | 收消息机制 | **长连接（WebSocket）**：`POST {baseUrl}/callback/ws/endpoint` 拿 wss 地址 + client_config → 连 wss；帧为 protobuf（pbbp2）。订阅由开发者后台配置（事件 `im.message.receive_v1` + 回调 `card.action.trigger`），**WS 建连本身不在请求里声明 topic**（与钉钉按 topic 订阅不同） |
 | F5 | 帧协议实现 | **新增 `prost` 运行时依赖，自定义 `PbFrame`**（约 20–30 行，`#[derive(prost::Message)]`，无需 .proto/protoc/build.rs）。不引入第三方飞书 crate（体积/构建/维护/供应链考量，且与本项目手写钉钉 Stream 的风格一致） |
-| F6 | 鉴权 | `POST {baseUrl}/open-apis/auth/v3/tenant_access_token/internal {app_id, app_secret}` → `tenant_access_token`（有效期约 7200s），进程内缓存 + 过期前刷新（沿用钉钉 token 缓存形态）。所有 OpenAPI 调用 header 携带 `Authorization: Bearer <tenant_access_token>` |
+| F6 | 鉴权 | `POST {baseUrl}/open-apis/auth/v3/tenant_access_token/internal {app_id, app_secret}` → `tenant_access_token`（有效期约 7200s）。进程内缓存按 `baseUrl + appId + AppSecret SHA-256 指纹` 隔离并在过期前刷新；配置变更清除旧凭据缓存。所有 OpenAPI 调用 header 携带 `Authorization: Bearer <tenant_access_token>`；若返回明确的 tenant token 无效码，条件删除本次被拒 token、强制取新 token 并最多重试一次，刷新后仍失败则正常上报。 |
 | F7 | 发送共享 Message | `POST {baseUrl}/open-apis/im/v1/messages?receive_id_type=open_id`，body `{receive_id: openId, msg_type, content(JSON 字符串)}`。文本用 `msg_type=text`（`content={"text":..}`）；Markdown 走互动卡片或文本（见 §3 F12） |
 | F8 | 发送题目（互动卡片） | 卡片以 `msg_type=interactive` 直接发**卡片 JSON 2.0**（无需模板）。卡片含：标题 header + 正文（markdown/plain_text 组件）+ **表单容器**（内嵌每个选项一个 `checker` 勾选器 + 一个输入框 `input` + 一个 `form_action_type="submit"` 的提交按钮）。回调走长连接 `card.action.trigger` |
 | F9 | 选项形态 | 预定义选项用**复选框/勾选器组（`checker`，平铺直接勾）**，置于表单容器内；提交时一次性回传所有勾选状态（`form_value`）。无预定义选项时省略选项区，仅留输入框 + 提交 |
-| F10 | 收消息（长连接） | WS 收两类业务帧：① 事件 `im.message.receive_v1`（用户文字【作答期忽略】/图片/文件 / 自动识别码 / open_id 识别）；② 卡片回调 `card.action.trigger`（表单提交）。每条业务帧须 **3 秒内回包**（响应帧）：事件回空 ACK；卡片回调回 `{toast, card}`（更新卡片 + 轻提示）。控制帧 ping/pong（`method=0`）维持心跳；大消息按 `message_id`/`sum`/`seq` header 分片重组；断线重连（重新取 endpoint） |
+| F10 | 收消息（长连接） | WS 收两类业务帧：① 事件 `im.message.receive_v1`（用户文字【作答期忽略】/图片/文件 / 自动识别码 / open_id 识别）；② 卡片回调 `card.action.trigger`（表单提交）。每条业务帧须 **3 秒内回包**（响应帧）：事件回空 ACK；卡片回调回 `{toast, card}`（更新卡片 + 轻提示）。最终提交由会话给出响应体、Router 写回；会话须等 Router 完成 WebSocket 写入尝试后才返回答案，避免单进程随答案完成而提前退出。控制帧 ping/pong（`method=0`）维持心跳；大消息按 `message_id`/`sum`/`seq` header 分片重组；断线重连（重新取 endpoint） |
 | F11 | 每题完成方式 | 卡片上点「提交」即完成该题（勾选 + 补充文字一并回传）。回调 `event.action.form_value` 含各 `checker` 的勾选布尔与 `input` 文本；按勾选映射回选项文本，输入框文本作为补充输入 |
-| F12 | Markdown | 卡片正文：`is_markdown=true` 用 `markdown` 组件（飞书 lark_md 子集，尽量原样传递、不做重转义）；`is_markdown=false` 用 `plain_text`。共享 Message 文本走 `msg_type=text`（飞书富文本不强求）。题首加粗头部沿用「`「Question from {source}」`」/「`Question i/n`」规则 |
+| F12 | Markdown | 卡片正文：`is_markdown=true` 用 `markdown` 组件（飞书 lark_md 子集，尽量原样传递、不做重转义）；`is_markdown=false` 用 `plain_text`。共享 Message 文本走 `msg_type=text`（飞书富文本不强求）。普通提问题首统一携带 source / Agent / 项目，见 `docs/specs/im-request-origin.md` |
 | F13 | 作答-接收图片/文件（人→AI） | **支持**：作答期间累积用户在聊天里发的图片（`msg_type=image`）、文件（`msg_type=file`）；按 `message_id` + `file_key` 调 `GET {baseUrl}/open-apis/im/v1/messages/{message_id}/resources/{file_key}?type=image|file` 下载到本地临时文件（按真实类型修正扩展名）；图片进回答 `[图片]`、文件进回答 `[文件]`。**聊天里的纯文字忽略**（请用卡片输入框，避免双输入源冲突；与钉钉 DC8 一致） |
 | F14 | 提问-发送 `-f` 文件（AI→人） | **支持上传**：图片先 `POST {baseUrl}/open-apis/im/v1/images`（multipart，`image_type=message`）拿 `image_key`，以 `msg_type=image` 发；其它文件先 `POST {baseUrl}/open-apis/im/v1/files`（multipart，`file_type` 取合适值/`stream`，带 `file_name`）拿 `file_key`，以 `msg_type=file` 发。**按 Telegram 风格直接原生收发，不做钉钉式「短文本内联 / 长文本转 docx」**（如后续飞书端文本预览有问题再议） |
 | F15 | 接收人标识 + 自动识别 | 配置项 `openId`（用户 Open ID，稳定标识，发消息用 `receive_id_type=open_id`）。旁置「自动识别」：点击后程序随机生成 4 位数字提示「请私聊机器人发送：XXXX」，经长连接捕获 `content==XXXX` 的单聊消息，取 `event.sender.sender_id.open_id` 回填（带 ~120s 超时）。**前置校验**：AppId/AppSecret 为空或换 token 失败 → 立即中文报错、不进入识别 |
@@ -86,6 +86,7 @@ AskHuman "请看看这个改动？" -f ./diff.patch -q "要继续吗？" -o "继
 8. 无 GUI 时仅启用飞书也能完成整套问答（headless）；与钉钉/Telegram 同开时可并行抢答。
 9. 弹窗 / Telegram / 钉钉行为与现状一致（不回归）。
 10. 设置页、`prompts.rs`、`README` 反映飞书用法与前置条件。
+11. 飞书在 token 名义有效期内提前拒绝旧 token 时，JSON 请求、媒体上传和资源下载均自动刷新并最多重试一次；并发旧请求不得清除其它请求已刷新的 token。
 
 ## 6. 已知问题与风险（预登记）
 
@@ -100,3 +101,5 @@ AskHuman "请看看这个改动？" -f ./diff.patch -q "要继续吗？" -o "继
 
 - **2026-06-06｜修复：卡片回调收不到（点提交转圈回弹）**：实测飞书卡片回调 `card.action.trigger` 经长连接投递时，帧头 `type` 为 `event`（非 `card`）。原实现按帧 `type` 路由，把它当普通事件丢弃。改为**以回包内 `header.event_type` 为准**路由（兼容 `type=event`/`card`），并新增环境变量 `HUMANINLOOP_FEISHU_DEBUG=1` 时写 `~/.humaninloop/feishu-debug.log` 的诊断日志（默认关闭）。
 - **2026-06-06｜终态卡片改为「钉钉模式」**：原终态（类 Telegram）把整张卡片换成「正文 + 一行 ✅ 已提交」，丢弃选项与按钮。改为**复刻钉钉**：同一表单结构下，勾选器 `disabled` 且按用户选择 `checked`、输入框 `default_value` 回显补充文字且 `disabled`、提交按钮 `disabled` 并改文案（提交→「已提交」；被抢答→「已在 {渠道} 回答」且勾选器不勾）。选中项仅禁用并保留高亮，不加删除线。
+- **2026-07-15｜修复：Windows 最终提交显示「未响应」**：Windows 单进程回退路径可能在会话把最终答案交给 Coordinator 后立即退出；原 oneshot 只保证响应体送到 Router，不保证 Router 已把响应帧写入 WebSocket，形成退出竞态。卡片 ACK 改为「响应体 + 写回完成」两阶段握手，最终提交等待 Router 完成写入尝试后再返回答案；中间卡片操作仍只提交响应体，不增加等待。
+- **2026-07-17｜修复：tenant token 提前失效后需重启 daemon**：缓存键从单一 `app_id` 改为服务域名、App ID 与 Secret 不可逆指纹，并在配置变化时清除旧条目。OpenAPI 错误保留数值 `code`；JSON 请求、multipart 上传和资源下载遇到 tenant token 无效码时，只有缓存仍等于本次被拒 token 才删除并刷新，随后最多重试一次，避免并发旧请求误删新 token 或形成无限重试。

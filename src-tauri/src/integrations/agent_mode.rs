@@ -10,7 +10,8 @@
 
 use crate::integrations::agent_rules::{self, AgentTarget, Variant};
 use crate::integrations::{
-    agent_permission, agent_subagent_guard, claude_hook, cursor_hook, mcp_config, mutation_lock,
+    agent_context_recovery, agent_permission, agent_stop, agent_subagent_guard, claude_hook,
+    cursor_hook, mcp_config, mutation_lock,
 };
 use anyhow::Result;
 
@@ -147,38 +148,68 @@ impl Artifact {
 }
 
 /// 当前模式下各产物是否过期 / 缺失（与 [`needs_update`] 同口径，逐产物拆开供 UI 概览统计与单项更新）。
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct ArtifactUpdates {
     pub rule: bool,
     pub hook: bool,
     pub mcp: bool,
 }
 
+#[derive(Clone, Copy, Default)]
+struct ArtifactState {
+    rule_installed: bool,
+    rule_outdated: bool,
+    guard_outdated: bool,
+    timeout_supported: bool,
+    timeout_installed: bool,
+    timeout_outdated: bool,
+    permission_outdated: bool,
+    recovery_outdated: bool,
+    mcp_installed: bool,
+    mcp_outdated: bool,
+}
+
 /// 逐产物计算当前模式下的过期 / 缺失情况。None 模式仅报告需要清理的残留 Permission Hook。
 pub fn artifact_updates(target: AgentTarget) -> ArtifactUpdates {
     let mode = current(target);
-    let permission = permission_needs_reconcile(target, mode);
-    let guard = agent_subagent_guard::needs_update(target, mode);
+    artifact_updates_for(
+        mode,
+        ArtifactState {
+            rule_installed: agent_rules::is_installed(target),
+            rule_outdated: match mode {
+                Mode::Cli => agent_rules::needs_update_variant(target, Variant::Cli),
+                Mode::Mcp => agent_rules::needs_update_variant(target, Variant::Mcp),
+                Mode::None => false,
+            },
+            guard_outdated: agent_subagent_guard::needs_update(target, mode),
+            timeout_supported: timeout_hook_supported(target),
+            timeout_installed: timeout_hook_is_installed(target),
+            timeout_outdated: timeout_hook_needs_update(target),
+            permission_outdated: permission_needs_reconcile(target, mode),
+            recovery_outdated: agent_context_recovery::needs_update(target, mode),
+            mcp_installed: mcp_config::is_installed(target),
+            mcp_outdated: mcp_config::needs_update(target),
+        },
+    )
+}
+
+fn artifact_updates_for(mode: Mode, state: ArtifactState) -> ArtifactUpdates {
     match mode {
         Mode::None => ArtifactUpdates {
-            hook: permission,
+            hook: state.permission_outdated || state.recovery_outdated,
             ..ArtifactUpdates::default()
         },
         Mode::Cli => ArtifactUpdates {
-            rule: !agent_rules::is_installed(target)
-                || agent_rules::needs_update_variant(target, Variant::Cli)
-                || guard,
-            hook: (timeout_hook_supported(target)
-                && (!timeout_hook_is_installed(target) || timeout_hook_needs_update(target)))
-                || permission,
+            rule: !state.rule_installed || state.rule_outdated || state.guard_outdated,
+            hook: (state.timeout_supported && (!state.timeout_installed || state.timeout_outdated))
+                || state.permission_outdated
+                || state.recovery_outdated,
             mcp: false,
         },
         Mode::Mcp => ArtifactUpdates {
-            rule: !agent_rules::is_installed(target)
-                || agent_rules::needs_update_variant(target, Variant::Mcp)
-                || guard,
-            hook: permission,
-            mcp: !mcp_config::is_installed(target) || mcp_config::needs_update(target),
+            rule: !state.rule_installed || state.rule_outdated || state.guard_outdated,
+            hook: state.permission_outdated,
+            mcp: !state.mcp_installed || state.mcp_outdated || state.recovery_outdated,
         },
     }
 }
@@ -226,7 +257,9 @@ fn set_unlocked(target: AgentTarget, mode: Mode) -> Result<()> {
             if timeout_hook_supported(target) {
                 timeout_hook_install(target)?;
             }
+            agent_context_recovery::reconcile_unlocked(target, mode)?;
             agent_permission::reconcile_unlocked(target, mode)?;
+            agent_stop::reconcile_unlocked(stop_kind(target), mode)?;
             Ok(())
         }
         Mode::Mcp => {
@@ -237,7 +270,9 @@ fn set_unlocked(target: AgentTarget, mode: Mode) -> Result<()> {
             agent_rules::install_variant(target, Variant::Mcp)?;
             agent_subagent_guard::reconcile_unlocked(target, mode)?;
             mcp_config::install(target)?;
+            agent_context_recovery::reconcile_unlocked(target, mode)?;
             agent_permission::reconcile_unlocked(target, mode)?;
+            agent_stop::reconcile_unlocked(stop_kind(target), mode)?;
             Ok(())
         }
     }
@@ -266,18 +301,24 @@ pub fn update_artifact(target: AgentTarget, artifact: Artifact) -> Result<()> {
             if timeout_hook_supported(target) {
                 timeout_hook_install(target)?;
             }
+            agent_context_recovery::reconcile_unlocked(target, mode)?;
             agent_permission::reconcile_unlocked(target, mode)
         }
         (Mode::Mcp, Artifact::Hook) | (Mode::None, Artifact::Hook) => {
+            agent_context_recovery::reconcile_unlocked(target, mode)?;
             agent_permission::reconcile_unlocked(target, mode)
         }
-        (Mode::Mcp, Artifact::Mcp) => mcp_config::install(target).map(|_| ()),
+        (Mode::Mcp, Artifact::Mcp) => {
+            mcp_config::install(target)?;
+            agent_context_recovery::reconcile_unlocked(target, mode)
+        }
         _ => Ok(()),
     }
 }
 
 /// 卸载当前 / 全部模式产物（Rule + Guard + 超时 Hook + MCP 配置），保留用户其它内容。
 fn uninstall_all_unlocked(target: AgentTarget) -> Result<()> {
+    agent_context_recovery::reconcile_unlocked(target, Mode::None)?;
     agent_rules::uninstall(target)?;
     agent_subagent_guard::reconcile_unlocked(target, Mode::None)?;
     if timeout_hook_supported(target) {
@@ -285,7 +326,17 @@ fn uninstall_all_unlocked(target: AgentTarget) -> Result<()> {
     }
     mcp_config::uninstall(target)?;
     agent_permission::reconcile_unlocked(target, Mode::None)?;
+    agent_stop::reconcile_unlocked(stop_kind(target), Mode::None)?;
     Ok(())
+}
+
+fn stop_kind(target: AgentTarget) -> crate::agents::AgentKind {
+    match target {
+        AgentTarget::Cursor => crate::agents::AgentKind::Cursor,
+        AgentTarget::ClaudeCode => crate::agents::AgentKind::Claude,
+        AgentTarget::Codex => crate::agents::AgentKind::Codex,
+        AgentTarget::Grok => crate::agents::AgentKind::Grok,
+    }
 }
 
 #[cfg(test)]
@@ -305,5 +356,161 @@ mod tests {
         assert!(!timeout_hook_supported(AgentTarget::Codex));
         assert!(!timeout_hook_is_installed(AgentTarget::Codex));
         assert!(!timeout_hook_needs_update(AgentTarget::Codex));
+    }
+
+    #[test]
+    fn stop_kind_covers_every_agent_target() {
+        assert_eq!(
+            stop_kind(AgentTarget::Cursor),
+            crate::agents::AgentKind::Cursor
+        );
+        assert_eq!(
+            stop_kind(AgentTarget::ClaudeCode),
+            crate::agents::AgentKind::Claude
+        );
+        assert_eq!(
+            stop_kind(AgentTarget::Codex),
+            crate::agents::AgentKind::Codex
+        );
+        assert_eq!(stop_kind(AgentTarget::Grok), crate::agents::AgentKind::Grok);
+    }
+
+    #[test]
+    fn artifact_updates_route_recovery_to_the_mode_owned_artifact() {
+        let clean = ArtifactState {
+            rule_installed: true,
+            timeout_installed: true,
+            mcp_installed: true,
+            ..ArtifactState::default()
+        };
+        assert_eq!(
+            artifact_updates_for(Mode::None, clean),
+            ArtifactUpdates::default()
+        );
+        assert_eq!(
+            artifact_updates_for(
+                Mode::None,
+                ArtifactState {
+                    recovery_outdated: true,
+                    ..clean
+                }
+            ),
+            ArtifactUpdates {
+                hook: true,
+                ..ArtifactUpdates::default()
+            }
+        );
+        assert_eq!(
+            artifact_updates_for(
+                Mode::Cli,
+                ArtifactState {
+                    recovery_outdated: true,
+                    ..clean
+                }
+            ),
+            ArtifactUpdates {
+                hook: true,
+                ..ArtifactUpdates::default()
+            }
+        );
+        assert_eq!(
+            artifact_updates_for(
+                Mode::Mcp,
+                ArtifactState {
+                    recovery_outdated: true,
+                    ..clean
+                }
+            ),
+            ArtifactUpdates {
+                mcp: true,
+                ..ArtifactUpdates::default()
+            }
+        );
+    }
+
+    #[test]
+    fn artifact_updates_keep_rule_timeout_permission_and_mcp_independent() {
+        let clean = ArtifactState {
+            rule_installed: true,
+            timeout_supported: true,
+            timeout_installed: true,
+            mcp_installed: true,
+            ..ArtifactState::default()
+        };
+        assert_eq!(
+            artifact_updates_for(Mode::Cli, clean),
+            ArtifactUpdates::default()
+        );
+        assert_eq!(
+            artifact_updates_for(Mode::Mcp, clean),
+            ArtifactUpdates::default()
+        );
+
+        for state in [
+            ArtifactState {
+                rule_installed: false,
+                ..clean
+            },
+            ArtifactState {
+                rule_outdated: true,
+                ..clean
+            },
+            ArtifactState {
+                guard_outdated: true,
+                ..clean
+            },
+        ] {
+            assert!(artifact_updates_for(Mode::Cli, state).rule);
+            assert!(artifact_updates_for(Mode::Mcp, state).rule);
+        }
+        for state in [
+            ArtifactState {
+                timeout_installed: false,
+                ..clean
+            },
+            ArtifactState {
+                timeout_outdated: true,
+                ..clean
+            },
+            ArtifactState {
+                permission_outdated: true,
+                ..clean
+            },
+        ] {
+            assert!(artifact_updates_for(Mode::Cli, state).hook);
+        }
+        assert!(
+            !artifact_updates_for(
+                Mode::Cli,
+                ArtifactState {
+                    timeout_supported: false,
+                    timeout_installed: false,
+                    ..clean
+                }
+            )
+            .hook
+        );
+        assert!(
+            artifact_updates_for(
+                Mode::Mcp,
+                ArtifactState {
+                    permission_outdated: true,
+                    ..clean
+                }
+            )
+            .hook
+        );
+        for state in [
+            ArtifactState {
+                mcp_installed: false,
+                ..clean
+            },
+            ArtifactState {
+                mcp_outdated: true,
+                ..clean
+            },
+        ] {
+            assert!(artifact_updates_for(Mode::Mcp, state).mcp);
+        }
     }
 }

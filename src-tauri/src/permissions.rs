@@ -9,6 +9,7 @@ use crate::models::{
     ConfirmChoice, ConfirmDetail, ConfirmField, ConfirmFieldKind, ConfirmInput,
     ConfirmPresentation, ConfirmResult, ConfirmSpec,
 };
+use crate::permission_diff::adapters::{normalize_permission_edit, AdapterOutcome};
 use serde_json::{json, Map, Value};
 use std::io::Read;
 
@@ -55,6 +56,13 @@ struct ParsedPermission {
     suggestions: Vec<Value>,
 }
 
+enum ParseOutcome {
+    /// Hook-side auto-allow (every shell segment explicitly rule-allowed, D28/D42):
+    /// answer allow immediately without any surface.
+    AutoAllow,
+    Popup(Box<ParsedPermission>),
+}
+
 #[cfg(unix)]
 pub fn run(agent: Option<&str>) -> Option<String> {
     let agent = Agent::parse(agent)?;
@@ -67,12 +75,59 @@ pub fn run(agent: Option<&str>) -> Option<String> {
         return None;
     }
     let input: Value = serde_json::from_slice(&bytes).ok()?;
-    let parsed = parse_permission(agent, &input)?;
+    let parsed = match parse_permission(agent, &input)? {
+        ParseOutcome::AutoAllow => {
+            let value = json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": { "behavior": "allow" },
+                }
+            });
+            return serde_json::to_string(&value).ok();
+        }
+        ParseOutcome::Popup(parsed) => parsed,
+    };
     let result = crate::client::run_confirm(parsed.task.clone())?;
     decision_output(&parsed, &result).and_then(|value| serde_json::to_string(&value).ok())
 }
 
-fn parse_permission(agent: Agent, input: &Value) -> Option<ParsedPermission> {
+/// Memory enhancement for Codex requests (spec codex-permission-remember, D24): a fallible
+/// layer that may add remember choices + an auto-allow query, or suppress the popup entirely
+/// when guardian routing is proven (D36). Claude keeps its native suggestion path.
+enum MemoryLayer {
+    Suppress,
+    Basic,
+    AutoAllow,
+    Enhanced {
+        memory: crate::permission_rules::PermissionMemory,
+        extra_choices: Vec<ConfirmChoice>,
+    },
+}
+
+fn memory_layer(agent: Agent, input: &Value, zh: bool) -> MemoryLayer {
+    if agent != Agent::Codex {
+        // Claude keeps its native suggestion path; only the built-in AskHuman self-call
+        // whitelist (D49) applies, gated on explicit user ask/deny rules.
+        if agent == Agent::Claude && crate::permission_memory::claude_self_call(input) {
+            return MemoryLayer::AutoAllow;
+        }
+        return MemoryLayer::Basic;
+    }
+    match crate::permission_memory::analyze_codex(input, zh) {
+        crate::permission_memory::Analysis::Suppress => MemoryLayer::Suppress,
+        crate::permission_memory::Analysis::Basic => MemoryLayer::Basic,
+        crate::permission_memory::Analysis::AutoAllow => MemoryLayer::AutoAllow,
+        crate::permission_memory::Analysis::Enhanced {
+            memory,
+            extra_choices,
+        } => MemoryLayer::Enhanced {
+            memory,
+            extra_choices,
+        },
+    }
+}
+
+fn parse_permission(agent: Agent, input: &Value) -> Option<ParseOutcome> {
     let object = input.as_object()?;
     if object.get("hook_event_name").and_then(Value::as_str) != Some("PermissionRequest") {
         return None;
@@ -87,6 +142,10 @@ fn parse_permission(agent: Agent, input: &Value) -> Option<ParsedPermission> {
     }
 
     let (summary, body) = summarize_tool(&tool_name, &tool_input);
+    let popup_edit = match normalize_permission_edit(agent.id(), &tool_name, &tool_input, &cwd) {
+        AdapterOutcome::Intent(intent) => Some(intent),
+        AdapterOutcome::NotNativeEdit => None,
+    };
     let now = crate::history::now_ms();
     let project_name = crate::project::display_name(&cwd);
     let lang = crate::i18n::Lang::current();
@@ -142,6 +201,15 @@ fn parse_permission(agent: Agent, input: &Value) -> Option<ParsedPermission> {
         ),
     ];
 
+    let memory_layer = memory_layer(agent, input, zh);
+    if matches!(memory_layer, MemoryLayer::Suppress) {
+        // Provably guardian-routed (D36): no popup, no decision.
+        return None;
+    }
+    if matches!(memory_layer, MemoryLayer::AutoAllow) {
+        return Some(ParseOutcome::AutoAllow);
+    }
+
     let mut choices = vec![ConfirmChoice {
         id: "approve_once".into(),
         label: if zh { "允许" } else { "Allow" }.into(),
@@ -177,6 +245,16 @@ fn parse_permission(agent: Agent, input: &Value) -> Option<ParsedPermission> {
             });
         }
     }
+    let memory = match memory_layer {
+        MemoryLayer::Enhanced {
+            memory,
+            extra_choices,
+        } => {
+            choices.extend(extra_choices);
+            Some(memory)
+        }
+        _ => None,
+    };
     choices.push(ConfirmChoice {
         id: "deny".into(),
         label: if zh { "拒绝" } else { "Deny" }.into(),
@@ -209,6 +287,9 @@ fn parse_permission(agent: Agent, input: &Value) -> Option<ParsedPermission> {
             input: Some(ConfirmInput {
                 id: "reason".into(),
                 visible_when_action_id: "deny".into(),
+                always_visible: false,
+                required: false,
+                prefix_chars_by_action_id: Default::default(),
                 label: if zh {
                     "拒绝原因（可选）"
                 } else {
@@ -233,19 +314,21 @@ fn parse_permission(agent: Agent, input: &Value) -> Option<ParsedPermission> {
         },
         dismiss_action_id: "deny".into(),
     };
-    Some(ParsedPermission {
+    Some(ParseOutcome::Popup(Box::new(ParsedPermission {
         agent,
         task: ConfirmTask {
             spec,
+            popup_edit,
             source: agent.label().into(),
             lang: if zh { "zh" } else { "en" }.into(),
             project: cwd,
             agent_kind: agent.id().into(),
             agent_session_id: session_id,
             caller_pid: std::process::id(),
+            memory,
         },
         suggestions,
-    })
+    })))
 }
 
 fn required_string(object: &Map<String, Value>, key: &str, max: usize) -> Option<String> {
@@ -262,7 +345,7 @@ fn summarize_tool(tool: &str, input: &Value) -> (String, String) {
         .map(str::to_string)
         .unwrap_or_else(|| match tool {
             "Bash" => "Run a shell command".into(),
-            "apply_patch" | "Edit" | "Write" => "Modify files".into(),
+            "apply_patch" | "Edit" | "Write" | "NotebookEdit" => "Modify files".into(),
             value if value.starts_with("mcp__") => "Call an MCP tool".into(),
             _ => format!("Use {tool}"),
         });
@@ -402,6 +485,27 @@ fn decision_output(parsed: &ParsedPermission, result: &ConfirmResult) -> Option<
         "approve_once" => {
             decision.insert("behavior".into(), json!("allow"));
         }
+        // Daemon answered from stored shadow rules without any surface (memory auto-allow).
+        crate::permission_rules::AUTO_ALLOW_ACTION_ID
+            if parsed
+                .task
+                .memory
+                .as_ref()
+                .is_some_and(|memory| memory.query.is_some()) =>
+        {
+            decision.insert("behavior".into(), json!("allow"));
+        }
+        // A remember choice: the daemon has already persisted (or degraded) the rules; the
+        // current call maps to a plain allow either way (D25/D26).
+        action
+            if parsed
+                .task
+                .memory
+                .as_ref()
+                .is_some_and(|memory| memory.saves.iter().any(|save| save.action_id == action)) =>
+        {
+            decision.insert("behavior".into(), json!("allow"));
+        }
         "deny" => {
             decision.insert("behavior".into(), json!("deny"));
             let comment = result
@@ -468,9 +572,17 @@ mod tests {
         }
     }
 
+    /// Test view of parse_permission for the popup path.
+    fn parse_popup(agent: Agent, input: &Value) -> Option<ParsedPermission> {
+        match parse_permission(agent, input)? {
+            ParseOutcome::Popup(parsed) => Some(*parsed),
+            ParseOutcome::AutoAllow => None,
+        }
+    }
+
     #[test]
     fn claude_suggestion_is_replayed_from_private_ledger() {
-        let parsed = parse_permission(Agent::Claude, &input(Agent::Claude)).unwrap();
+        let parsed = parse_popup(Agent::Claude, &input(Agent::Claude)).unwrap();
         assert!(matches!(
             parsed.task.spec.choices[0].label.as_str(),
             "允许" | "Allow"
@@ -494,12 +606,31 @@ mod tests {
 
     #[test]
     fn codex_never_accepts_a_permission_update_action() {
-        let parsed = parse_permission(Agent::Codex, &input(Agent::Codex)).unwrap();
+        let parsed = parse_popup(Agent::Codex, &input(Agent::Codex)).unwrap();
         assert!(decision_output(&parsed, &result("permission_suggestion_0", None)).is_none());
         let deny = decision_output(&parsed, &result("deny", Some("unsafe"))).unwrap();
         assert_eq!(
             deny["hookSpecificOutput"]["decision"]["message"],
             "The user denied this permission request via AskHuman. Reason: unsafe"
+        );
+    }
+
+    #[test]
+    fn native_edit_intent_is_popup_only_metadata() {
+        let mut value = input(Agent::Claude);
+        value["tool_name"] = json!("Edit");
+        value["tool_input"] = json!({
+            "file_path": "/tmp/project/a.txt",
+            "old_string": "old",
+            "new_string": "new"
+        });
+        let parsed = parse_popup(Agent::Claude, &value).unwrap();
+        let intent = parsed.task.popup_edit.as_ref().unwrap();
+        assert_eq!(intent.native_tool, "Edit");
+        assert_eq!(intent.workspace, "/tmp/project");
+        assert_eq!(
+            intent.initial_diff.as_ref().unwrap().snapshot_status,
+            crate::permission_diff::SnapshotStatus::PayloadOnly
         );
     }
 
@@ -511,7 +642,7 @@ mod tests {
             { "type": "addRules", "rules": [], "behavior": "allow", "destination": "session" },
             { "type": "addRules", "rules": [{"toolName":"Bash"}], "behavior": "deny", "destination": "session" }
         ]);
-        let parsed = parse_permission(Agent::Claude, &input).unwrap();
+        let parsed = parse_popup(Agent::Claude, &input).unwrap();
         assert!(parsed.suggestions.is_empty());
         assert_eq!(parsed.task.spec.choices.len(), 2);
     }
@@ -555,7 +686,7 @@ mod tests {
 
     #[test]
     fn context_and_default_selection_follow_permission_contract() {
-        let parsed = parse_permission(Agent::Codex, &input(Agent::Codex)).unwrap();
+        let parsed = parse_popup(Agent::Codex, &input(Agent::Codex)).unwrap();
         let ids: Vec<&str> = parsed
             .task
             .spec
@@ -579,7 +710,7 @@ mod tests {
 
     #[test]
     fn approve_discards_comment_and_unknown_action_fails_closed() {
-        let parsed = parse_permission(Agent::Claude, &input(Agent::Claude)).unwrap();
+        let parsed = parse_popup(Agent::Claude, &input(Agent::Claude)).unwrap();
         let allow =
             decision_output(&parsed, &result("approve_once", Some("inject\njson"))).unwrap();
         assert!(allow["hookSpecificOutput"]["decision"]
@@ -604,7 +735,7 @@ mod tests {
                 })
                 .collect(),
         );
-        let parsed = parse_permission(Agent::Claude, &value).unwrap();
+        let parsed = parse_popup(Agent::Claude, &value).unwrap();
         assert_eq!(parsed.suggestions.len(), MAX_SUGGESTIONS);
         assert_eq!(parsed.task.spec.choices.len(), MAX_SUGGESTIONS + 2);
         assert!(parsed.task.spec.detail.body_md.contains('2'));
@@ -625,7 +756,7 @@ mod tests {
 
     #[test]
     fn deny_reason_is_json_escaped_under_fixed_prefix() {
-        let parsed = parse_permission(Agent::Codex, &input(Agent::Codex)).unwrap();
+        let parsed = parse_popup(Agent::Codex, &input(Agent::Codex)).unwrap();
         let output = decision_output(&parsed, &result("deny", Some("line 1\n\"line 2\""))).unwrap();
         let encoded = serde_json::to_string(&output).unwrap();
         let decoded: Value = serde_json::from_str(&encoded).unwrap();

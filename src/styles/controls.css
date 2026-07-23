@@ -2,7 +2,7 @@
 
 /* macOS 透明标题栏（毛玻璃统一外观）：tab 直接放进标题栏行，
    红绿灯在左侧、tab 居中互不遮挡；空白处经 data-tauri-drag-region 拖拽。 */
-.vibrancy .tabbar {
+.macos .tabbar {
   padding-top: 12px;
 }
 
@@ -13,15 +13,19 @@
   line-height: 1;
   padding: 7px 16px;
   border-radius: var(--radius-md);
-  border: 1px solid var(--control-border);
+  border: var(--hairline) solid var(--control-border);
   background: var(--control-bg);
   color: var(--text-primary);
   cursor: default;
-  transition: background 0.12s ease, border-color 0.12s ease;
+  box-shadow: var(--clickable-shadow);
   user-select: none;
 }
+.btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring), var(--clickable-shadow);
+}
 .btn:hover {
-  background: var(--bg-elevated);
+  background: var(--control-hover-bg);
 }
 .btn:active {
   transform: translateY(0.5px);
@@ -57,34 +61,49 @@
   /* 底部留白给输入框内右下角的「添加图片」图标 */
   padding: 10px 12px 36px;
   border-radius: var(--radius-md);
-  border: 1px solid var(--control-border);
+  border: var(--hairline) solid var(--control-border);
   background: var(--control-bg);
   color: var(--text-primary);
+  box-shadow: var(--clickable-shadow);
   box-sizing: border-box;
   display: block;
+}
+/* Text fields show focus on click as well as keyboard (macOS field behavior).
+   Ring color is unchanged from the old global rule (accent @ 35%); do not also
+   retint the border — that made the focused field look “more blue” overall. */
+.textarea:focus,
+.textarea:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring), var(--clickable-shadow);
 }
 .textarea::placeholder {
   color: var(--text-tertiary);
 }
 
-/* 预定义选项：可多选的胶囊 */
+/* 预定义选项：可多选的胶囊。与输入框同款外观（偏白底 + 控件细边框 + 微阴影），
+   选中态边框仍用 hairline（避免加粗导致布局跳动），颜色更贴近底色、少 accent。 */
 .option {
   display: flex;
   align-items: flex-start;
   gap: 10px;
   padding: 9px 12px;
   border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  background: var(--card-bg);
+  border: var(--hairline) solid var(--control-border);
+  background: var(--control-bg);
   cursor: default;
-  transition: border-color 0.12s ease, background 0.12s ease;
+  box-shadow: var(--clickable-shadow);
 }
 .option:hover {
-  background: var(--bg-elevated);
+  background: var(--control-hover-bg);
 }
+/* 选中态：底色轻染；边框与选中底接近（弱 accent），主要靠底色差辨认而非高对比描边。 */
 .option.selected {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(
+    in srgb,
+    var(--accent) 22%,
+    color-mix(in srgb, var(--control-bg) 70%, var(--control-border))
+  );
+  background: color-mix(in srgb, var(--accent) 10%, var(--control-bg));
 }
 .option .check {
   flex: 0 0 auto;
@@ -128,6 +147,22 @@
   line-height: 20px;
   color: var(--text-primary);
   word-break: break-word;
+}
+.option .todo-option-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: top;
+  height: 18px;
+  margin: 1px 6px 1px 0;
+  padding: 0 7px;
+  border-radius: var(--radius-sm);
+  color: color-mix(in srgb, var(--accent-orange) 72%, var(--text-primary));
+  background: color-mix(in srgb, var(--accent-orange) 22%, transparent);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
 }
 /* 推荐选项 Badge（大拇指图标 + 本地化「推荐」）：内联在选项文本流开头。
    这样英文等较长 badge 不再独占一列、把文本挤窄，换行后的文字可铺满整行（含 badge 下方）。
@@ -177,7 +212,7 @@
   height: 64px;
   border-radius: var(--radius-sm);
   overflow: hidden;
-  border: 1px solid var(--border);
+  border: var(--hairline) solid var(--border);
   background: var(--bg-elevated);
 }
 .thumb img {
@@ -297,13 +332,12 @@
   width: 26px;
   height: 26px;
   padding: 0;
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: 6px;
   background: var(--bg-elevated);
   color: var(--text-secondary);
   cursor: pointer;
   opacity: 0;
-  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
 }
 .code-block:hover .code-copy,
 .code-copy:focus-visible {
@@ -339,7 +373,7 @@
 }
 .markdown-body hr {
   border: none;
-  border-top: 1px solid var(--md-hr);
+  border-top: var(--hairline) solid var(--md-hr);
   margin: 14px 0;
 }
 .markdown-body table {
@@ -348,7 +382,7 @@
 }
 .markdown-body th,
 .markdown-body td {
-  border: 1px solid var(--md-table-border);
+  border: var(--hairline) solid var(--md-table-border);
   padding: 5px 10px;
   text-align: left;
 }
@@ -368,9 +402,10 @@
 
 /* ===== 设置页控件 ===== */
 
-/* 卡片（GroupBox 风） */
+/* 卡片（GroupBox 风）：无常态描边，层级靠背景色差；
+   transparent 边框占位供 tip/更新/搜索高亮等变体设置 border-color。 */
 .card {
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: var(--radius-lg);
   background: var(--card-bg);
   padding: var(--space-4);
@@ -412,7 +447,7 @@
   flex: 1 1 auto;
 }
 .divider {
-  height: 1px;
+  height: var(--hairline);
   background: var(--border);
   margin: var(--space-3) 0;
   border: 0;
@@ -459,13 +494,13 @@
   transform: translateX(16px);
 }
 
-/* 分段控件 Segmented */
+/* 分段控件 Segmented：无描边，靠底色 + 活动段的浮起感 */
 .segmented {
   display: inline-flex;
   padding: 2px;
   border-radius: var(--radius-md);
   background: var(--bg-elevated);
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   gap: 2px;
 }
 .segmented button {
@@ -483,6 +518,10 @@
   color: var(--text-primary);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
 }
+.segmented button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 /* 下拉选择（如语音识别语言） */
 .select {
@@ -490,10 +529,11 @@
   font-size: 12.5px;
   padding: 5px 28px 5px 10px;
   border-radius: var(--radius-md);
-  border: 1px solid var(--control-border);
+  border: var(--hairline) solid var(--control-border);
   background-color: var(--control-bg);
   color: var(--text-primary);
   cursor: default;
+  box-shadow: var(--clickable-shadow);
   appearance: none;
   -webkit-appearance: none;
   /* 右侧自绘下拉箭头 */
@@ -503,8 +543,7 @@
 }
 .select:focus-visible {
   outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+  box-shadow: var(--focus-ring), var(--clickable-shadow);
 }
 
 /* 步进器 Stepper */
@@ -524,12 +563,17 @@
   width: 24px;
   height: 24px;
   border-radius: 6px;
-  border: 1px solid var(--control-border);
+  border: var(--hairline) solid var(--control-border);
   background: var(--control-bg);
   color: var(--text-primary);
   font-size: 14px;
   line-height: 1;
   cursor: default;
+  box-shadow: var(--clickable-shadow);
+}
+.stepper button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring), var(--clickable-shadow);
 }
 .stepper button:disabled {
   opacity: 0.4;
@@ -557,11 +601,17 @@
   font-size: 13px;
   padding: 6px 10px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--control-border);
+  border: var(--hairline) solid var(--control-border);
   background: var(--control-bg);
   color: var(--text-primary);
   width: 100%;
   box-sizing: border-box;
+  box-shadow: var(--clickable-shadow);
+}
+.input:focus,
+.input:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring), var(--clickable-shadow);
 }
 /* 数字输入（如历史条数）：固定窄宽、右对齐，去掉浏览器自带的上下步进按钮，避免撑宽行挤压 label */
 .input.num {
@@ -620,7 +670,6 @@
   overflow-y: auto;
   padding: 10px;
   border-radius: var(--radius-md);
-  border: 1px solid var(--border);
   background: var(--bg-elevated);
   color: var(--text-primary);
   margin: 0;

@@ -35,47 +35,6 @@ pub fn dev_presets_dir() -> PathBuf {
     home().join(".askhuman").join("dev-presets")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
-
-    // env mutations must not run concurrently with other tests that touch ASKHUMAN_HOME.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn config_dir_respects_askhuman_home() {
-        let _g = ENV_LOCK.lock().unwrap();
-        let prev = std::env::var_os(crate::dev_instance::ASKHUMAN_HOME_ENV);
-        let custom = PathBuf::from("/tmp/askhuman-home-test-xyz");
-        std::env::set_var(crate::dev_instance::ASKHUMAN_HOME_ENV, &custom);
-        assert_eq!(config_dir(), custom);
-        match prev {
-            Some(v) => std::env::set_var(crate::dev_instance::ASKHUMAN_HOME_ENV, v),
-            None => std::env::remove_var(crate::dev_instance::ASKHUMAN_HOME_ENV),
-        }
-    }
-
-    #[test]
-    fn dev_presets_dir_not_under_askhuman_home() {
-        let _g = ENV_LOCK.lock().unwrap();
-        let prev = std::env::var_os(crate::dev_instance::ASKHUMAN_HOME_ENV);
-        std::env::set_var(
-            crate::dev_instance::ASKHUMAN_HOME_ENV,
-            "/tmp/instance-home-only",
-        );
-        assert_eq!(
-            dev_presets_dir(),
-            home().join(".askhuman").join("dev-presets")
-        );
-        assert_ne!(dev_presets_dir(), config_dir().join("dev-presets"));
-        match prev {
-            Some(v) => std::env::set_var(crate::dev_instance::ASKHUMAN_HOME_ENV, v),
-            None => std::env::remove_var(crate::dev_instance::ASKHUMAN_HOME_ENV),
-        }
-    }
-}
-
 /// 配置文件 `~/.askhuman/config.json`。
 pub fn config_file() -> PathBuf {
     config_dir().join("config.json")
@@ -101,9 +60,24 @@ pub fn history_lock() -> PathBuf {
     config_dir().join("history.lock")
 }
 
+/// Private overwrite-only files used when a recovered AskHuman Message exceeds stdout limits.
+pub fn show_last_dir() -> PathBuf {
+    state_dir().join("show-last")
+}
+
+/// Private schema-hidden MCP session tokens, consumed once by AskHuman MCP handlers.
+pub fn session_token_dir() -> PathBuf {
+    state_dir().join("session-tokens")
+}
+
 /// 版本自更新状态文件 `~/.askhuman/update.json`（最新版本/检查时间/忽略集合/待生效）。
 pub fn update_state_file() -> PathBuf {
     config_dir().join("update.json")
+}
+
+/// Cross-process write lock for `update.json`.
+pub fn update_state_lock() -> PathBuf {
+    config_dir().join("update.lock")
 }
 
 /// 自动集成产物的内部所有权账本 `~/.askhuman/integration-state.json`。
@@ -155,6 +129,11 @@ pub fn watch_file() -> PathBuf {
 /// 只在变更时写、启动读一次——hook 热路径零文件 IO，见 `docs/specs/agent-interject.md` D8）。
 pub fn interject_file() -> PathBuf {
     state_dir().join("interject.json")
+}
+
+/// `/msg` 一次性输入卡的最小恢复账本。只保存卡片定位与目标会话，不保存用户输入内容。
+pub fn msg_compose_file() -> PathBuf {
+    state_dir().join("msg-compose.json")
 }
 
 /// Workspaces discovered from recent local Agent sessions and user curation.
@@ -297,4 +276,45 @@ pub fn grok_hooks_json() -> PathBuf {
 /// Grok 会话目录 `~/.grok/sessions`（子目录为 URL 编码的 cwd，再下一层为 `<session_id>/`）。
 pub fn grok_sessions_dir() -> PathBuf {
     grok_dir().join("sessions")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // env mutations must not run concurrently with other tests that touch ASKHUMAN_HOME.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn config_dir_respects_askhuman_home() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var_os(crate::dev_instance::ASKHUMAN_HOME_ENV);
+        let custom = PathBuf::from("/tmp/askhuman-home-test-xyz");
+        std::env::set_var(crate::dev_instance::ASKHUMAN_HOME_ENV, &custom);
+        assert_eq!(config_dir(), custom);
+        match prev {
+            Some(v) => std::env::set_var(crate::dev_instance::ASKHUMAN_HOME_ENV, v),
+            None => std::env::remove_var(crate::dev_instance::ASKHUMAN_HOME_ENV),
+        }
+    }
+
+    #[test]
+    fn dev_presets_dir_not_under_askhuman_home() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var_os(crate::dev_instance::ASKHUMAN_HOME_ENV);
+        std::env::set_var(
+            crate::dev_instance::ASKHUMAN_HOME_ENV,
+            "/tmp/instance-home-only",
+        );
+        assert_eq!(
+            dev_presets_dir(),
+            home().join(".askhuman").join("dev-presets")
+        );
+        assert_ne!(dev_presets_dir(), config_dir().join("dev-presets"));
+        match prev {
+            Some(v) => std::env::set_var(crate::dev_instance::ASKHUMAN_HOME_ENV, v),
+            None => std::env::remove_var(crate::dev_instance::ASKHUMAN_HOME_ENV),
+        }
+    }
 }

@@ -10,7 +10,7 @@ import {
   getHistoryProjects,
   historyInit,
 } from "../lib/ipc";
-import type { HistoryEntry, ProjectInfo } from "../lib/types";
+import type { HistoryEntry, ProjectInfo, ThemeMode } from "../lib/types";
 import { agentKindOf, workspaceNameOf } from "../lib/history";
 import HistoryDetail from "../components/HistoryDetail.vue";
 
@@ -240,6 +240,7 @@ async function doClear() {
 }
 
 let unlistenUpdated: UnlistenFn | null = null;
+let unlistenSettings: UnlistenFn | null = null;
 
 onMounted(async () => {
   const init = await historyInit();
@@ -270,9 +271,21 @@ onMounted(async () => {
     projects.value = await getHistoryProjects();
     await reload();
   });
+
+  // 设置变更实时生效（主题/语言与设置窗口同宿主进程广播）。
+  unlistenSettings = await listen<{ theme?: ThemeMode; language?: string }>(
+    "settings-updated",
+    (e) => {
+      if (typeof e.payload.theme === "string") applyTheme(e.payload.theme);
+      if (typeof e.payload.language === "string") applyLanguage(e.payload.language);
+    }
+  );
 });
 
-onBeforeUnmount(() => unlistenUpdated?.());
+onBeforeUnmount(() => {
+  unlistenUpdated?.();
+  unlistenSettings?.();
+});
 </script>
 
 <template>
@@ -399,9 +412,9 @@ onBeforeUnmount(() => unlistenUpdated?.());
   align-items: center;
   gap: var(--space-3);
   padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--hairline) solid var(--border);
 }
-.vibrancy .hist-header {
+.macos .hist-header {
   padding-top: 30px;
 }
 .hist-title {
@@ -418,11 +431,12 @@ onBeforeUnmount(() => unlistenUpdated?.());
   height: 30px;
   max-width: 240px;
   padding: 0 28px 0 10px;
-  border: 1px solid var(--border);
+  border: var(--hairline) solid var(--border);
   border-radius: var(--radius-sm, 8px);
-  background: var(--bg-elevated);
+  background: var(--control-bg);
   color: var(--text-primary);
   font-size: 12px;
+  box-shadow: var(--clickable-shadow);
 }
 .clear-wrap {
   position: relative;
@@ -433,12 +447,13 @@ onBeforeUnmount(() => unlistenUpdated?.());
   gap: 4px;
   height: 30px;
   padding: 0 10px;
-  border: 1px solid var(--border);
+  border: var(--hairline) solid var(--border);
   border-radius: var(--radius-sm, 8px);
-  background: var(--bg-elevated);
+  background: var(--control-bg);
   color: var(--text-primary);
   font-size: 12px;
   cursor: pointer;
+  box-shadow: var(--clickable-shadow);
 }
 .clear-btn svg {
   width: 13px;
@@ -453,7 +468,7 @@ onBeforeUnmount(() => unlistenUpdated?.());
   display: flex;
   flex-direction: column;
   padding: 4px;
-  border: 1px solid var(--border);
+  border: var(--hairline) solid var(--border);
   border-radius: var(--radius-sm, 8px);
   background: var(--card-bg, var(--bg-elevated));
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
@@ -482,7 +497,7 @@ onBeforeUnmount(() => unlistenUpdated?.());
   display: flex;
   align-items: center;
   padding: 8px 14px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--hairline) solid var(--border);
 }
 .search-icon {
   position: absolute;
@@ -496,15 +511,17 @@ onBeforeUnmount(() => unlistenUpdated?.());
   flex: 1 1 auto;
   height: 30px;
   padding: 0 30px 0 32px;
-  border: 1px solid var(--border);
+  border: var(--hairline) solid var(--control-border);
   border-radius: var(--radius-sm, 8px);
-  background: var(--bg-elevated);
+  background: var(--control-bg);
   color: var(--text-primary);
   font-size: 13px;
   outline: none;
+  box-shadow: var(--clickable-shadow);
 }
-.search-input:focus {
-  border-color: var(--accent);
+.search-input:focus,
+.search-input:focus-visible {
+  box-shadow: var(--focus-ring), var(--clickable-shadow);
 }
 .search-input::-webkit-search-cancel-button {
   -webkit-appearance: none;
@@ -544,7 +561,7 @@ onBeforeUnmount(() => unlistenUpdated?.());
   padding: 6px;
   list-style: none;
   overflow-y: auto;
-  border-right: 1px solid var(--border);
+  border-right: var(--hairline) solid var(--border);
 }
 .entry {
   padding: 9px 10px;
@@ -645,7 +662,7 @@ onBeforeUnmount(() => unlistenUpdated?.());
   justify-content: center;
   gap: 6px;
   padding: 24px;
-  border-right: 1px solid var(--border);
+  border-right: var(--hairline) solid var(--border);
   text-align: center;
 }
 .empty-title {
@@ -712,7 +729,7 @@ onBeforeUnmount(() => unlistenUpdated?.());
   cursor: pointer;
 }
 .btn-ghost {
-  border: 1px solid var(--border);
+  border: var(--hairline) solid var(--border);
   background: transparent;
   color: var(--text-primary);
 }

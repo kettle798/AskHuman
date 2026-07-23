@@ -18,8 +18,11 @@
 use base64::Engine;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
-use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
+use rmcp::model::{
+    CallToolResult, ContentBlock, Implementation, Meta, ServerCapabilities, ServerInfo,
+};
+use rmcp::service::RequestContext;
+use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,9 +31,67 @@ use std::process::{Output, Stdio};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
+const CODEX_TURN_METADATA_KEY: &str = "x-codex-turn-metadata";
+const CODEX_THREAD_SOURCE_KEY: &str = "thread_source";
+const CODEX_SYSTEM_THREAD_SOURCE: &str = "system";
+const CODEX_SYSTEM_THREAD_BLOCK_MESSAGE: &str =
+    "AskHuman is disabled for this Codex system-generated background thread.\n\
+Do not retry or contact the human; finish the host-requested non-interactive output directly.";
+
+fn has_system_thread_source(value: &Value) -> bool {
+    value
+        .as_object()
+        .and_then(|object| object.get(CODEX_THREAD_SOURCE_KEY))
+        .and_then(Value::as_str)
+        == Some(CODEX_SYSTEM_THREAD_SOURCE)
+}
+
+/// Codex attaches trusted per-turn context under this namespaced `_meta` entry for every MCP call.
+/// Older versions may encode the inner value as JSON text, so both representations are accepted.
+fn codex_turn_metadata(meta: &Meta) -> Option<Value> {
+    let turn_metadata = meta.0.get(CODEX_TURN_METADATA_KEY)?;
+    match turn_metadata {
+        Value::Object(_) => Some(turn_metadata.clone()),
+        Value::String(encoded) => serde_json::from_str::<Value>(encoded).ok(),
+        _ => None,
+    }
+}
+
+fn is_codex_system_thread(meta: &Meta) -> bool {
+    codex_turn_metadata(meta)
+        .as_ref()
+        .is_some_and(has_system_thread_source)
+}
+
+fn metadata_id<'a>(metadata: &'a Value, snake_case: &str, camel_case: &str) -> Option<&'a str> {
+    metadata
+        .get(snake_case)
+        .or_else(|| metadata.get(camel_case))
+        .and_then(Value::as_str)
+}
+
+fn codex_system_thread_block(meta: &Meta, tool: &str) -> Option<CallToolResult> {
+    let metadata = codex_turn_metadata(meta)?;
+    if !has_system_thread_source(&metadata) {
+        return None;
+    }
+    crate::daemon::lifecycle::log_suppression_audit(crate::daemon::lifecycle::SuppressionAudit {
+        component: "mcp_tool",
+        reason: "codex_system_thread",
+        tool: Some(tool),
+        agent: Some("codex"),
+        session_id: metadata_id(&metadata, "session_id", "sessionId"),
+        thread_id: metadata_id(&metadata, "thread_id", "threadId"),
+        turn_id: metadata_id(&metadata, "turn_id", "turnId"),
+    });
+    Some(CallToolResult::error(vec![ContentBlock::text(
+        CODEX_SYSTEM_THREAD_BLOCK_MESSAGE,
+    )]))
+}
+
 // `ask` 工具的入参（MCP 入参 schema 由 schemars 从本结构派生）。结构体级注释用 `//` 以免泄漏进对外
 // schema 的 description；字段级 `///` 才是给 agent 读的描述，须为英文。
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AskParams {
     /// Shared context/description shown above all questions, rendered as Markdown
@@ -44,10 +105,71 @@ pub struct AskParams {
     /// Optional file paths (images or documents) to attach to what the human sees.
     #[serde(default)]
     pub files: Option<Vec<String>>,
+    #[serde(default, rename = "__askhuman_session_token_v1")]
+    #[schemars(skip)]
+    session_token: Option<String>,
+}
+
+// Input for `todo_add` (project-scoped queue; same store as CLI `todo add`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoAddParams {
+    /// Concise task text to append to the current project's todo queue.
+    /// Prefer a single executable sentence, ideally under 100 characters.
+    pub text: String,
+    /// When true, mark the todo for auto-run on the next `whats_next` (⚡).
+    #[serde(default)]
+    pub auto: Option<bool>,
+}
+
+// Output for `todo_add`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoAddResult {
+    /// 1-based index in the project's pending list after the add.
+    pub index: usize,
+    /// Stable id of the new entry (for debugging / future tools).
+    pub id: String,
+    /// Trimmed task text that was stored.
+    pub text: String,
+    /// Absolute project key (git root path) the todo was attached to.
+    pub project: String,
+    /// Whether the entry is marked auto-run.
+    pub auto: bool,
+}
+
+// Input for `whats_next` (spec todo-whats-next D2).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WhatsNextParams {
+    /// Optional completion report shown to the human above the fixed "What should we do
+    /// next?" question, rendered as Markdown.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Optional concrete next-task suggestions. NEVER include an end, stop, or no-more-work option;
+    /// AskHuman adds the ending choice. Omit this field when you have no task to suggest. Options
+    /// appear before project todos, and `recommended` renders the same emphasis as in `ask`.
+    #[serde(default)]
+    pub options: Option<Vec<AskOption>>,
+    /// Optional file paths (e.g. a report or summary document) to attach to what the human sees.
+    #[serde(default)]
+    pub files: Option<Vec<String>>,
+    #[serde(default, rename = "__askhuman_session_token_v1")]
+    #[schemars(skip)]
+    session_token: Option<String>,
+}
+
+// Publicly zero-argument input. Managed hooks may add the private field after model generation;
+// it is deliberately absent from tools/list.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ShowLastParams {
+    #[serde(default, rename = "__askhuman_session_token_v1")]
+    #[schemars(skip)]
+    session_token: Option<String>,
 }
 
 // 单个问题。
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(inline)]
 pub struct AskQuestion {
     /// The question text.
@@ -58,7 +180,7 @@ pub struct AskQuestion {
 }
 
 // 单个选项。
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(inline)]
 pub struct AskOption {
     /// The option label.
@@ -108,10 +230,12 @@ pub struct AskAnswer {
     pub files: Vec<String>,
 }
 
-/// MCP server：仅暴露 `ask` 一个工具。
+/// MCP server：暴露 `ask`、`whats_next`、`show_last`、`todo_add`。
 #[derive(Clone)]
 pub struct AskServer {
     tool_router: ToolRouter<Self>,
+    mcp_instance_id: String,
+    project: String,
 }
 
 #[tool_router(router = tool_router)]
@@ -119,7 +243,18 @@ impl AskServer {
     pub fn new() -> Self {
         Self {
             tool_router: Self::tool_router(),
+            mcp_instance_id: uuid::Uuid::new_v4().to_string(),
+            project: crate::project::detect(),
         }
+    }
+
+    pub async fn register_instance(&self) {
+        register_mcp_instance(
+            self.mcp_instance_id.clone(),
+            self.project.clone(),
+            std::process::id(),
+        )
+        .await;
     }
 
     /// Ask the human a question (or several) and block until they reply.
@@ -133,15 +268,23 @@ any input that only the human can provide. Provide `message` for free-form quest
 `{\"questions\":[{\"question\":\"Continue?\",\"options\":[{\"text\":\"Yes\",\"recommended\":true}]}]}`. \
 The reply is returned as \
 structured content; any images the human attaches are returned as image content.",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<AskResult>()
+        output_schema = rmcp::handler::server::tool::schema_for_type::<AskResult>(),
+        // Truthful hints that also let Codex-style clients skip per-call approval
+        // (their default treats missing destructive/open_world hints as true):
+        // asking the operator destroys nothing and reaches no external world.
+        annotations(destructive_hint = false, open_world_hint = false)
     )]
     async fn ask(
         &self,
         Parameters(params): Parameters<AskParams>,
+        context: RequestContext<RoleServer>,
         // rmcp extracts the per-request token; cancelled when the client sends
         // `notifications/cancelled` (timeout / user stop / host abort). Not human dismiss.
         cancel: CancellationToken,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(blocked) = codex_system_thread_block(&context.meta, "ask") {
+            return Ok(blocked);
+        }
         let has_questions = params
             .questions
             .as_ref()
@@ -159,6 +302,15 @@ structured content; any images the human attaches are returned as image content.
             ));
         }
 
+        let public_arguments = ask_arguments_value(&params);
+        let binding = self
+            .resolve_binding(
+                &context.meta,
+                params.session_token.as_deref(),
+                "ask",
+                &public_arguments,
+            )
+            .await;
         let argv = build_argv(&params);
         let exe = std::env::current_exe().map_err(|e| {
             McpError::internal_error(format!("cannot locate AskHuman executable: {e}"), None)
@@ -167,12 +319,13 @@ structured content; any images the human attaches are returned as image content.
         // stdin 置空、stdout/stderr 捕获，确保子进程不碰 MCP 的 STDIO 协议流。
         // `ASKHUMAN_FROM_MCP=1`：告知子进程这是 MCP 发起，daemon 据此「只刷新、不新建」会话（防幽灵）。
         let mut command = tokio::process::Command::new(exe);
-        command.args(&argv).env("ASKHUMAN_FROM_MCP", "1");
+        command.args(&argv);
+        self.configure_child(&mut command, binding.as_ref());
         let output = match capture_output(command, cancel).await {
             Ok(o) => o,
             Err(CaptureError::Cancelled) => {
                 // Caller abort — not a human cancel. Do not invent answers or action:"cancel".
-                return Ok(CallToolResult::error(vec![Content::text(
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
                     "AskHuman request was cancelled by the MCP client (not by the human).",
                 )]));
             }
@@ -198,7 +351,7 @@ structured content; any images the human attaches are returned as image content.
                 } else {
                     format!("AskHuman failed (exit code {code}): {}", stderr.trim())
                 };
-                return Ok(CallToolResult::error(vec![Content::text(msg)]));
+                return Ok(CallToolResult::error(vec![ContentBlock::text(msg)]));
             }
         };
 
@@ -225,7 +378,7 @@ structured content; any images the human attaches are returned as image content.
                     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                     tool_result
                         .content
-                        .push(Content::image(b64, mime.to_string()));
+                        .push(ContentBlock::image(b64, mime.to_string()));
                 }
                 // 读不到就跳过；路径仍在 structuredContent.answers[].files 中可供模型参考。
                 Err(_) => continue,
@@ -234,6 +387,356 @@ structured content; any images the human attaches are returned as image content.
 
         Ok(tool_result)
     }
+
+    /// End-of-task handoff for requesting a separate next task.
+    #[tool(
+        name = "whats_next",
+        description = "End-of-task handoff: ask the human for a separate next task. You MUST call \
+this only after the current task is fully complete and before ending; use `ask` for any question, \
+decision, or next step within the current task. Optionally pass `message` with a completion report \
+and `files` with report documents. The human replies with the next task (start it immediately), or \
+approves ending the turn — only then may you end it.",
+        annotations(destructive_hint = false, open_world_hint = false)
+    )]
+    async fn whats_next(
+        &self,
+        Parameters(params): Parameters<WhatsNextParams>,
+        context: RequestContext<RoleServer>,
+        cancel: CancellationToken,
+    ) -> Result<CallToolResult, McpError> {
+        if let Some(blocked) = codex_system_thread_block(&context.meta, "whats_next") {
+            return Ok(blocked);
+        }
+        let public_arguments = whats_next_arguments_value(&params);
+        let binding = self
+            .resolve_binding(
+                &context.meta,
+                params.session_token.as_deref(),
+                "whats_next",
+                &public_arguments,
+            )
+            .await;
+        let argv = build_whats_next_argv(&params);
+        let exe = std::env::current_exe().map_err(|e| {
+            McpError::internal_error(format!("cannot locate AskHuman executable: {e}"), None)
+        })?;
+        let mut command = tokio::process::Command::new(exe);
+        command.args(&argv);
+        self.configure_child(&mut command, binding.as_ref());
+        let output = match capture_output(command, cancel).await {
+            Ok(o) => o,
+            Err(CaptureError::Cancelled) => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "AskHuman request was cancelled by the MCP client (not by the human).",
+                )]));
+            }
+            Err(CaptureError::Io(e)) => {
+                return Err(McpError::internal_error(
+                    format!("failed to spawn AskHuman: {e}"),
+                    None,
+                ));
+            }
+        };
+        // 结果就是一段纯文本（spec D3）：任务内容 / 固定结束句 / `[status]` 取消引导。
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let text = stdout.trim();
+        if !output.status.success() || text.is_empty() {
+            let code = output.status.code().unwrap_or(3);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = if stderr.trim().is_empty() {
+                format!("AskHuman produced no result (exit code {code})")
+            } else {
+                format!("AskHuman failed (exit code {code}): {}", stderr.trim())
+            };
+            return Ok(CallToolResult::error(vec![ContentBlock::text(msg)]));
+        }
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            text.to_string(),
+        )]))
+    }
+
+    /// Recover the complete latest AskHuman exchange for the current Agent session.
+    #[tool(
+        name = "show_last",
+        description = "Retrieve the full latest completed AskHuman question and human answer for \
+the current Agent session. Call this immediately after context summarization/compaction, or whenever \
+you are unsure of the exact prior AskHuman exchange. Takes no public arguments.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn show_last(
+        &self,
+        Parameters(params): Parameters<ShowLastParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        if let Some(blocked) = codex_system_thread_block(&context.meta, "show_last") {
+            return Ok(blocked);
+        }
+        let binding = self
+            .resolve_binding(
+                &context.meta,
+                params.session_token.as_deref(),
+                "show_last",
+                &serde_json::json!({}),
+            )
+            .await;
+        let scope = show_last_scope(binding, &self.mcp_instance_id, &self.project);
+        match crate::show_last::recover(&scope) {
+            Ok(output) => Ok(CallToolResult::success(vec![ContentBlock::text(output)])),
+            Err(error) => Ok(CallToolResult::error(vec![ContentBlock::text(
+                error.to_string(),
+            )])),
+        }
+    }
+
+    /// Append a project todo (same queue as CLI `AskHuman todo add`).
+    /// Writes from the MCP server process directly into `todos.json`.
+    #[tool(
+        name = "todo_add",
+        description = "Add a project todo for the human to pick up later (whats-next chips / todos \
+window / IM). Use only when the human asked to record a deferred task or accepted a concrete \
+suggestion for later — never for your own work plan. Attaches to the project of the MCP server's \
+cwd (git root). Returns the 1-based index and stored text on success.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<TodoAddResult>(),
+        // Appending a todo is additive (not destructive) and touches no external world.
+        annotations(destructive_hint = false, open_world_hint = false)
+    )]
+    async fn todo_add(
+        &self,
+        Parameters(params): Parameters<TodoAddParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        if let Some(blocked) = codex_system_thread_block(&context.meta, "todo_add") {
+            return Ok(blocked);
+        }
+        let text = params.text.trim();
+        if text.is_empty() {
+            return Err(McpError::invalid_params(
+                "todo_add requires non-empty `text`",
+                None,
+            ));
+        }
+        let project = crate::project::detect();
+        if project.is_empty() {
+            return Err(McpError::internal_error(
+                "cannot determine project (cwd unavailable)",
+                None,
+            ));
+        }
+        let auto = params.auto.unwrap_or(false);
+        let agent = crate::agents::detect::detect_invoking_agent();
+        let added = match agent {
+            Some(agent) => crate::todos::add_from_agent(&project, text, auto, agent),
+            None if auto => crate::todos::add_auto(&project, text),
+            None => crate::todos::add(&project, text),
+        };
+        let entry = match added {
+            Ok(entry) => entry,
+            Err(crate::todos::AddError::EmptyInput) => {
+                return Err(McpError::invalid_params(
+                    "todo_add requires non-empty `text`",
+                    None,
+                ));
+            }
+            Err(crate::todos::AddError::Persist) => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "Failed to save todo: could not write ~/.askhuman/state/todos.json \
+(check permissions).",
+                )]));
+            }
+        };
+        let Some(index) = crate::todos::index_of(&project, &entry.id) else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "Failed to save todo: entry missing after write (not persisted).",
+            )]));
+        };
+        let result = TodoAddResult {
+            index,
+            id: entry.id,
+            text: entry.text,
+            project,
+            auto: entry.auto,
+        };
+        let structured = serde_json::to_value(&result).map_err(|e| {
+            McpError::internal_error(format!("failed to serialize todo_add result: {e}"), None)
+        })?;
+        // `structured()` mirrors structuredContent into content[0] as JSON text.
+        Ok(CallToolResult::structured(structured))
+    }
+
+    fn configure_child(
+        &self,
+        command: &mut tokio::process::Command,
+        binding: Option<&crate::context_binding::AgentBinding>,
+    ) {
+        // Native session env inherited when this long-lived MCP process started may belong to an
+        // older conversation. Only explicit per-call binding is authoritative.
+        for kind in [
+            crate::agents::AgentKind::Claude,
+            crate::agents::AgentKind::Codex,
+            crate::agents::AgentKind::Cursor,
+            crate::agents::AgentKind::Grok,
+        ] {
+            command.env_remove(crate::agents::detect::session_id_env_var(kind));
+        }
+        command
+            .env(crate::cli::FROM_MCP_ENV, "1")
+            .env(
+                crate::cli::MCP_INSTANCE_ID_ENV,
+                self.mcp_instance_id.as_str(),
+            )
+            .env_remove(crate::cli::MCP_AGENT_KIND_ENV)
+            .env_remove(crate::cli::MCP_AGENT_SESSION_ID_ENV);
+        if let Some(binding) = binding {
+            command
+                .env(crate::cli::MCP_AGENT_KIND_ENV, &binding.agent_kind)
+                .env(crate::cli::MCP_AGENT_SESSION_ID_ENV, &binding.session_id);
+        }
+    }
+
+    async fn resolve_binding(
+        &self,
+        meta: &Meta,
+        token: Option<&str>,
+        tool_name: &str,
+        public_arguments: &Value,
+    ) -> Option<crate::context_binding::AgentBinding> {
+        if let Some(binding) = resolve_direct_binding(meta, token, tool_name) {
+            return Some(binding);
+        }
+        let session_id = claim_grok_binding(
+            self.mcp_instance_id.clone(),
+            self.project.clone(),
+            tool_name.to_string(),
+            crate::context_binding::canonical_tool_arguments_sha256(tool_name, public_arguments)?,
+            std::process::id(),
+        )
+        .await?;
+        Some(crate::context_binding::AgentBinding {
+            agent_kind: "grok".into(),
+            session_id,
+        })
+    }
+}
+
+fn show_last_scope(
+    binding: Option<crate::context_binding::AgentBinding>,
+    mcp_instance_id: &str,
+    project: &str,
+) -> crate::show_last::Scope {
+    match binding {
+        Some(binding) => crate::show_last::Scope::AgentSession {
+            agent_kind: binding.agent_kind,
+            session_id: binding.session_id,
+        },
+        None => crate::show_last::Scope::McpInstance {
+            mcp_instance_id: mcp_instance_id.to_string(),
+            project: project.to_string(),
+        },
+    }
+}
+
+fn resolve_direct_binding(
+    meta: &Meta,
+    token: Option<&str>,
+    tool_name: &str,
+) -> Option<crate::context_binding::AgentBinding> {
+    // Codex overwrites this field with the current thread id on every tools/call.
+    if let Some(session_id) = meta
+        .0
+        .get("threadId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| uuid::Uuid::parse_str(value).is_ok())
+    {
+        return Some(crate::context_binding::AgentBinding {
+            agent_kind: "codex".into(),
+            session_id: session_id.to_string(),
+        });
+    }
+    token.and_then(|token| crate::context_binding::consume_token(token, tool_name))
+}
+
+pub(crate) fn ask_arguments_value(params: &AskParams) -> Value {
+    let mut object = serde_json::Map::new();
+    if let Some(value) = &params.message {
+        object.insert("message".into(), Value::String(value.clone()));
+    }
+    if let Some(value) = &params.questions {
+        object.insert(
+            "questions".into(),
+            serde_json::to_value(value).expect("AskQuestion is serializable"),
+        );
+    }
+    if let Some(value) = &params.files {
+        object.insert(
+            "files".into(),
+            serde_json::to_value(value).expect("file paths are serializable"),
+        );
+    }
+    Value::Object(object)
+}
+
+pub(crate) fn whats_next_arguments_value(params: &WhatsNextParams) -> Value {
+    let mut object = serde_json::Map::new();
+    if let Some(value) = &params.message {
+        object.insert("message".into(), Value::String(value.clone()));
+    }
+    if let Some(value) = &params.options {
+        object.insert(
+            "options".into(),
+            serde_json::to_value(value).expect("AskOption is serializable"),
+        );
+    }
+    if let Some(value) = &params.files {
+        object.insert(
+            "files".into(),
+            serde_json::to_value(value).expect("file paths are serializable"),
+        );
+    }
+    Value::Object(object)
+}
+
+#[cfg(unix)]
+async fn register_mcp_instance(mcp_instance_id: String, project: String, server_pid: u32) {
+    let parent_pid_hint = Some(unsafe { libc::getppid() } as u32);
+    crate::client::register_mcp_instance(mcp_instance_id, project, server_pid, parent_pid_hint)
+        .await;
+}
+
+#[cfg(not(unix))]
+async fn register_mcp_instance(_mcp_instance_id: String, _project: String, _server_pid: u32) {}
+
+#[cfg(unix)]
+async fn claim_grok_binding(
+    mcp_instance_id: String,
+    project: String,
+    tool_name: String,
+    arguments_sha256: String,
+    server_pid: u32,
+) -> Option<String> {
+    crate::client::claim_grok_binding(
+        mcp_instance_id,
+        project,
+        tool_name,
+        arguments_sha256,
+        server_pid,
+    )
+    .await
+}
+
+#[cfg(not(unix))]
+async fn claim_grok_binding(
+    _mcp_instance_id: String,
+    _project: String,
+    _tool_name: String,
+    _arguments_sha256: String,
+    _server_pid: u32,
+) -> Option<String> {
+    None
 }
 
 /// Errors from [`capture_output`].
@@ -297,9 +800,13 @@ impl ServerHandler for AskServer {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
             "AskHuman bridges the agent and a human operator. Call the `ask` tool whenever you \
-need the human to decide, clarify, review, or approve something; it blocks until they reply.",
+need the human to decide, clarify, review, or approve something; it blocks until they reply. \
+Call the `whats_next` tool after completing the current task and before ending your turn to ask \
+the human what to do next. Call `show_last` after context summarization when exact prior AskHuman \
+details may be missing. Call the `todo_add` tool when the human asks to record a deferred \
+project todo.",
         );
-        // `from_build_env()` 的名字/版本来自 rmcp crate（"rmcp"/"1.7.0"），改成本应用的品牌名与版本。
+        // `from_build_env()` 的名字/版本来自 rmcp crate 自身，改成本应用的品牌名与版本。
         let mut implementation = Implementation::from_build_env();
         implementation.name = "AskHuman".to_string();
         implementation.version = env!("CARGO_PKG_VERSION").to_string();
@@ -346,6 +853,31 @@ fn build_argv(params: &AskParams) -> Vec<String> {
     argv
 }
 
+/// 把 [`WhatsNextParams`] 翻译成 `AskHuman --whats-next` 的 argv（纯函数，便于单测）。
+/// 输出保持文本模式（结果本身就是一段纯文本，spec D3），不追加 `--output json`。
+fn build_whats_next_argv(params: &WhatsNextParams) -> Vec<String> {
+    let mut argv: Vec<String> = Vec::new();
+    if let Some(message) = params.message.as_ref() {
+        if !message.trim().is_empty() {
+            argv.push(message.clone());
+        }
+    }
+    argv.push("--whats-next".to_string());
+    if let Some(options) = params.options.as_ref() {
+        for option in options {
+            argv.push(if option.recommended { "-o!" } else { "-o" }.to_string());
+            argv.push(option.text.clone());
+        }
+    }
+    if let Some(files) = params.files.as_ref() {
+        for f in files {
+            argv.push("-f".to_string());
+            argv.push(f.clone());
+        }
+    }
+    argv
+}
+
 /// 从结果中挑出「可作为 MCP 图片直接返回」的文件，返回 (路径, MIME) 列表。
 fn image_files(result: &AskResult) -> Vec<(PathBuf, &'static str)> {
     let mut out = Vec::new();
@@ -382,9 +914,10 @@ fn image_mime(path: &Path) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::ServiceExt;
     use serde_json::json;
+    use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-    #[cfg(unix)]
     use std::time::Duration;
 
     fn contains_ref(value: &Value) -> bool {
@@ -399,6 +932,178 @@ mod tests {
 
     fn params(json: Value) -> AskParams {
         serde_json::from_value(json).unwrap()
+    }
+
+    fn meta(json: Value) -> Meta {
+        Meta(json.as_object().unwrap().clone())
+    }
+
+    fn codex_meta(turn_metadata: Value) -> Meta {
+        meta(json!({ CODEX_TURN_METADATA_KEY: turn_metadata }))
+    }
+
+    async fn send_json(writer: &mut (impl AsyncWrite + Unpin), value: Value) {
+        writer
+            .write_all(value.to_string().as_bytes())
+            .await
+            .unwrap();
+        writer.write_all(b"\n").await.unwrap();
+        writer.flush().await.unwrap();
+    }
+
+    async fn read_response(reader: &mut (impl AsyncBufRead + Unpin), id: i64) -> Value {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut line = String::new();
+                let bytes = reader.read_line(&mut line).await.unwrap();
+                assert!(bytes > 0, "MCP stream closed before response {id}");
+                let value: Value = serde_json::from_str(&line).unwrap();
+                if value.get("id") == Some(&json!(id)) {
+                    break value;
+                }
+            }
+        })
+        .await
+        .expect("MCP response timeout")
+    }
+
+    #[test]
+    fn codex_system_thread_detection_is_namespaced_exact_and_compatible() {
+        assert!(is_codex_system_thread(&codex_meta(json!({
+            "thread_source": "system"
+        }))));
+        assert!(is_codex_system_thread(&codex_meta(json!(
+            r#"{"thread_source":"system"}"#
+        ))));
+
+        for metadata in [
+            codex_meta(json!({ "thread_source": "user" })),
+            codex_meta(json!({ "thread_source": "automation" })),
+            codex_meta(json!({ "thread_source": "System" })),
+            codex_meta(json!({})),
+            codex_meta(json!("not json")),
+            meta(json!({ "thread_source": "system" })),
+            Meta::default(),
+        ] {
+            assert!(!is_codex_system_thread(&metadata), "{metadata:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn system_thread_metadata_blocks_all_tools_through_rmcp_routing() -> anyhow::Result<()> {
+        let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+        let server_task = tokio::spawn(async move {
+            AskServer::new()
+                .serve(server_transport)
+                .await?
+                .waiting()
+                .await?;
+            anyhow::Ok(())
+        });
+        let (read, mut write) = tokio::io::split(client_transport);
+        let mut reader = BufReader::new(read);
+
+        send_json(
+            &mut write,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "askhuman-test", "version": "0" }
+                }
+            }),
+        )
+        .await;
+        let initialized = read_response(&mut reader, 1).await;
+        assert!(initialized.get("result").is_some());
+        send_json(
+            &mut write,
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        )
+        .await;
+
+        for (offset, (name, arguments)) in [
+            ("ask", json!({ "message": "must not spawn" })),
+            ("whats_next", json!({})),
+            ("show_last", json!({})),
+            // Whitespace is valid at schema decoding time but would fail handler validation.
+            // Receiving the system-thread result proves the guard ran before any todo write.
+            ("todo_add", json!({ "text": " " })),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = offset as i64 + 2;
+            send_json(
+                &mut write,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "tools/call",
+                    "params": {
+                        "_meta": {
+                            CODEX_TURN_METADATA_KEY: { "thread_source": "system" }
+                        },
+                        "name": name,
+                        "arguments": arguments
+                    }
+                }),
+            )
+            .await;
+            let response = read_response(&mut reader, id).await;
+            assert_eq!(
+                response.pointer("/result/isError"),
+                Some(&json!(true)),
+                "{name}"
+            );
+            assert_eq!(
+                response.pointer("/result/content/0/text"),
+                Some(&json!(CODEX_SYSTEM_THREAD_BLOCK_MESSAGE)),
+                "{name}"
+            );
+        }
+
+        for (id, meta) in [
+            (
+                5,
+                Some(json!({
+                    CODEX_TURN_METADATA_KEY: { "thread_source": "user" }
+                })),
+            ),
+            (6, None),
+        ] {
+            let mut params = json!({ "name": "ask", "arguments": {} });
+            if let Some(meta) = meta {
+                params
+                    .as_object_mut()
+                    .expect("tools/call params")
+                    .insert("_meta".into(), meta);
+            }
+            send_json(
+                &mut write,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "tools/call",
+                    "params": params
+                }),
+            )
+            .await;
+            let response = read_response(&mut reader, id).await;
+            assert_eq!(response.pointer("/error/code"), Some(&json!(-32602)));
+            assert_ne!(
+                response.pointer("/error/message"),
+                Some(&json!(CODEX_SYSTEM_THREAD_BLOCK_MESSAGE))
+            );
+        }
+
+        drop(write);
+        drop(reader);
+        server_task.await??;
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -510,6 +1215,271 @@ mod tests {
                 "--output",
                 "json",
             ]
+        );
+    }
+
+    #[test]
+    fn whats_next_argv_message_stays_message() {
+        // Message 是完成报告，不追加 --output json（结果为纯文本，spec D3）。
+        let p: WhatsNextParams =
+            serde_json::from_value(json!({ "message": "All tests pass." })).unwrap();
+        assert_eq!(
+            build_whats_next_argv(&p),
+            vec!["All tests pass.", "--whats-next"]
+        );
+    }
+
+    #[test]
+    fn whats_next_argv_includes_suggested_options() {
+        let p: WhatsNextParams = serde_json::from_value(json!({
+            "message": "All tests pass.",
+            "options": [
+                { "text": "Write docs" },
+                { "text": "Add tests", "recommended": true }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            build_whats_next_argv(&p),
+            vec![
+                "All tests pass.",
+                "--whats-next",
+                "-o",
+                "Write docs",
+                "-o!",
+                "Add tests",
+            ]
+        );
+    }
+
+    #[test]
+    fn whats_next_argv_bare_and_with_files() {
+        let p: WhatsNextParams = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(build_whats_next_argv(&p), vec!["--whats-next"]);
+        let p: WhatsNextParams =
+            serde_json::from_value(json!({ "files": ["/tmp/report.md"] })).unwrap();
+        assert_eq!(
+            build_whats_next_argv(&p),
+            vec!["--whats-next", "-f", "/tmp/report.md"]
+        );
+    }
+
+    #[test]
+    fn whats_next_tool_is_registered() {
+        let server = AskServer::new();
+        assert!(server.tool_router.get("whats_next").is_some());
+    }
+
+    #[test]
+    fn show_last_is_registered_with_zero_public_fields() {
+        let server = AskServer::new();
+        let tool = server.tool_router.get("show_last").unwrap();
+        let schema = Value::Object((*tool.input_schema).clone());
+        assert!(schema
+            .pointer("/properties/__askhuman_session_token_v1")
+            .is_none());
+        assert!(tool
+            .description
+            .as_deref()
+            .unwrap_or("")
+            .contains("context summarization/compaction"));
+    }
+
+    #[test]
+    fn server_instances_and_show_last_scopes_are_strictly_partitioned() {
+        let first = AskServer::new();
+        let second = AskServer::new();
+        assert!(uuid::Uuid::parse_str(&first.mcp_instance_id).is_ok());
+        assert!(uuid::Uuid::parse_str(&second.mcp_instance_id).is_ok());
+        assert_ne!(first.mcp_instance_id, second.mcp_instance_id);
+
+        assert!(matches!(
+            show_last_scope(None, &first.mcp_instance_id, "/p"),
+            crate::show_last::Scope::McpInstance { mcp_instance_id, project }
+                if mcp_instance_id == first.mcp_instance_id && project == "/p"
+        ));
+        assert!(matches!(
+            show_last_scope(
+                Some(crate::context_binding::AgentBinding {
+                    agent_kind: "cursor".into(),
+                    session_id: "conversation".into(),
+                }),
+                &first.mcp_instance_id,
+                "/p",
+            ),
+            crate::show_last::Scope::AgentSession { agent_kind, session_id }
+                if agent_kind == "cursor" && session_id == "conversation"
+        ));
+    }
+
+    #[test]
+    fn public_argument_hash_omits_hidden_token_and_preserves_absence() {
+        let server = AskServer::new();
+        for tool_name in ["ask", "whats_next", "show_last"] {
+            let tool = server.tool_router.get(tool_name).unwrap();
+            let schema = Value::Object((*tool.input_schema).clone());
+            assert!(schema
+                .pointer("/properties/__askhuman_session_token_v1")
+                .is_none());
+        }
+        let params: AskParams = serde_json::from_value(json!({
+            "message": "hello",
+            "__askhuman_session_token_v1": "secret"
+        }))
+        .unwrap();
+        assert_eq!(ask_arguments_value(&params), json!({"message": "hello"}));
+        let params: WhatsNextParams = serde_json::from_value(json!({
+            "message": "done",
+            "__askhuman_session_token_v1": "secret"
+        }))
+        .unwrap();
+        assert_eq!(
+            whats_next_arguments_value(&params),
+            json!({"message": "done"})
+        );
+        assert_eq!(params.session_token.as_deref(), Some("secret"));
+        let params: ShowLastParams = serde_json::from_value(json!({
+            "__askhuman_session_token_v1": "secret"
+        }))
+        .unwrap();
+        assert_eq!(params.session_token.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn codex_binding_accepts_only_uuid_thread_ids() {
+        let valid = "5c2bfe55-f587-4f0f-9671-f02d5259f2e1";
+        assert_eq!(
+            resolve_direct_binding(&meta(json!({"threadId": valid})), None, "show_last"),
+            Some(crate::context_binding::AgentBinding {
+                agent_kind: "codex".into(),
+                session_id: valid.into(),
+            })
+        );
+        assert!(resolve_direct_binding(
+            &meta(json!({"threadId": "not-a-codex-thread"})),
+            None,
+            "show_last"
+        )
+        .is_none());
+        assert_eq!(
+            resolve_direct_binding(
+                &meta(json!({"threadId": format!("  {valid}  ")})),
+                Some("invalid-token"),
+                "ask"
+            ),
+            Some(crate::context_binding::AgentBinding {
+                agent_kind: "codex".into(),
+                session_id: valid.into(),
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_environment_removes_stale_native_sessions_and_sets_only_binding() {
+        async fn configured_env(
+            server: &AskServer,
+            binding: Option<&crate::context_binding::AgentBinding>,
+        ) -> String {
+            let mut command = tokio::process::Command::new("sh");
+            command.args(["-c", "env"]);
+            for kind in [
+                crate::agents::AgentKind::Claude,
+                crate::agents::AgentKind::Codex,
+                crate::agents::AgentKind::Cursor,
+                crate::agents::AgentKind::Grok,
+            ] {
+                command.env(crate::agents::detect::session_id_env_var(kind), "stale");
+            }
+            command
+                .env(crate::cli::MCP_AGENT_KIND_ENV, "stale-kind")
+                .env(crate::cli::MCP_AGENT_SESSION_ID_ENV, "stale-session");
+            server.configure_child(&mut command, binding);
+            String::from_utf8(command.output().await.unwrap().stdout).unwrap()
+        }
+
+        let server = AskServer::new();
+        let binding = crate::context_binding::AgentBinding {
+            agent_kind: "claude".into(),
+            session_id: "current-session".into(),
+        };
+        let bound = configured_env(&server, Some(&binding)).await;
+        assert!(bound.contains(&format!("{}=1\n", crate::cli::FROM_MCP_ENV)));
+        assert!(bound.contains(&format!(
+            "{}={}\n",
+            crate::cli::MCP_INSTANCE_ID_ENV,
+            server.mcp_instance_id
+        )));
+        assert!(bound.contains(&format!("{}=claude\n", crate::cli::MCP_AGENT_KIND_ENV)));
+        assert!(bound.contains(&format!(
+            "{}=current-session\n",
+            crate::cli::MCP_AGENT_SESSION_ID_ENV
+        )));
+        for kind in [
+            crate::agents::AgentKind::Claude,
+            crate::agents::AgentKind::Codex,
+            crate::agents::AgentKind::Cursor,
+            crate::agents::AgentKind::Grok,
+        ] {
+            assert!(!bound.contains(&format!(
+                "{}=stale",
+                crate::agents::detect::session_id_env_var(kind)
+            )));
+        }
+
+        let unbound = configured_env(&server, None).await;
+        assert!(!unbound.contains(&format!("{}=", crate::cli::MCP_AGENT_KIND_ENV)));
+        assert!(!unbound.contains(&format!("{}=", crate::cli::MCP_AGENT_SESSION_ID_ENV)));
+    }
+
+    #[test]
+    fn todo_add_tool_is_registered() {
+        let server = AskServer::new();
+        assert!(server.tool_router.get("todo_add").is_some());
+        let tool = server.tool_router.get("todo_add").unwrap();
+        let schema = Value::Object((*tool.input_schema).clone());
+        assert_eq!(
+            schema.pointer("/properties/text/type"),
+            Some(&json!("string"))
+        );
+        // `Option<bool>` → JSON Schema `["boolean","null"]` (or boolean depending on rmcp/schemars).
+        let auto_type = schema.pointer("/properties/auto/type").cloned();
+        assert!(
+            auto_type == Some(json!("boolean")) || auto_type == Some(json!(["boolean", "null"])),
+            "unexpected auto type: {auto_type:?}"
+        );
+        assert!(tool
+            .description
+            .as_deref()
+            .unwrap_or("")
+            .contains("never for your own work plan"));
+    }
+
+    #[test]
+    fn whats_next_schema_exposes_inline_suggested_options() {
+        let server = AskServer::new();
+        let tool = server.tool_router.get("whats_next").unwrap();
+        let description = tool.description.as_deref().unwrap();
+        assert!(description.contains("End-of-task handoff"));
+        assert!(description.contains("use `ask` for any question"));
+        let schema = Value::Object((*tool.input_schema).clone());
+        let options_description = schema
+            .pointer("/properties/options/description")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(options_description.contains("NEVER include an end, stop, or no-more-work option"));
+        assert!(options_description.contains("AskHuman adds the ending choice"));
+        assert_eq!(
+            schema.pointer("/properties/options/items/type"),
+            Some(&json!("object"))
+        );
+        assert_eq!(
+            schema.pointer("/properties/options/items/properties/text/type"),
+            Some(&json!("string"))
+        );
+        assert_eq!(
+            schema.pointer("/properties/options/items/properties/recommended/type"),
+            Some(&json!("boolean"))
         );
     }
 

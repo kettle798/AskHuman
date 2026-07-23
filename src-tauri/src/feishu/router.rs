@@ -1,9 +1,9 @@
 //! 飞书长连接 Router：进程内独占一条 `FeishuWs`，把事件按 `open_message_id`（卡片回调）/
 //! `open_id`（聊天消息）分发到对应会话。
 //!
-//! 设计与钉钉 `dingtalk::router` 同构：Reader 任务**只**阻塞在 `ws.recv()`，不放进会被取消的
-//! `select`（避免丢消息）；卡片回调遵循 spec §11：收到即**空 ACK**（满足 3 秒），卡片置灰由会话
-//! 经 OpenAPI `patch_card` 完成（提交 toast 因此从略，与「被抢答收尾」走同一条路）。
+//! The Reader task blocks only on `ws.recv()` instead of a cancellable `select`, so callbacks are
+//! not lost. Card callback bodies are decided by the routed session, written by the Router, and
+//! paired with a completion signal for terminal single-process callers.
 //!
 //! 单进程与 Daemon 复用：Daemon 持共享且常热的 Router；单进程每进程起一个仅挂 1 个会话的同款 Router。
 
@@ -26,12 +26,45 @@ const CARD_ACK_TIMEOUT: Duration = Duration::from_millis(2500);
 pub enum FsInbound {
     /// 卡片回调：会话裁决后经 `ack` 回包——`Some(body)` 同步更新卡片（按钮 Loading 直接变终态）、
     /// `None` 回空 ACK（非本卡片/未作答）。由 Router 写回连接（满足飞书 3 秒约束）。
-    Card {
-        data: Value,
-        ack: oneshot::Sender<Option<Value>>,
-    },
+    Card { data: Value, ack: CardAck },
     /// 聊天消息（图片/文件/文字；已被底层 `FeishuWs` 自动 ACK）。
     Message(Value),
+}
+
+/// Response handle for a card callback.
+///
+/// `send` only hands the response body back to the Router. `send_and_wait` additionally waits
+/// until the Router has attempted the WebSocket write, which keeps terminal single-process
+/// callers alive long enough to acknowledge the platform callback.
+pub struct CardAck {
+    response: oneshot::Sender<Option<Value>>,
+    write_complete: oneshot::Receiver<()>,
+}
+
+impl CardAck {
+    fn new(
+        response: oneshot::Sender<Option<Value>>,
+        write_complete: oneshot::Receiver<()>,
+    ) -> Self {
+        Self {
+            response,
+            write_complete,
+        }
+    }
+
+    pub fn send(self, body: Option<Value>) -> Result<(), Option<Value>> {
+        self.response.send(body)
+    }
+
+    pub async fn send_and_wait(self, body: Option<Value>) -> Result<(), Option<Value>> {
+        let Self {
+            response,
+            write_complete,
+        } = self;
+        response.send(body)?;
+        let _ = tokio::time::timeout(CARD_ACK_TIMEOUT, write_complete).await;
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -193,23 +226,34 @@ async fn reader_task(mut ws: FeishuWs, routes: Arc<Mutex<Routes>>, alive: Arc<At
                 };
                 // 转发给会话并带 oneshot 回执；超时等其裁决后回包（满足 3 秒）。会话回 Some(body)
                 // → 同步更新卡片（按钮丝滑变终态）；None / 孤儿 / 超时 → 空 ACK。
-                let resp = match sink {
+                let (resp, write_complete) = match sink {
                     Some(tx) => {
                         let (ack_tx, ack_rx) = oneshot::channel();
-                        if tx.send(FsInbound::Card { data, ack: ack_tx }).is_ok() {
-                            match tokio::time::timeout(CARD_ACK_TIMEOUT, ack_rx).await {
+                        let (write_tx, write_rx) = oneshot::channel();
+                        if tx
+                            .send(FsInbound::Card {
+                                data,
+                                ack: CardAck::new(ack_tx, write_rx),
+                            })
+                            .is_ok()
+                        {
+                            let body = match tokio::time::timeout(CARD_ACK_TIMEOUT, ack_rx).await {
                                 Ok(Ok(body)) => body,
                                 _ => None,
-                            }
+                            };
+                            (body, Some(write_tx))
                         } else {
-                            None
+                            (None, None)
                         }
                     }
-                    None => None,
+                    None => (None, None),
                 };
                 match resp {
                     Some(body) => ws.respond_card(&frame, &body).await,
                     None => ws.respond_ack(&frame).await,
+                }
+                if let Some(write_complete) = write_complete {
+                    let _ = write_complete.send(());
                 }
             }
             WsEvent::Message(event) => {
@@ -245,4 +289,31 @@ fn dispatch_observers(routes: &Arc<Mutex<Routes>>, event: &Value) {
         return;
     }
     r.observers.retain(|tx| tx.send(event.clone()).is_ok());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CardAck;
+    use serde_json::json;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn terminal_ack_waits_for_websocket_write() {
+        let (response_tx, response_rx) = oneshot::channel();
+        let (write_tx, write_rx) = oneshot::channel();
+        let ack = CardAck::new(response_tx, write_rx);
+        let payload = Some(json!({ "card": "final" }));
+
+        let waiter = tokio::spawn({
+            let payload = payload.clone();
+            async move { ack.send_and_wait(payload).await }
+        });
+
+        assert_eq!(response_rx.await.unwrap(), payload);
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        write_tx.send(()).unwrap();
+        assert!(waiter.await.unwrap().is_ok());
+    }
 }

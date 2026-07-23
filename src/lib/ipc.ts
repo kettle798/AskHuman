@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentsInit,
   AppConfig,
+  ChannelIssue,
   DingTalkDetectArgs,
   DingTalkTestArgs,
   DingTalkWaitArgs,
@@ -20,11 +21,16 @@ import type {
   HookStatus,
   InterjectInit,
   LifecycleStatus,
+  NewTaskInit,
+  NewTaskProject,
   PopupInit,
+  PermissionDiffModel,
   PopupSoundSupport,
   PushedAgent,
   PushedUpdateState,
   RuleStatus,
+  PermissionRulesOp,
+  PermissionRulesResult,
   PopupSubmission,
   ProjectInfo,
   SecretActions,
@@ -34,11 +40,18 @@ import type {
   SlackWaitArgs,
   TelegramTestArgs,
   ThemeMode,
+  TodoDoneEntry,
+  TodoEntry,
+  TodoProjectInfo,
+  TodosInit,
   UpdateInfo,
   WindowEffect,
 } from "./types";
 
 export const popupInit = () => invoke<PopupInit>("popup_init");
+
+export const enrichPermissionDiff = (requestId: string) =>
+  invoke<PermissionDiffModel>("enrich_permission_diff", { requestId });
 
 /** 上报一个前端性能埋点（`stage` + 前端 epoch ms 时间戳）；埋点关闭时后端为 no-op。 */
 export const perfMark = (stage: string, ts: number) =>
@@ -52,7 +65,7 @@ export const popupAgentTerminal = (pid: number) =>
 export const popupAgentResolved = () =>
   invoke<PushedAgent>("popup_agent_resolved");
 
-/** 方案6：预热弹窗把本次请求内容绘制完成后调用，让后端把隐藏的窗口上屏（延后 show，杜绝闪现）。 */
+/** Report that popup content is ready; daemon authorizes foreground or background presentation. */
 export const popupShowWindow = () => invoke<void>("popup_show_window");
 
 export const submitPopup = (submission: PopupSubmission) =>
@@ -87,6 +100,10 @@ export const showAttachmentMenu = (path: string) =>
 
 export const getSettings = () => invoke<SettingsPayload>("get_settings");
 
+/** Codex 权限授权管理面板（spec codex-permission-remember §6.3）：全部操作经 daemon 完成。 */
+export const permissionRulesPanel = (op: PermissionRulesOp) =>
+  invoke<PermissionRulesResult>("permission_rules_panel", { op });
+
 export const saveSettings = (config: AppConfig, secretActions: SecretActions) =>
   invoke<void>("save_settings", { config, secretActions });
 
@@ -110,6 +127,13 @@ export const agentTaskTestTerminal = () =>
 export const getPrompt = (variant?: "cli" | "mcp") =>
   invoke<string>("get_prompt", { variant });
 
+export const collaborationStyleDefaults = () =>
+  invoke<{ aligned: string; autonomous: string }>("collaboration_style_defaults");
+
+/** Rewrite rules/skill for every agent with an enabled integration mode. */
+export const collaborationStyleApplyIntegrations = () =>
+  invoke<void>("collaboration_style_apply_integrations");
+
 export const openTestPopup = () => invoke<void>("open_test_popup");
 
 export const popupSoundSupport = () =>
@@ -124,7 +148,14 @@ export const setTheme = (theme: ThemeMode) =>
 export const updateTheme = (theme: ThemeMode) =>
   invoke<void>("update_theme", { theme });
 
-export const openSettings = () => invoke<void>("open_settings");
+export const openSettings = (tab?: string) =>
+  invoke<void>("open_settings", { tab: tab ?? null });
+
+export const popupImTipVisible = () =>
+  invoke<boolean>("popup_im_tip_visible");
+
+export const popupImTipDismiss = () =>
+  invoke<void>("popup_im_tip_dismiss");
 
 export const openHistory = () => invoke<void>("open_history");
 
@@ -328,5 +359,105 @@ export const updateDismiss = (version: string) =>
 
 export const restartSettings = () => invoke<void>("restart_settings");
 
+/** 渠道健康快照（R7）：各渠道最近未恢复的故障；daemon 未运行返回空。 */
+export const channelHealth = () =>
+  invoke<ChannelIssue[]>("channel_health");
+
 export const popupUpdateState = () =>
   invoke<PushedUpdateState>("popup_update_state");
+
+// ===== 项目级待办队列（spec todo-whats-next D7/D9）：直读直写 todos.json =====
+
+export const todosList = (project: string) =>
+  invoke<TodoEntry[]>("todos_list", { project });
+
+export const todosAdd = (project: string, text: string, auto = false) =>
+  invoke<TodoEntry | null>("todos_add", { project, text, auto });
+
+/** 切换自动执行标记；返回新状态（条目不存在返回 null）。 */
+export const todosSetAuto = (project: string, id: string, auto: boolean) =>
+  invoke<boolean | null>("todos_set_auto", { project, id, auto });
+
+/** Update pending todo text (GUI double-click edit). Returns stored text or null. */
+export const todosSetText = (project: string, id: string, text: string) =>
+  invoke<string | null>("todos_set_text", { project, id, text });
+
+export const todosRemove = (project: string, id: string) =>
+  invoke<boolean>("todos_remove", { project, id });
+
+/** GUI 勾选完成：出队并写入执行历史（与 whats-next take 同路径）。 */
+export const todosComplete = (project: string, id: string) =>
+  invoke<boolean>("todos_complete", { project, id });
+
+export const todosClear = (project: string) =>
+  invoke<number>("todos_clear", { project });
+
+/** 拖拽排序（GUI 待办窗口）：按给定 id 顺序重排。 */
+export const todosReorder = (project: string, ids: string[]) =>
+  invoke<boolean>("todos_reorder", { project, ids });
+
+/** 清空本项目的执行历史。 */
+export const todosHistoryClear = (project: string) =>
+  invoke<number>("todos_history_clear", { project });
+
+/** 执行历史（最新在前）。 */
+export const todosHistory = (project: string) =>
+  invoke<TodoDoneEntry[]>("todos_history", { project });
+
+/** 从历史一键恢复回待办队列末尾。 */
+export const todosRestore = (project: string, id: string) =>
+  invoke<boolean>("todos_restore", { project, id });
+
+/** 待办窗口初始化：主题 + 语言。 */
+export const todosInit = () => invoke<TodosInit>("todos_init");
+
+/** 待办窗口项目选择器（本地快路径：有待办 ∪ 最近 workspace，不连 daemon）。 */
+export const todosProjects = () =>
+  invoke<TodoProjectInfo[]>("todos_projects");
+
+/** 在本地列表上合并活跃 agent 项目；前端首屏后后台调用。 */
+export const todosProjectsEnriched = () =>
+  invoke<TodoProjectInfo[]>("todos_projects_enriched");
+
+/** 打开（或聚焦）项目待办窗口（经统一宿主路由，全局单窗）；`dir` 为预选项目定位目录。 */
+export const openTodos = (dir: string | null) =>
+  invoke<void>("open_todos", { dir });
+
+// ===== 「新建 Agent 任务」窗口（spec gui-agent-task-launch）=====
+
+/** 打开（或聚焦）新建任务窗口；可带预选项目 key 与待办 id（待办行入口）。 */
+export const openNewTask = (project?: string | null, todo?: string | null) =>
+  invoke<void>("open_new_task", { project: project ?? null, todo: todo ?? null });
+
+/** 新建任务窗口初始化：主题 + 语言 + 提交快捷键 + 权限选择方式。 */
+export const newTaskInit = () => invoke<NewTaskInit>("new_task_init");
+
+/** 项目候选（本地快路径：workspace 索引 + 待办项目）。 */
+export const newTaskProjects = () =>
+  invoke<NewTaskProject[]>("new_task_projects");
+
+/** 项目候选（含四家有界冷扫描合并）；首屏后后台调用。 */
+export const newTaskProjectsRefreshed = () =>
+  invoke<NewTaskProject[]>("new_task_projects_refreshed");
+
+/** 目录 → 项目 key（git 根，回退自身）；按所选 workspace 读取所属项目待办。 */
+export const projectKeyOf = (dir: string) =>
+  invoke<string>("project_key_of", { dir });
+
+/** 启动新任务（LaunchRecord + Terminal.app 链路）；成功后所选待办按快照出队。 */
+export const newTaskLaunch = (payload: {
+  workspace: string;
+  kind: string;
+  permission: "agent-default" | "yolo";
+  task: string;
+  todoProject?: string | null;
+  todoId?: string | null;
+}) =>
+  invoke<void>("new_task_launch", {
+    workspace: payload.workspace,
+    kind: payload.kind,
+    permission: payload.permission,
+    task: payload.task,
+    todoProject: payload.todoProject ?? null,
+    todoId: payload.todoId ?? null,
+  });

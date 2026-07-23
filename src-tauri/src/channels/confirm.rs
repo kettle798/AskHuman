@@ -61,7 +61,7 @@ fn final_status(entry: &ConfirmEntry, lang: Lang) -> String {
                 .presentation
                 .input()
                 .is_some_and(|input| input.max_chars > 1000);
-            match (task_input, lang, denied) {
+            let mut status = match (task_input, lang, denied) {
                 (true, Lang::Zh, true) => format!("已通过 {source} 取消"),
                 (true, Lang::Zh, false) => format!("已通过 {source} 提交"),
                 (true, Lang::En, true) => format!("Cancelled via {source}"),
@@ -70,7 +70,18 @@ fn final_status(entry: &ConfirmEntry, lang: Lang) -> String {
                 (false, Lang::Zh, false) => format!("已通过 {source} 允许"),
                 (false, Lang::En, true) => format!("Denial decision submitted via {source}"),
                 (false, Lang::En, false) => format!("Allowed via {source}"),
+            };
+            // Remember choice degraded to allow-once because persisting failed (D25).
+            if entry
+                .memory_save_failed
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                status.push_str(match lang {
+                    Lang::Zh => "（本次已允许，但未能保存授权）",
+                    Lang::En => " (allowed this time, but saving the grant failed)",
+                });
             }
+            status
         }
         Some(ConfirmTerminalKind::Fallback(ConfirmFallbackReason::Expired)) => match lang {
             Lang::Zh => "请求已过期".to_string(),
@@ -122,6 +133,7 @@ async fn keep_feishu_tombstone(
     events.clear_active(Some(&message_id), &target);
 }
 
+#[allow(clippy::too_many_arguments)] // one-shot task spawner; args mirror the tombstone card fields
 async fn keep_slack_tombstone(
     mut events: crate::slack::router::RoutedSl,
     client: crate::slack::client::SlackClient,
@@ -214,12 +226,20 @@ async fn keep_dingtalk_tombstone(
 }
 
 fn dingtalk_param_map(request: &crate::models::ConfirmRequest, lang: Lang) -> serde_json::Value {
-    let task_input = request
-        .presentation
-        .input()
-        .is_some_and(|input| input.max_chars > 1000);
+    let task_input = choice_cards::is_task_input_form(request);
+    let task_choice_indices = choice_cards::task_choice_indices(request);
     let options: Vec<crate::models::OptionItem> = if task_input {
-        Vec::new()
+        task_choice_indices
+            .iter()
+            .map(|index| {
+                let choice = &request.choices[*index];
+                if choice.id.starts_with("todo:") {
+                    crate::models::OptionItem::with_todo(choice.label.clone(), choice.id.clone())
+                } else {
+                    crate::models::OptionItem::new(choice.label.clone(), *index == 0)
+                }
+            })
+            .collect()
     } else {
         request
             .choices
@@ -259,7 +279,7 @@ fn dingtalk_param_map(request: &crate::models::ConfirmRequest, lang: Lang) -> se
     } else {
         choice_cards::compact_tool_markdown(request, 12_000, lang)
     };
-    let mut public = crate::dingtalk::card::build_card_param_map(
+    let mut public = crate::dingtalk::card::build_card_param_map_with_todo(
         &request.title,
         &markdown,
         &options,
@@ -270,6 +290,8 @@ fn dingtalk_param_map(request: &crate::models::ConfirmRequest, lang: Lang) -> se
         } else {
             "[Recommended]"
         },
+        crate::i18n::tr(lang, "whatsNext.todoPrefix"),
+        crate::i18n::tr(lang, "channel.dingtalkTodo"),
     );
     if let Some(map) = public.as_object_mut() {
         if !task_input {
@@ -326,11 +348,7 @@ pub fn start_dingtalk(
             }
         };
         let target = client.user_id().to_string();
-        let task_input = entry
-            .request
-            .presentation
-            .input()
-            .is_some_and(|input| input.max_chars > 1000);
+        let task_input = choice_cards::is_task_input_form(&entry.request);
         let template = if task_input {
             crate::channels::dingding::effective_template_id(&config)
         } else {
@@ -639,10 +657,13 @@ pub fn start_slack(
                         let thread = event.get("thread_ts").and_then(|value| value.as_str()).unwrap_or("");
                         let text = event.get("text").and_then(|value| value.as_str()).unwrap_or("").trim();
                         if actor == target && thread == message_id && !text.is_empty() {
-                            let input_index = entry.request.choice_form_view().default_index
+                            let input_index = entry.request.presentation.input()
+                                .filter(|input| input.always_visible)
+                                .and(selected)
+                                .or_else(|| entry.request.choice_form_view().default_index)
                                 .unwrap_or_else(|| entry.request.dismiss_index());
-                            let max_chars = entry.request.presentation.input()
-                                .map(|input| input.max_chars).unwrap_or(1000);
+                            let max_chars = entry.request.input_max_chars_for_choice(input_index)
+                                .unwrap_or(1000);
                             let extra = usize::from(!comment.is_empty());
                             if comment.chars().count() + extra + text.chars().count() <= max_chars {
                                 if !comment.is_empty() { comment.push('\n'); }
@@ -701,11 +722,13 @@ pub fn start_telegram(
         let mut comment = String::new();
         let mut events = router.register();
         let initial = choice_cards::telegram_html(&entry.request, selected, &comment, None, lang);
-        let force_reply = entry
-            .request
-            .presentation
-            .input()
-            .is_some_and(|input| input.max_chars > 1000);
+        let force_reply = choice_cards::is_task_input_form(&entry.request)
+            && entry
+                .request
+                .presentation
+                .input()
+                .is_some_and(|input| input.requires_value());
+        let direct_task_confirmation = choice_cards::is_direct_task_confirmation(&entry.request);
         let keyboard = if force_reply {
             serde_json::json!({
                 "force_reply": true,
@@ -785,11 +808,32 @@ pub fn start_telegram(
                         let callback_id = callback.get("id").and_then(|value| value.as_str()).unwrap_or("");
                         let data = callback.get("data").and_then(|value| value.as_str()).unwrap_or("");
                         match choice_cards::parse_telegram_callback(data) {
-                            Some(choice_cards::TelegramAction::Decide(index)) if index < entry.request.choices.len() => {
-                                selected = Some(index);
+                            // D14: option taps only update the draft; the explicit
+                            // submit callback is the sole path into submit_wire.
+                            // Exception: the force-reply task form's only inline button
+                            // is the dedicated cancel escape hatch, which stays one-tap.
+                            Some(choice_cards::TelegramAction::Select(index)) if index < entry.request.choices.len() => {
                                 client.answer_callback_query(callback_id).await;
-                                if entry.coordinator.submit_wire(index, Some(comment.clone()), channel).is_ok() { break; }
+                                if force_reply || direct_task_confirmation {
+                                    selected = Some(index);
+                                    if entry.coordinator.submit_wire(index, Some(comment.clone()), channel).is_ok() { break; }
+                                } else if selected != Some(index) {
+                                    selected = Some(index);
+                                    let keyboard = choice_cards::telegram_keyboard(&entry.request, selected);
+                                    let html = choice_cards::telegram_html(&entry.request, selected, &comment, None, lang);
+                                    let _ = client.edit_message_text(message_id, &html, Some("HTML"), Some(keyboard)).await;
+                                }
                             }
+                            Some(choice_cards::TelegramAction::Submit) => match selected {
+                                Some(index) if !force_reply => {
+                                    client.answer_callback_query(callback_id).await;
+                                    if entry.coordinator.submit_wire(index, Some(comment.clone()), channel).is_ok() { break; }
+                                }
+                                _ => {
+                                    let text = if lang == Lang::Zh { "请先选择一个选项。" } else { "Select an option first." };
+                                    client.answer_callback_query_alert(callback_id, text).await;
+                                }
+                            },
                             None => client.answer_callback_query(callback_id).await,
                             _ => client.answer_callback_query(callback_id).await,
                         }
@@ -797,14 +841,17 @@ pub fn start_telegram(
                     Some(crate::telegram::router::TgInbound::Text { text, reply_to_message_id, .. }) => {
                         if reply_to_message_id == Some(message_id) {
                             let text = text.trim();
-                            let max_chars = entry.request.presentation.input()
-                                .map(|input| input.max_chars).unwrap_or(1000);
+                            let input_index = entry.request.presentation.input()
+                                .filter(|input| input.always_visible)
+                                .and(selected)
+                                .or_else(|| entry.request.choice_form_view().default_index)
+                                .unwrap_or_else(|| entry.request.dismiss_index());
+                            let max_chars = entry.request.input_max_chars_for_choice(input_index)
+                                .unwrap_or(1000);
                             let extra = usize::from(!comment.is_empty());
                             if !text.is_empty() && comment.chars().count() + extra + text.chars().count() <= max_chars {
                                 if !comment.is_empty() { comment.push('\n'); }
                                 comment.push_str(text);
-                                let input_index = entry.request.choice_form_view().default_index
-                                    .unwrap_or_else(|| entry.request.dismiss_index());
                                 selected = Some(input_index);
                                 if force_reply {
                                     if entry.coordinator.submit_wire(input_index, Some(comment.clone()), channel).is_ok() { break; }
@@ -973,6 +1020,9 @@ mod tests {
                 input: Some(ConfirmInput {
                     id: "task".into(),
                     visible_when_action_id: "start".into(),
+                    always_visible: false,
+                    required: true,
+                    prefix_chars_by_action_id: Default::default(),
                     label: "Task".into(),
                     placeholder: "Describe".into(),
                     max_chars: 3000,
@@ -999,5 +1049,29 @@ mod tests {
         assert!(markdown.contains(
             "\n- <font sizeToken=common_footnote_text_style__font_size>**Agent:** Codex</font>"
         ));
+
+        let mut todo_request = request.clone();
+        todo_request.choices.insert(
+            1,
+            ConfirmChoice {
+                id: "todo:1".into(),
+                label: "Run todo: ⚡ Project TODO".into(),
+                description: String::new(),
+                role: crate::confirm::ActionRole::Default,
+            },
+        );
+        let input = match &mut todo_request.presentation {
+            ConfirmPresentation::SingleSelectSubmit { input, .. } => input.as_mut().unwrap(),
+        };
+        input.always_visible = true;
+        let todo_payload = dingtalk_param_map(&todo_request, Lang::En);
+        let options: serde_json::Value =
+            serde_json::from_str(todo_payload["options"].as_str().unwrap()).unwrap();
+        assert_eq!(options.as_array().unwrap().len(), 2);
+        assert!(options[0]["md"].as_str().unwrap().contains("Recommended"));
+        assert!(options[1]["md"].as_str().unwrap().contains("Project TODO"));
+        assert!(options[1]["md"].as_str().unwrap().contains("【TODO】"));
+        assert!(!options[1]["md"].as_str().unwrap().contains("Run todo:"));
+        assert!(!todo_payload["options"].as_str().unwrap().contains("Cancel"));
     }
 }

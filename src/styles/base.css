@@ -19,11 +19,18 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
-/* macOS 毛玻璃：窗口透明，正文叠一层主题色罩加深玻璃 */
-.vibrancy body {
+/* macOS translucent materials use a themed tint over the native effect. */
+.material-translucent body {
   background: var(--vibrancy-tint);
 }
+/* Solid covers the full WebView even if the native window backing cannot be updated. */
+.material-solid body,
+.material-solid #app {
+  background: var(--bg);
+}
+/* Default keyboard focus. Controls that set their own box-shadow (elevation)
+   must re-compose with var(--focus-ring) in :focus-visible, or this ring is lost. */
 :focus-visible {
   outline: none;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+  box-shadow: var(--focus-ring);
 }
